@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Znero International — SMS Switching Platform</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<script>
+			(function () {
+				try {
+					var stored = localStorage.getItem('znero_theme');
+					var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+					if (stored === 'dark' || (!stored && prefersDark)) {
+						document.documentElement.classList.add('dark');
+					} else {
+						document.documentElement.classList.remove('dark');
+					}
+				} catch (e) {}
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body class="bg-slate-50 text-slate-900 antialiased transition-colors duration-150 dark:bg-slate-950 dark:text-slate-100">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

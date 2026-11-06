@@ -1,0 +1,6 @@
+# DEV SAMPLE - NOT FOR PRODUCTION USE - FICTIONAL MCC/MNC SAMPLE DATA FOR LOCAL TESTING
+iso2,name,brand_name,parent_company,mcc,mnc,network_technology,data_source
+US,Dev Sample Wireless North,DevWireless,Dev Telecom Holdings,310,999,4G|5G,DEV-SAMPLE-FICTIONAL
+GB,Dev Sample Mobile UK,DevMobile,Dev Mobile Group,234,999,3G|4G|5G,DEV-SAMPLE-FICTIONAL
+DE,Dev Sample Cellular DE,DevCell,Dev European Networks,262,999,4G|5G,DEV-SAMPLE-FICTIONAL
+BD,Dev Sample Telecom BD,DevTel,Dev South Asia Group,470,999,2G|3G|4G,DEV-SAMPLE-FICTIONAL

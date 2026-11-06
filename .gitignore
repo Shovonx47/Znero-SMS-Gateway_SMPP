@@ -1,0 +1,37 @@
+# Environment & Secrets (NEVER commit)
+.env
+.env.*
+!.env.example
+
+# Go build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+build/
+.vite/
+
+# Dynamic runtime uploads
+backend/data/uploads/
+data/uploads/
+!data/uploads/.gitkeep
+!backend/data/uploads/.gitkeep
+
+# Logs & temporary files
+.run/
+*.log
+tmp/
+test-results/
+playwright-report/
+.DS_Store
+Thumbs.db
