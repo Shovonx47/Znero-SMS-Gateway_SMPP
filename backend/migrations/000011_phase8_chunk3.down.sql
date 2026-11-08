@@ -10,3 +10,4 @@ DROP TABLE IF EXISTS settlement_exceptions;
 DROP TABLE IF EXISTS unmatched_dlrs;
 DROP TABLE IF EXISTS provider_connection_dlr_mappings_history;
 DROP TABLE IF EXISTS provider_connection_dlr_mappings;
+
