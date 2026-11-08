@@ -101,11 +101,23 @@ Seeds clearly labeled fictional `DEV SAMPLE` route plans (Priority and Least Cos
 Start Kafka (KRaft), the Go backend API, and the SvelteKit frontend in one command:
 ```powershell
 .\scripts\dev.ps1
+# Or include the Mock SMPP SMSC simulator:
+.\scripts\dev.ps1 -WithSmppMock
 ```
 This script starts all components, waits for the backend `/readyz` probe to report readiness, and displays clickable URLs:
 - **Frontend Web UI**: [http://localhost:5173](http://localhost:5173)
   - **Countries**: [http://localhost:5173/master-data/countries](http://localhost:5173/master-data/countries)
   - **Operators**: [http://localhost:5173/master-data/operators](http://localhost:5173/master-data/operators)
+
+### Standalone SMPP Mock SMSC Simulator
+For protocol testing and development against upstream carrier simulators without starting the full web stack:
+```powershell
+# Default listener on 127.0.0.1:2775 (system_id: mock_smsc, password: mock_pass)
+.\scripts\run-smpp-mock.ps1
+
+# Custom error injection (e.g. ESME_RTHROTTLED 0x58) and delayed DLRs:
+.\scripts\run-smpp-mock.ps1 -Addr "127.0.0.1:2775" -ErrorCode "0x58" -DlrMode "delayed"
+```
   - **Number Prefixes**: [http://localhost:5173/master-data/prefixes](http://localhost:5173/master-data/prefixes)
   - **Pending Approvals**: [http://localhost:5173/pending-changes](http://localhost:5173/pending-changes)
   - **Wallets & Balances**: [http://localhost:5173/wallets](http://localhost:5173/wallets)

@@ -205,6 +205,8 @@ znero-international/
 │   │   ├── ledger/                 # Double-entry ledger, holds, maker-checker & wallets
 │   │   ├── billing/                # Invoices, gap-free sequences, lines & payments
 │   │   ├── routing/                # In-memory routing engine, snapshot, strategies, rules & kill switch
+│   │   ├── messaging/              # Message ingestion, partitioned storage, outbox dispatcher & state machine
+│   │   ├── smpp/                   # Clean-room SMPP 3.4 PDU codec, session manager, SSRF dialer & mock SMSC
 │   │   └── system/                 # Database schema & version metadata
 │   ├── migrations/                 # Up/Down SQL migrations (golang-migrate)
 │   │   ├── 000001_create_schema_info.*
@@ -215,7 +217,8 @@ znero-international/
 │   │   ├── 000006_phase4_providers_customers_credentials.*
 │   │   ├── 000007_phase5_rating_billing_preflight.*
 │   │   ├── 000008_phase6_wallets_ledger_billing.*
-│   │   └── 000009_phase7_routing.*
+│   │   ├── 000009_phase7_routing.*
+│   │   └── 000010_phase8_messaging.*
 │   └── pkg/                        # Reusable domain-agnostic packages
 │       ├── crypto/encrypt/         # AES-256-GCM encryption
 │       ├── crypto/password/        # Argon2id password hashing

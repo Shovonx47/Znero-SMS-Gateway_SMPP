@@ -32,6 +32,16 @@ if (Test-Path -LiteralPath $frontendPidFile) {
     }
     Remove-Item -LiteralPath $frontendPidFile -Force -ErrorAction SilentlyContinue
 }
+
+# 2b. Stop Mock SMPP SMSC
+$smppPidFile = Join-Path $script:RunDir 'smppmock.pid'
+if (Test-Path -LiteralPath $smppPidFile) {
+    $sPid = Get-Content -LiteralPath $smppPidFile -ErrorAction SilentlyContinue
+    if ($sPid) {
+        Stop-Process -Id ([int]$sPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $smppPidFile -Force -ErrorAction SilentlyContinue
+}
 # Kill any node processes listening on frontend port (5173)
 $uiPort = [int](Get-Setting 'FRONTEND_PORT' '5173')
 $netstat = netstat -ano | Select-String ":$uiPort\s+.*LISTENING\s+(\d+)"

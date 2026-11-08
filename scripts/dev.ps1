@@ -7,7 +7,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Foreground
+    [switch]$Foreground,
+    [switch]$WithSmppMock
 )
 
 . "$PSScriptRoot\_common.ps1"
@@ -42,6 +43,12 @@ Set-Content -LiteralPath (Join-Path $script:RunDir 'backend.pid') -Value $backen
 Write-Host "Launching Frontend UI..." -ForegroundColor Gray
 $frontendProc = Start-Process -FilePath $shell -ArgumentList ($common + @("`"$(Join-Path $PSScriptRoot 'run-frontend.ps1')`"")) -PassThru
 Set-Content -LiteralPath (Join-Path $script:RunDir 'frontend.pid') -Value $frontendProc.Id
+
+if ($WithSmppMock) {
+    Write-Host "Launching Mock SMPP SMSC..." -ForegroundColor Gray
+    $mockProc = Start-Process -FilePath $shell -ArgumentList ($common + @("`"$(Join-Path $PSScriptRoot 'run-smpp-mock.ps1')`"")) -PassThru
+    Set-Content -LiteralPath (Join-Path $script:RunDir 'smppmock.pid') -Value $mockProc.Id
+}
 
 # 4. Wait for Backend /readyz probe
 $apiPort = Get-Setting 'APP_PORT' '8080'

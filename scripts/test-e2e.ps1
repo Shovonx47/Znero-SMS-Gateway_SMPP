@@ -62,19 +62,23 @@ if ($existingPort8080) {
 
 # 5. Start Backend API server targeting znero_test
 Write-Host "Starting isolated backend API server targeting znero_test on port 8080..." -ForegroundColor Cyan
-$backendProc = Start-Process -FilePath "go" -ArgumentList "run ./cmd/api" -WorkingDirectory (Join-Path $script:RepoRoot 'backend') -Environment @{
-    DATABASE_URL = $testDbUrl
-    APP_ENV = "development"
-    PORT = "8080"
-} -PassThru
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "go"
+$psi.Arguments = "run ./cmd/api"
+$psi.WorkingDirectory = (Join-Path $script:RepoRoot 'backend')
+$psi.EnvironmentVariables["DATABASE_URL"] = $testDbUrl
+$psi.EnvironmentVariables["APP_ENV"] = "development"
+$psi.EnvironmentVariables["PORT"] = "8080"
+$psi.UseShellExecute = $false
+$backendProc = [System.Diagnostics.Process]::Start($psi)
 
 # Wait for backend health
 $healthy = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
     try {
-        $res = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/v1/health" -Method Get -TimeoutSec 2 -ErrorAction Stop
-        if ($res.status -eq 'healthy' -or $res.status -eq 'degraded') {
+        $res = Invoke-RestMethod -Uri "http://127.0.0.1:8080/healthz" -Method Get -TimeoutSec 2 -ErrorAction Stop
+        if ($res.success -or ($res.data -and ($res.data.status -eq 'ok' -or $res.data.status -eq 'up')) -or $res.status -eq 'ok') {
             $healthy = $true
             break
         }
@@ -95,7 +99,7 @@ $frontendRunning = Test-TcpPort -HostName '127.0.0.1' -Port 5173
 $frontendProc = $null
 if (-not $frontendRunning) {
     Write-Host "Starting frontend dev server on port 5173..." -ForegroundColor Cyan
-    $frontendProc = Start-Process -FilePath "npm" -ArgumentList "run dev" -WorkingDirectory (Join-Path $script:RepoRoot 'frontend') -PassThru
+    $frontendProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm run dev" -WorkingDirectory (Join-Path $script:RepoRoot 'frontend') -PassThru
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-TcpPort -HostName '127.0.0.1' -Port 5173) {

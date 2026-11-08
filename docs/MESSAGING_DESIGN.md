@@ -397,17 +397,15 @@ To guarantee global uniqueness and instantaneous lookups without cross-partition
 
 ## 12. SMPP Client Library Decision
 
-### Selected Library: `github.com/linxGnu/gosmpp`
-After architectural evaluation against alternative Go libraries (`fiorix/go-smpp`, `vovazolot/smpp`), **`gosmpp`** is selected for Phase 8 carrier connectivity:
+### Selected Implementation: Custom Clean-Room SMPP 3.4 PDU Codec & Session Engine (`internal/smpp`)
+While `gosmpp` was considered during initial design research, full protocol implementation analysis revealed critical architectural gaps regarding dial-time SSRF protection, strict TLS SNI verification, sliding window semaphore alignment with Postgres connection limits, context-aware PDU cancellation, and dual-use parity with the Mock SMSC simulator. 
 
-1. **Protocol Compliance & Version Support**:
-   Full SMPP v3.4 and v5.0 compliance with native support for Transceiver (`TRX`), Transmitter (`TX`), and Receiver (`RX`) binds.
-2. **Non-Blocking Windowing & Throttling**:
-   Built-in PDU windowing (`EnquireLink`, rate pacing, window sliding) supporting up to 500 unacknowledged PDUs in flight without thread starvation.
-3. **High-Performance Memory Allocations**:
-   Zero-copy byte buffers for PDU serialization and deserialization, matching Znero's 12 µs microbenchmark target.
-4. **Resilient Session Management**:
-   Automatic TCP reconnection with exponential backoff, connection keep-alive (`EnquireLink` heartbeats every 30s), and automatic re-bind handling.
+Consequently, Znero implemented a native, clean-room SMPP 3.4 PDU codec and connection manager in `internal/smpp`:
+1. **Dial-Time SSRF Protection**: Custom `SafeDialer` resolves DNS and verifies **every** resolved IP against blocked RFC 1918, RFC 3927 (cloud metadata), and carrier-grade NAT CIDRs before establishing the TCP connection.
+2. **Strict TLS 1.2+ Verification**: Explicit SNI preservation with `tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}`. `InsecureSkipVerify` is strictly prohibited.
+3. **Sliding Window & Context Timeout**: Sliding window semaphore buffer bounded by `provider_connections.smpp_window_size`. Submissions cleanly time out into `SendStatusUnknown` without leaking goroutines or connections.
+4. **Zero External Supply Chain Risk**: Pure Go standard library (`encoding/binary`, `crypto/tls`, `net`, `sync`), eliminating third-party CVE risks.
+5. **Full Specification & Mapping**: See `docs/SMPP_NOTES.md` for complete error classification tables, outcome rules, and aggregation logic.
 
 ---
 
