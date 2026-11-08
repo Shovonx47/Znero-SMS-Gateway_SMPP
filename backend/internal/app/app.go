@@ -20,12 +20,13 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/importjob"
 	"github.com/znero-international/znero/backend/internal/masterdata/operator"
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
+	"github.com/znero-international/znero/backend/internal/messaging"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
 	"github.com/znero-international/znero/backend/internal/rating"
-	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/rbac"
+	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/senderid"
 	"github.com/znero-international/znero/backend/internal/system"
 	"github.com/znero-international/znero/backend/pkg/httpx"
@@ -66,6 +67,7 @@ type Modules struct {
 	Ledger         *ledger.Handler
 	Billing        *billing.Handler
 	Routing        *routing.Handler
+	Messaging      *messaging.Handler
 	AuthMiddleware fiber.Handler
 }
 
@@ -155,6 +157,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.Routing != nil {
 		m.Routing.Register(v1, m.AuthMiddleware)
+	}
+	if m.Messaging != nil {
+		m.Messaging.RegisterRoutes(v1, m.AuthMiddleware)
 	}
 	return app
 }

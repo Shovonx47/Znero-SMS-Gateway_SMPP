@@ -75,16 +75,16 @@ type Dispatcher struct {
 	sender        Sender
 	logger        *slog.Logger
 
-	workerID      string
-	lockDuration  time.Duration
-	pollInterval  time.Duration
-	batchSize     int
+	workerID     string
+	lockDuration time.Duration
+	pollInterval time.Duration
+	batchSize    int
 
-	mu            sync.Mutex
-	limiters      map[uuid.UUID]*RateLimiter
+	mu       sync.Mutex
+	limiters map[uuid.UUID]*RateLimiter
 
-	stopCh        chan struct{}
-	doneCh        chan struct{}
+	stopCh chan struct{}
+	doneCh chan struct{}
 }
 
 // NewDispatcher creates an asynchronous outbox dispatcher.

@@ -460,4 +460,3 @@ func StreamParseCSV(r io.Reader, chunkSize int, fn func(chunk []ParsedRow) error
 
 	return nil
 }
-

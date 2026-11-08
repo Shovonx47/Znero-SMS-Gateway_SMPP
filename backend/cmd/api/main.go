@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/znero-international/znero/backend/internal/app"
 	"github.com/znero-international/znero/backend/internal/audit"
 	"github.com/znero-international/znero/backend/internal/auth"
@@ -26,14 +27,17 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/importjob"
 	"github.com/znero-international/znero/backend/internal/masterdata/operator"
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
+	"github.com/znero-international/znero/backend/internal/messaging"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
 	"github.com/znero-international/znero/backend/internal/rating"
-	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/rbac"
+	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/secrets"
 	"github.com/znero-international/znero/backend/internal/senderid"
+	"github.com/znero-international/znero/backend/internal/smpp"
+	"github.com/znero-international/znero/backend/internal/smpp/pdu"
 	"github.com/znero-international/znero/backend/internal/system"
 	"github.com/znero-international/znero/backend/pkg/database"
 	"github.com/znero-international/znero/backend/pkg/kafkaclient"
@@ -215,6 +219,49 @@ func run() error {
 	importSvc.SetPhase4Repositories(providerRepo, senderIDRepo)
 	importSvc.SetRatingServices(ratingRepo, ratingSvc)
 
+	// Phase 8: Messaging Engine & SMPP Gateway Wiring
+	msgRepo := messaging.NewRepository(pool)
+	_ = msgRepo.EnsureMonthlyPartitions(ctx, 3)
+
+	var dlrProcRef *messaging.DLRProcessor
+	smppMgr := smpp.NewConnectionManager(smpp.ManagerConfig{
+		DB:            pool,
+		Decrypter:     keyRing,
+		AllowLoopback: cfg.IsDevelopment(),
+		Logger:        logger,
+		DLRHandler: func(dCtx context.Context, connectionID uuid.UUID, deliver *pdu.DeliverSM) error {
+			if dlrProcRef != nil {
+				return dlrProcRef.ProcessDeliverSM(dCtx, connectionID, deliver)
+			}
+			return nil
+		},
+	})
+	smppMgr.StartMetricsPersister(ctx, 5*time.Second)
+
+	smppClient := smpp.NewClient(smpp.ClientConfig{
+		Manager: smppMgr,
+		DB:      pool,
+		Logger:  logger,
+	})
+	msgSvc, err := messaging.NewService(pool, msgRepo, messaging.Config{}, routingEngine, ledgerSvc, keyRing, auditSvc, smppClient, logger)
+	if err != nil {
+		return fmt.Errorf("messaging service: %w", err)
+	}
+
+	dlrProc := messaging.NewDLRProcessor(msgRepo, ledgerSvc, "on_delivery", logger)
+	dlrProcRef = dlrProc
+
+	reconcileSvc := messaging.NewReconciliationService(pool, msgRepo, ledgerSvc, logger)
+	messagingHandler := messaging.NewHandler(msgSvc, reconcileSvc, &smppStatsAdapter{mgr: smppMgr}, msgRepo)
+
+	// Background Outbox Dispatcher
+	dispatcher := messaging.NewDispatcher(pool, msgRepo, routingEngine, ledgerSvc, smppClient, logger)
+	dispatcher.Start(ctx)
+
+	// Background Safety Reaper
+	reaper := messaging.NewReaper(pool, msgRepo, ledgerSvc, dlrProc, messaging.ReaperConfig{}, logger)
+	reaper.Start(ctx)
+
 	modules := app.Modules{
 		Health:         health.NewHandler(healthSvc),
 		System:         system.NewHandler(system.NewService(system.NewRepository(pool), app.Version, cfg.Env)),
@@ -235,6 +282,7 @@ func run() error {
 		Ledger:         ledgerHandler,
 		Billing:        billingHandler,
 		Routing:        routingHandler,
+		Messaging:      messagingHandler,
 		AuthMiddleware: authMiddleware,
 	}
 	diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
@@ -342,4 +390,29 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
+}
+
+type smppStatsAdapter struct {
+	mgr *smpp.ConnectionManager
+}
+
+func (a *smppStatsAdapter) GetAllSessionStats(ctx context.Context) ([]messaging.SessionStats, error) {
+	stats, err := a.mgr.GetAllSessionStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]messaging.SessionStats, len(stats))
+	for i, s := range stats {
+		res[i] = messaging.SessionStats{
+			ConnectionID:   s.ConnectionID,
+			Bound:          s.Bound,
+			InFlight:       s.InFlight,
+			CurrentTPS:     s.CurrentTPS,
+			SuccessCount:   s.SuccessCount,
+			FailureCount:   s.FailureCount,
+			LastErrorCode:  s.LastErrorCode,
+			ReconnectCount: s.ReconnectCount,
+		}
+	}
+	return res, nil
 }

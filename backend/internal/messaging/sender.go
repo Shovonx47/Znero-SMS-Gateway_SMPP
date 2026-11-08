@@ -75,9 +75,9 @@ type FakeSender struct {
 func NewFakeSender() *FakeSender {
 	return &FakeSender{
 		defaultOutcome: FakeSenderOutcomeConfig{
-			Status:   SendStatusAccepted,
-			BuyCost:  decimal.NewFromFloat(0.0020),
-			Latency:  5 * time.Millisecond,
+			Status:  SendStatusAccepted,
+			BuyCost: decimal.NewFromFloat(0.0020),
+			Latency: 5 * time.Millisecond,
 		},
 		routeOutcomes: make(map[uuid.UUID]FakeSenderOutcomeConfig),
 		destOutcomes:  make(map[string]FakeSenderOutcomeConfig),
@@ -169,4 +169,3 @@ func (f *FakeSender) Send(ctx context.Context, attempt SendAttempt) (SendResult,
 		Latency:           outcome.Latency,
 	}, nil
 }
-

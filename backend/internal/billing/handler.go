@@ -310,7 +310,7 @@ func (h *Handler) RecordPayment(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		InvoiceID     uuid.UUID           `json:"invoice_id"`
+		InvoiceID     uuid.UUID            `json:"invoice_id"`
 		PaymentRecord RecordPaymentRequest `json:"payment"`
 	}
 	if err := c.BodyParser(&req); err != nil {

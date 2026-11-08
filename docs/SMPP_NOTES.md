@@ -78,10 +78,17 @@ The overall message state is aggregated from part outcomes using the following s
 
 ---
 
-## 5. DLR Ingestion Policy in Chunk 2
+## 5. DLR Ingestion Policy in Chunk 2 & Settlement in Chunk 3
 
 When an incoming `deliver_sm` is received on a bound transceiver/receiver session:
-1. The raw PDU payload and headers are extracted.
+1. The raw PDU payload, TLVs, and headers are extracted.
 2. The receipt is durably inserted into `message_dlrs` **prior** to transmitting `deliver_sm_resp` (`StatusROK`).
-3. **Chunk 2 Boundary**: No message status mutation or ledger capture/release occurs in Chunk 2. Full receipt matching, state transitions, and ledger settlement take place in Chunk 3.
+3. In Chunk 3, delivery receipts are matched against `message_provider_lookups` using dual representation candidates (raw ID, hex-to-decimal, decimal-to-hex, and leading-zero stripped).
+4. If no message is matched within the transaction, the raw receipt is preserved in `unmatched_dlrs` for periodic background reconciliation.
+5. Once matched, state transitions obey strict monotonic order: terminal states (`delivered`, `undelivered`, `expired`, `failed`, `rejected`) can never transition backwards. Conflicting out-of-order receipts trigger an exception in `settlement_exceptions`.
+6. Ledger settlement occurs in the exact same transaction:
+   - For `billing_trigger = 'on_delivery'`: upon `delivered`, `ledgerSvc.CaptureTx` captures the reserved hold.
+   - For `billing_trigger = 'on_submission'`: the hold was captured at submission time.
+   - Upon definitive delivery failure (`undelivered`, `expired`, `failed`, `rejected`): `ledgerSvc.ReleaseTx` releases the hold if not already captured.
+   - For `StatusUnknown` messages: arrival of a matching `delivered` or `undelivered` DLR cleanly resolves the ambiguous state.
 

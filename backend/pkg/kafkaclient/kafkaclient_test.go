@@ -155,4 +155,3 @@ func TestIntegrationPublishAndConsumeRoundTrip(t *testing.T) {
 		t.Errorf("unexpected messages: %+v", got)
 	}
 }
-

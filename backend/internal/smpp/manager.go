@@ -21,31 +21,31 @@ type Decrypter interface {
 
 // ConnectionConfig holds fetched database configuration for a provider connection.
 type ConnectionConfig struct {
-	ID                     uuid.UUID
-	ProviderID             uuid.UUID
-	Name                   string
-	Protocol               string
-	Status                 string
-	Archived               bool
-	MaxTPS                 int
-	SMPPHost               string
-	SMPPPort               int
-	SMPPSystemID           string
-	SMPPPasswordEncrypted  string
-	SMPPPasswordChangedAt  *time.Time
-	SMPPSystemType         string
-	SMPPBindType           string
-	SMPPTLS                bool
-	SMPPWindowSize         int
-	SMPPEnquireLinkSec     int
-	SMPPSourceTON          int
-	SMPPSourceNPI          int
-	SMPPDestTON            int
-	SMPPDestNPI            int
-	SMPPCharset            string
-	Version                int
-	KillSwitched           bool
-	KillSwitchReason       string
+	ID                    uuid.UUID
+	ProviderID            uuid.UUID
+	Name                  string
+	Protocol              string
+	Status                string
+	Archived              bool
+	MaxTPS                int
+	SMPPHost              string
+	SMPPPort              int
+	SMPPSystemID          string
+	SMPPPasswordEncrypted string
+	SMPPPasswordChangedAt *time.Time
+	SMPPSystemType        string
+	SMPPBindType          string
+	SMPPTLS               bool
+	SMPPWindowSize        int
+	SMPPEnquireLinkSec    int
+	SMPPSourceTON         int
+	SMPPSourceNPI         int
+	SMPPDestTON           int
+	SMPPDestNPI           int
+	SMPPCharset           string
+	Version               int
+	KillSwitched          bool
+	KillSwitchReason      string
 }
 
 // ManagerConfig holds dependencies for the SMPP ConnectionManager.
@@ -241,6 +241,134 @@ func (m *ConnectionManager) CloseConnectionSession(connID uuid.UUID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closeSessionLocked(connID)
+}
+
+// PersistSessionStats writes a session's operational metrics into provider_connection_sessions.
+func (m *ConnectionManager) PersistSessionStats(ctx context.Context, stats SessionStats) error {
+	if m.cfg.DB == nil {
+		return nil
+	}
+	query := `
+		INSERT INTO provider_connection_sessions (
+			connection_id, bound, in_flight, current_tps, success_count,
+			failure_count, last_error_code, reconnect_count, last_active_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
+		ON CONFLICT (connection_id) DO UPDATE SET
+			bound = EXCLUDED.bound,
+			in_flight = EXCLUDED.in_flight,
+			current_tps = EXCLUDED.current_tps,
+			success_count = EXCLUDED.success_count,
+			failure_count = EXCLUDED.failure_count,
+			last_error_code = EXCLUDED.last_error_code,
+			reconnect_count = EXCLUDED.reconnect_count,
+			last_active_at = now(),
+			updated_at = now()
+	`
+	_, err := m.cfg.DB.Exec(ctx, query,
+		stats.ConnectionID,
+		stats.Bound,
+		stats.InFlight,
+		stats.CurrentTPS,
+		stats.SuccessCount,
+		stats.FailureCount,
+		stats.LastErrorCode,
+		stats.ReconnectCount,
+	)
+	return err
+}
+
+// GetAllSessionStats returns metrics for all active sessions in memory, merged with database status.
+func (m *ConnectionManager) GetAllSessionStats(ctx context.Context) ([]SessionStats, error) {
+	m.mu.RLock()
+	var inMemory []SessionStats
+	seen := make(map[uuid.UUID]bool)
+	for connID, s := range m.sessions {
+		if s != nil {
+			st := s.Stats()
+			inMemory = append(inMemory, st)
+			seen[connID] = true
+		}
+	}
+	m.mu.RUnlock()
+
+	if m.cfg.DB == nil {
+		return inMemory, nil
+	}
+
+	// Read stored connection session states from database
+	rows, err := m.cfg.DB.Query(ctx, `
+		SELECT 
+			c.id,
+			COALESCE(s.bound, false),
+			COALESCE(s.in_flight, 0),
+			COALESCE(s.current_tps, 0),
+			COALESCE(s.success_count, 0),
+			COALESCE(s.failure_count, 0),
+			COALESCE(s.last_error_code, ''),
+			COALESCE(s.reconnect_count, 0)
+		FROM provider_connections c
+		LEFT JOIN provider_connection_sessions s ON s.connection_id = c.id
+		WHERE c.protocol = 'smpp' AND c.archived = false
+	`)
+	if err != nil {
+		return inMemory, nil
+	}
+	defer rows.Close()
+
+	var results []SessionStats
+	// Put in-memory active sessions first
+	results = append(results, inMemory...)
+
+	for rows.Next() {
+		var st SessionStats
+		if err := rows.Scan(
+			&st.ConnectionID,
+			&st.Bound,
+			&st.InFlight,
+			&st.CurrentTPS,
+			&st.SuccessCount,
+			&st.FailureCount,
+			&st.LastErrorCode,
+			&st.ReconnectCount,
+		); err != nil {
+			continue
+		}
+		if !seen[st.ConnectionID] {
+			results = append(results, st)
+		}
+	}
+
+	return results, nil
+}
+
+// StartMetricsPersister starts a periodic worker that persists session metrics to PostgreSQL.
+func (m *ConnectionManager) StartMetricsPersister(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.mu.RLock()
+				var toPersist []SessionStats
+				for _, s := range m.sessions {
+					if s != nil {
+						toPersist = append(toPersist, s.Stats())
+					}
+				}
+				m.mu.RUnlock()
+
+				for _, st := range toPersist {
+					_ = m.PersistSessionStats(ctx, st)
+				}
+			}
+		}
+	}()
 }
 
 // Close shuts down all sessions and releases advisory locks.

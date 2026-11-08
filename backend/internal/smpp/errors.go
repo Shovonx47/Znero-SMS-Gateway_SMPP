@@ -15,12 +15,12 @@ func ClassifyStatus(status uint32) messaging.SendStatus {
 
 	// Retryable on another route: capacity, rate limiting, temporary server issues
 	case pdu.StatusRThrottled, // 0x58: ESME Receiver/Transmitter Throttled
-		pdu.StatusRMsgQFul,    // 0x14: Message Queue Full
-		pdu.StatusRSysErr:     // 0x08: System Error
+		pdu.StatusRMsgQFul, // 0x14: Message Queue Full
+		pdu.StatusRSysErr:  // 0x08: System Error
 		return messaging.SendStatusRetryableReject
 
 	// Fatal rejections: permanent message or routing rejection that must NOT fail over
-	case pdu.StatusRInvDstAdr,       // 0x0B: Invalid Dest Addr
+	case pdu.StatusRInvDstAdr, // 0x0B: Invalid Dest Addr
 		pdu.StatusRInvSrcAdr,       // 0x0A: Invalid Source Address
 		pdu.StatusRInvMsgLen,       // 0x01: Message Length is invalid
 		pdu.StatusRInvDCS,          // 0x63: Predefined Data Coding Scheme Invalid
@@ -99,4 +99,3 @@ func MaskPhoneNumber(phone string) string {
 	copy(masked[maskLen:], phone[maskLen:])
 	return string(masked)
 }
-

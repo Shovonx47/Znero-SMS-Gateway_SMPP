@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	argonMemory      = 64 * 1024 // 64 MB
-	argonIterations  = 3
-	argonParallelism = 2
-	argonKeyLength   = 32
-	argonSaltLength  = 16
+	argonMemory       = 64 * 1024 // 64 MB
+	argonIterations   = 3
+	argonParallelism  = 2
+	argonKeyLength    = 32
+	argonSaltLength   = 16
 	MinPasswordLength = 12
 )
 

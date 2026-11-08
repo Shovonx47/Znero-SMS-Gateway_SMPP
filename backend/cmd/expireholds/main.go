@@ -54,4 +54,3 @@ func main() {
 
 	fmt.Printf("Successfully expired %d overdue hold(s).\n", count)
 }
-

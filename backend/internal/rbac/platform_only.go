@@ -12,10 +12,10 @@ var platformOnlyPrefixes = []string{
 	"number.prefix.", // only "view" is allowed for non-platform orgs (see below)
 	"country.country.",
 	"operator.operator.",
-	"rate.buycard.",  // provider buy rate cards (Phase 5)
-	"rate.buyrate.",  // provider buy rates (Phase 5)
-	"rate.margin.",   // margin analysis & override (Phase 5)
-	"routing.",       // routing plans, entries, rules, simulator, kill switch (Phase 7)
+	"rate.buycard.", // provider buy rate cards (Phase 5)
+	"rate.buyrate.", // provider buy rates (Phase 5)
+	"rate.margin.",  // margin analysis & override (Phase 5)
+	"routing.",      // routing plans, entries, rules, simulator, kill switch (Phase 7)
 }
 
 // readOnlyForNonPlatform lists the namespaces where non-platform organizations may hold the

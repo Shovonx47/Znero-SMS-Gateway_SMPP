@@ -37,23 +37,23 @@ func TruncateMoney(d decimal.Decimal) decimal.Decimal {
 }
 
 type RateCard struct {
-	ID            uuid.UUID  `json:"id"`
-	Name          string     `json:"name"`
-	Kind          string     `json:"kind"` // provider_buy | customer_sell
-	OwnerOrgID    uuid.UUID  `json:"owner_org_id"`
-	OwnerOrgName  string     `json:"owner_org_name,omitempty"`
-	ProviderID    *uuid.UUID `json:"provider_id,omitempty"`
-	ProviderName  *string    `json:"provider_name,omitempty"`
-	CurrencyCode  string     `json:"currency_code"`
-	Channel       string     `json:"channel"` // sms
-	Status        string     `json:"status"`  // draft | active | inactive | archived
-	Description   string     `json:"description"`
-	Archived      bool       `json:"archived"`
-	Version       int        `json:"version"`
-	CreatedBy     *uuid.UUID `json:"created_by,omitempty"`
-	UpdatedBy     *uuid.UUID `json:"updated_by,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID           uuid.UUID  `json:"id"`
+	Name         string     `json:"name"`
+	Kind         string     `json:"kind"` // provider_buy | customer_sell
+	OwnerOrgID   uuid.UUID  `json:"owner_org_id"`
+	OwnerOrgName string     `json:"owner_org_name,omitempty"`
+	ProviderID   *uuid.UUID `json:"provider_id,omitempty"`
+	ProviderName *string    `json:"provider_name,omitempty"`
+	CurrencyCode string     `json:"currency_code"`
+	Channel      string     `json:"channel"` // sms
+	Status       string     `json:"status"`  // draft | active | inactive | archived
+	Description  string     `json:"description"`
+	Archived     bool       `json:"archived"`
+	Version      int        `json:"version"`
+	CreatedBy    *uuid.UUID `json:"created_by,omitempty"`
+	UpdatedBy    *uuid.UUID `json:"updated_by,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type RateCardListFilter struct {
@@ -70,83 +70,83 @@ type RateCardListFilter struct {
 }
 
 type Rate struct {
-	ID               uuid.UUID        `json:"id"`
-	CardID           uuid.UUID        `json:"card_id"`
-	CountryID        uuid.UUID        `json:"country_id"`
-	CountryISO2      string           `json:"country_iso2,omitempty"`
-	CountryName      string           `json:"country_name,omitempty"`
-	OperatorID       *uuid.UUID       `json:"operator_id,omitempty"`
-	OperatorName     *string          `json:"operator_name,omitempty"`
-	OperatorMCC      *string          `json:"operator_mcc,omitempty"`
-	OperatorMNC      *string          `json:"operator_mnc,omitempty"`
-	MessageType      string           `json:"message_type"` // default | transactional | promotional | otp
-	Price            decimal.Decimal  `json:"price"`
-	MinBillingNote   string           `json:"min_billing_note"`
-	EffectiveFrom    time.Time        `json:"effective_from"`
-	EffectiveTo      *time.Time       `json:"effective_to,omitempty"`
-	Source           string           `json:"source"` // manual | import
-	Status           string           `json:"status"` // active | inactive | superseded
-	Version          int              `json:"version"`
-	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
-	UpdatedBy        *uuid.UUID       `json:"updated_by,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	ID             uuid.UUID       `json:"id"`
+	CardID         uuid.UUID       `json:"card_id"`
+	CountryID      uuid.UUID       `json:"country_id"`
+	CountryISO2    string          `json:"country_iso2,omitempty"`
+	CountryName    string          `json:"country_name,omitempty"`
+	OperatorID     *uuid.UUID      `json:"operator_id,omitempty"`
+	OperatorName   *string         `json:"operator_name,omitempty"`
+	OperatorMCC    *string         `json:"operator_mcc,omitempty"`
+	OperatorMNC    *string         `json:"operator_mnc,omitempty"`
+	MessageType    string          `json:"message_type"` // default | transactional | promotional | otp
+	Price          decimal.Decimal `json:"price"`
+	MinBillingNote string          `json:"min_billing_note"`
+	EffectiveFrom  time.Time       `json:"effective_from"`
+	EffectiveTo    *time.Time      `json:"effective_to,omitempty"`
+	Source         string          `json:"source"` // manual | import
+	Status         string          `json:"status"` // active | inactive | superseded
+	Version        int             `json:"version"`
+	CreatedBy      *uuid.UUID      `json:"created_by,omitempty"`
+	UpdatedBy      *uuid.UUID      `json:"updated_by,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 
 	// Field-level protected metrics (platform only; stripped for reseller/customer)
-	LowestBuyCost    *decimal.Decimal `json:"lowest_buy_cost,omitempty"`
-	MarginAmount     *decimal.Decimal `json:"margin_amount,omitempty"`
-	MarginPercent    *decimal.Decimal `json:"margin_percent,omitempty"`
+	LowestBuyCost *decimal.Decimal `json:"lowest_buy_cost,omitempty"`
+	MarginAmount  *decimal.Decimal `json:"margin_amount,omitempty"`
+	MarginPercent *decimal.Decimal `json:"margin_percent,omitempty"`
 }
 
 type RateListFilter struct {
-	CardID           uuid.UUID
-	CountryID        *uuid.UUID
-	OperatorID       *uuid.UUID
-	MessageType      string
-	Status           string
-	EffectiveAt      *time.Time
-	Search           string
-	Page             int
-	PageSize         int
+	CardID      uuid.UUID
+	CountryID   *uuid.UUID
+	OperatorID  *uuid.UUID
+	MessageType string
+	Status      string
+	EffectiveAt *time.Time
+	Search      string
+	Page        int
+	PageSize    int
 }
 
 type RateCardHistory struct {
-	ID            uuid.UUID       `json:"id"`
-	CardID        uuid.UUID       `json:"card_id"`
-	Name          string          `json:"name"`
-	Kind          string          `json:"kind"`
-	OwnerOrgID    uuid.UUID       `json:"owner_org_id"`
-	ProviderID    *uuid.UUID      `json:"provider_id,omitempty"`
-	CurrencyCode  string          `json:"currency_code"`
-	Channel       string          `json:"channel"`
-	Status        string          `json:"status"`
-	Description   string          `json:"description"`
-	Archived      bool            `json:"archived"`
-	Version       int             `json:"version"`
-	Snapshot      json.RawMessage `json:"snapshot"`
-	ChangedBy     *uuid.UUID      `json:"changed_by,omitempty"`
-	ChangedAt     time.Time       `json:"changed_at"`
-	ChangeReason  string          `json:"change_reason"`
+	ID           uuid.UUID       `json:"id"`
+	CardID       uuid.UUID       `json:"card_id"`
+	Name         string          `json:"name"`
+	Kind         string          `json:"kind"`
+	OwnerOrgID   uuid.UUID       `json:"owner_org_id"`
+	ProviderID   *uuid.UUID      `json:"provider_id,omitempty"`
+	CurrencyCode string          `json:"currency_code"`
+	Channel      string          `json:"channel"`
+	Status       string          `json:"status"`
+	Description  string          `json:"description"`
+	Archived     bool            `json:"archived"`
+	Version      int             `json:"version"`
+	Snapshot     json.RawMessage `json:"snapshot"`
+	ChangedBy    *uuid.UUID      `json:"changed_by,omitempty"`
+	ChangedAt    time.Time       `json:"changed_at"`
+	ChangeReason string          `json:"change_reason"`
 }
 
 type RateHistory struct {
-	ID               uuid.UUID        `json:"id"`
-	RateID           uuid.UUID        `json:"rate_id"`
-	CardID           uuid.UUID        `json:"card_id"`
-	CountryID        uuid.UUID        `json:"country_id"`
-	OperatorID       *uuid.UUID       `json:"operator_id,omitempty"`
-	MessageType      string           `json:"message_type"`
-	Price            decimal.Decimal  `json:"price"`
-	MinBillingNote   string           `json:"min_billing_note"`
-	EffectiveFrom    time.Time        `json:"effective_from"`
-	EffectiveTo      *time.Time       `json:"effective_to,omitempty"`
-	Source           string           `json:"source"`
-	Status           string           `json:"status"`
-	Version          int              `json:"version"`
-	Snapshot         json.RawMessage  `json:"snapshot"`
-	ChangedBy        *uuid.UUID       `json:"changed_by,omitempty"`
-	ChangedAt        time.Time        `json:"changed_at"`
-	ChangeReason     string           `json:"change_reason"`
+	ID             uuid.UUID       `json:"id"`
+	RateID         uuid.UUID       `json:"rate_id"`
+	CardID         uuid.UUID       `json:"card_id"`
+	CountryID      uuid.UUID       `json:"country_id"`
+	OperatorID     *uuid.UUID      `json:"operator_id,omitempty"`
+	MessageType    string          `json:"message_type"`
+	Price          decimal.Decimal `json:"price"`
+	MinBillingNote string          `json:"min_billing_note"`
+	EffectiveFrom  time.Time       `json:"effective_from"`
+	EffectiveTo    *time.Time      `json:"effective_to,omitempty"`
+	Source         string          `json:"source"`
+	Status         string          `json:"status"`
+	Version        int             `json:"version"`
+	Snapshot       json.RawMessage `json:"snapshot"`
+	ChangedBy      *uuid.UUID      `json:"changed_by,omitempty"`
+	ChangedAt      time.Time       `json:"changed_at"`
+	ChangeReason   string          `json:"change_reason"`
 }
 
 type CustomerRateAssignment struct {
@@ -269,9 +269,9 @@ type MarginReportFilter struct {
 }
 
 type BulkLookupItem struct {
-	CustomerOrgID uuid.UUID `json:"customer_org_id"`
-	Number        string    `json:"number"`
-	MessageType   string    `json:"message_type"`
+	CustomerOrgID uuid.UUID  `json:"customer_org_id"`
+	Number        string     `json:"number"`
+	MessageType   string     `json:"message_type"`
 	At            *time.Time `json:"at,omitempty"`
 }
 

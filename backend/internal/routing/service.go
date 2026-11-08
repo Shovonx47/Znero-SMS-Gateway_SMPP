@@ -291,9 +291,9 @@ func (s *Service) RequestPlanActivation(ctx context.Context, tc *tenant.Context,
 	defer tx.Rollback(ctx)
 
 	proposedData, _ := json.Marshal(map[string]interface{}{
-		"plan_id":  planID,
-		"status":   PlanActive,
-		"version":  plan.Version,
+		"plan_id": planID,
+		"status":  PlanActive,
+		"version": plan.Version,
 	})
 	currentData, _ := json.Marshal(plan)
 
@@ -342,9 +342,9 @@ func (s *Service) RequestPlanDeactivation(ctx context.Context, tc *tenant.Contex
 	defer tx.Rollback(ctx)
 
 	proposedData, _ := json.Marshal(map[string]interface{}{
-		"plan_id":  planID,
-		"status":   PlanDeactivated,
-		"version":  plan.Version,
+		"plan_id": planID,
+		"status":  PlanDeactivated,
+		"version": plan.Version,
 	})
 	currentData, _ := json.Marshal(plan)
 

@@ -27,7 +27,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		MessageTTL:               24 * time.Hour,
-		UnknownResolutionWindow: 24 * time.Hour,
+		UnknownResolutionWindow:  24 * time.Hour,
 		HoldExpiry:               72 * time.Hour,
 		MaxSegmentsLimit:         10,
 		PartitionPrecreateMonths: 3,
@@ -61,4 +61,3 @@ func (c Config) Validate() error {
 
 	return nil
 }
-

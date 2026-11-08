@@ -58,4 +58,3 @@ func EnsurePartitions(ctx context.Context, pool *pgxpool.Pool, monthsAhead int) 
 
 	return nil
 }
-

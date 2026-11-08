@@ -1,13 +1,35 @@
 # Znero International — Implementation Status
 
-## Current Phase: Phase 7 — Routing Engine, Route Plans, Rules, Simulator & Kill Switch (Completed)
+## Current Phase: Phase 8A — Messaging Core, SMPP Gateway, DLR Settlement & Operational Screens (Chunks 1, 2 & 3 Completed)
 
-**Last Updated:** 2026-11-06  
+**Last Updated:** 2026-11-09  
 **Environment:** Windows 10/11 (`Microsoft Windows NT 10.0.19045.0`, Native Execution, No Docker)
 
 ---
 
-### 1. Phase 7 Deliverables Matrix
+### 1. Phase 8A Deliverables Matrix (Chunks 1, 2, 3)
+
+| Area | Component | Implementation Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **Data Model & Migrations** | Monthly Partitioning & Operational Lookup Tables | **Completed** | Migrations 10 and 11 applied to `znero_dev` and `znero_test`. Monthly partitioned `messages` (with default partition), unpartitioned `message_idempotency_keys` and `message_provider_lookups`, `message_outbox`, `message_events`, `message_attempts`, `message_dlrs`, `provider_connection_dlr_mappings`, `unmatched_dlrs`, `settlement_exceptions`, `messaging_reconciliation_runs`, `provider_connection_sessions`. |
+| **Ledger Atomic Tx** | Extended Ledger Service Tx Methods | **Completed** | `PlaceHoldTx`, `CaptureTx`, `ReleaseTx`, `PostChargeTx` with atomic database transaction sharing. Idempotent replays on `CaptureTx` and safe no-ops on already-released holds. Race-condition verified. |
+| **Ingestion Pipeline** | Single-Transaction Ingestion & Outbox | **Completed** | `POST /api/v1/messages` (internal service & test-send). Atomically verifies credit, executes `PlaceHoldTx`, inserts `messages`, inserts `message_idempotency_keys`, and enqueues to `message_outbox` in **one** transaction. |
+| **Outbox Dispatcher** | Transactional Dispatcher with Route Failover | **Completed** | Advisory-locked outbox poller. Evaluates routing via in-memory `routing.Engine`, checks sender ID restrictions, dispatches via SMPP sender, and executes failover on definitive retryable rejections (`ESME_RTHROTTLED`, `ESME_RMSGQFUL`, `ESME_RSYSERR`) without repeating failed routes. |
+| **Clean-Room SMPP Codec** | Native Clean-Room SMPP 3.4 PDU Codec | **Completed** | Standard Go library implementation (`internal/smpp/pdu`) covering all standard PDUs (`bind_transceiver`, `submit_sm`, `deliver_sm`, `enquire_link`, `unbind`, and responses) with TLV encoding/decoding. Eliminates third-party supply chain risks. |
+| **SSRF-Safe Networking** | Safe Dialing & TLS 1.2+ Hostname Verification | **Completed** | Pre-dial DNS resolution with IP filtering blocking RFC 1918, RFC 3927, carrier-grade NAT, and cloud metadata ranges. Strict TLS 1.2+ SNI verification (`InsecureSkipVerify: false`). |
+| **Mock SMSC Simulator** | High-Fidelity SMSC Carrier Simulator | **Completed** | Standalone tool on `127.0.0.1:2775` (`cmd/smppmock`, `scripts/run-smpp-mock.ps1`). Supports configurable response error codes, DLR delivery modes (`immediate`, `delayed`, `undeliverable`, `failed`, `none`), and configurable latencies. |
+| **DLR Processing & Ingestion** | Monotonic State Engine & Receipt Matching | **Completed** | Parses text receipts (Appendix B) and TLVs (`receipted_message_id`, `message_state`). Normalizes hex/decimal candidate provider message IDs and leading zeros. Evaluates per-connection DLR mappings. Enforces monotonic status order; records out-of-order discrepancies in `settlement_exceptions`. Resolves ambiguous `StatusUnknown` messages upon late DLR arrival. |
+| **Financial Settlement** | Atomic DLR Settlement | **Completed** | Captures reserved holds via `CaptureTx` upon delivery (for `on_delivery`), releases holds via `ReleaseTx` upon terminal failure or expiry. Shares database transaction with message status update. |
+| **Messaging Reaper** | Background Safety Sweeper | **Completed** | Single-runner background worker using PostgreSQL advisory lock (`8888, 1001`). Sweeps stuck queued/submitting messages past TTL, expires abandoned `unknown` states (releasing holds and recording exposure flags), marks unreceipted messages expired, and retries unmatched DLR buffer. |
+| **Reconciliation Service** | Message & Ledger Integrity Verification | **Completed** | Verifies message state invariants, active holds on terminal messages, captured holds on non-delivered messages, and ledger vs message revenue totals. Records audits in `messaging_reconciliation_runs`. |
+| **Operational & Admin APIs** | Tenant-Scoped Messaging APIs | **Completed** | `GET /api/v1/messages` and `GET /api/v1/messages/:id` (with body masking unless `message.content.view`), safe CSV/JSON export, `POST /api/v1/messaging/test-send`, `GET /api/v1/messaging/smpp/sessions`, `GET /api/v1/messaging/queue/status`, `GET /api/v1/messaging/dlrs/unmatched`, `GET /api/v1/messaging/settlement/exceptions`, `POST /api/v1/messaging/settlement/exceptions/:id/resolve`, reconciliation runner and DLR mapping CRUD. |
+| **Frontend UI Suite** | Modern SvelteKit 5 Operational Interfaces | **Completed** | 6 complete interfaces: `/messages` (Messages Explorer with Send Test Message modal), `/messages/[id]` (Message Journey timeline, attempts, routing decision, DLRs, ledger hold details), `/messaging/smpp-sessions` (Live auto-refresh session monitor), `/messaging/queue-monitor` (Outbox backlog monitor), `/messaging/unmatched-dlrs` (Unmatched DLR buffer), `/messaging/reconciliation` (Settlement exceptions & reconciliation runner), `/messaging/dlr-mappings` (Carrier DLR mapping editor). `svelte-check` 0 errors, 0 warnings. |
+| **Developer Sample Tooling** | Idempotent Sample Seeder Script | **Completed** | `cmd/seedmessagingsample` and `scripts/seed-messaging-sample.ps1` (`-Cleanup` supported). Seeds DEV SAMPLE provider connection pointing to local mock SMSC, route plans, rate cards, and funded customer wallet for testing. Refuses outside `APP_ENV=development`. |
+| **Code Quality & Diagnostics** | Strict Linting and Diagnostics Passing | **Completed** | `go build ./...` (0 errors), `go vet ./...` (0 findings), `gofmt -l .` (0 files), `npm run check` (0 errors, 0 warnings), `npx tsc --noEmit` (0 errors including e2e). |
+
+---
+
+### 1B. Phase 7 Deliverables Matrix
 
 | Area | Component | Implementation Status | Notes |
 | :--- | :--- | :--- | :--- |

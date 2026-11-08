@@ -13,14 +13,14 @@ import (
 
 func TestRedactValue(t *testing.T) {
 	input := map[string]any{
-		"email":                 "admin@example.com",
-		"password":              "SuperSecret1234",
-		"password_hash":         "hash_val",
-		"token":                 "raw_token",
-		"refresh_token_hash":    "secret_hash",
-		"mfa_secret":            "JBSWY3DPEHPK3PXP",
-		"recovery_codes":        []string{"code1", "code2"},
-		"normal_field":          "visible_value",
+		"email":              "admin@example.com",
+		"password":           "SuperSecret1234",
+		"password_hash":      "hash_val",
+		"token":              "raw_token",
+		"refresh_token_hash": "secret_hash",
+		"mfa_secret":         "JBSWY3DPEHPK3PXP",
+		"recovery_codes":     []string{"code1", "code2"},
+		"normal_field":       "visible_value",
 		"nested": map[string]any{
 			"jwt_secret": "nested_secret",
 			"active":     true,

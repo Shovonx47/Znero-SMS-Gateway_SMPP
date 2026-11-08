@@ -70,10 +70,10 @@ type rateWithWindow struct {
 }
 
 type mockRater struct {
-	buyRates        map[uuid.UUID]*routing.RateLookupResult
-	sellRates       map[uuid.UUID]*routing.RateLookupResult
-	timedBuyRates   map[uuid.UUID][]rateWithWindow
-	timedSellRates  map[uuid.UUID][]rateWithWindow
+	buyRates       map[uuid.UUID]*routing.RateLookupResult
+	sellRates      map[uuid.UUID]*routing.RateLookupResult
+	timedBuyRates  map[uuid.UUID][]rateWithWindow
+	timedSellRates map[uuid.UUID][]rateWithWindow
 }
 
 func (m *mockRater) LookupBuyRate(ctx context.Context, connectionID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID, at time.Time) (*routing.RateLookupResult, error) {
@@ -228,10 +228,10 @@ func TestDeterminism_SameInputSameResult(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
-		SenderIDType:   "alphanumeric",
+		CountryID:       &rk.countryID,
+		SenderIDType:    "alphanumeric",
 	}
 
 	// 100 iterations must yield identical candidate ordering
@@ -331,9 +331,9 @@ func TestDeterminism_NoDatabaseQueryPerResolve(t *testing.T) {
 	offlineEngine := routing.NewEngine(nil, nil, nil, nil)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	// Resolve must succeed completely in memory without attempting any DB query
@@ -374,9 +374,9 @@ func TestEligibility_KillSwitchedExcluded(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	// Initially active
@@ -445,9 +445,9 @@ func TestEligibility_InactiveConnectionExcluded(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -486,9 +486,9 @@ func TestEligibility_InactiveProviderExcluded(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -525,9 +525,9 @@ func TestEligibility_NoCoverageExcluded(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -565,10 +565,10 @@ func TestEligibility_AllExcluded_ReturnsEmptyCandidates(t *testing.T) {
 
 	// Sender ID is numeric -> connection only allows alphanumeric -> excluded
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
-		SenderIDType:   "numeric",
+		CountryID:       &rk.countryID,
+		SenderIDType:    "numeric",
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -622,9 +622,9 @@ func TestStrategy_Priority_Order(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -697,9 +697,9 @@ func TestStrategy_LeastCost_ExactDecimal(t *testing.T) {
 	snap.Connections[conn3] = c3
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	res, err := rk.routingEngine.Resolve(ctx, req)
@@ -750,9 +750,9 @@ func TestStrategy_Weighted_AllCandidatesReachable(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	count1 := 0
@@ -816,9 +816,9 @@ func TestStrategy_Failover_Next(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	// First attempt gives conn1
@@ -880,9 +880,9 @@ func TestSnapshot_AtomicSwapUnderConcurrentResolve(t *testing.T) {
 	routing.TryReload(ctx, rk.e.Pool)
 
 	req := routing.ResolveRequest{
-		CustomerOrgID:  rk.customerOrgID,
+		CustomerOrgID:   rk.customerOrgID,
 		DestinationE164: "+12025550100",
-		CountryID:      &rk.countryID,
+		CountryID:       &rk.countryID,
 	}
 
 	var wg sync.WaitGroup
@@ -4127,4 +4127,3 @@ func TestDedicatedRoutingRoles_MasterDataRolesLackRoutingPerms(t *testing.T) {
 		t.Fatalf("expected Routing Maker and Routing Checker to hold 0 override permissions, got %d", overrideCount)
 	}
 }
-

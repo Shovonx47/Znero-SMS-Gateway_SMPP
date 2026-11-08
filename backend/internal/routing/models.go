@@ -212,15 +212,15 @@ type SnapshotRate struct {
 }
 
 type RoutingSnapshot struct {
-	BuildAt          time.Time                              `json:"build_at"`
-	Plans            []RoutePlan                            `json:"plans"`
-	Assignments      []CustomerRouteAssignment              `json:"assignments"`
-	Rules            []RoutingRule                          `json:"rules"`
-	Overrides        map[uuid.UUID]ConnectionOverride       `json:"overrides"`         // keyed by connection_id
-	Connections      map[uuid.UUID]SnapshotConnection       `json:"connections"`       // keyed by connection_id
-	Coverage         map[string]string                      `json:"coverage"`          // keyed by provider_id:country_id(:operator_id)
-	CustomerProfiles map[uuid.UUID]SnapshotCustomerProfile  `json:"customer_profiles"` // keyed by org_id
-	ApprovedSenderIDs map[string]SnapshotSenderID           `json:"approved_sender_ids"`// keyed by org_id:sender_id(:country_id)
+	BuildAt           time.Time                             `json:"build_at"`
+	Plans             []RoutePlan                           `json:"plans"`
+	Assignments       []CustomerRouteAssignment             `json:"assignments"`
+	Rules             []RoutingRule                         `json:"rules"`
+	Overrides         map[uuid.UUID]ConnectionOverride      `json:"overrides"`           // keyed by connection_id
+	Connections       map[uuid.UUID]SnapshotConnection      `json:"connections"`         // keyed by connection_id
+	Coverage          map[string]string                     `json:"coverage"`            // keyed by provider_id:country_id(:operator_id)
+	CustomerProfiles  map[uuid.UUID]SnapshotCustomerProfile `json:"customer_profiles"`   // keyed by org_id
+	ApprovedSenderIDs map[string]SnapshotSenderID           `json:"approved_sender_ids"` // keyed by org_id:sender_id(:country_id)
 }
 
 // Request/Response types
@@ -233,9 +233,9 @@ type ResolveRequest struct {
 	SenderIDType    string      `json:"sender_id_type"`            // numeric|alphanumeric
 	SenderIDValue   string      `json:"sender_id_value,omitempty"`
 	SenderID        string      `json:"sender_id,omitempty"`
-	ExcludeIDs      []uuid.UUID `json:"exclude_ids,omitempty"`     // for Next() / failover
-	Exclusions      []uuid.UUID `json:"exclusions,omitempty"`     // alias for ExcludeIDs
-	Timestamp       *time.Time  `json:"timestamp,omitempty"`      // evaluation timestamp for dynamic rate freshness
+	ExcludeIDs      []uuid.UUID `json:"exclude_ids,omitempty"` // for Next() / failover
+	Exclusions      []uuid.UUID `json:"exclusions,omitempty"`  // alias for ExcludeIDs
+	Timestamp       *time.Time  `json:"timestamp,omitempty"`   // evaluation timestamp for dynamic rate freshness
 }
 
 type ExclusionReason struct {

@@ -63,6 +63,15 @@ import type {
 	Hold,
 	StatementItem,
 	ReconciliationReport,
+	MessageView,
+	MessageDetailView,
+	SessionStats,
+	QueueBacklogStats,
+	UnmatchedDLR,
+	SettlementException,
+	ReconciliationRun,
+	DLRMapping,
+	TestSendRequest,
 	Invoice,
 	Payment,
 	CreateSMPPAccountResponse,
@@ -2154,6 +2163,121 @@ export class ApiClient {
 
 	async getCoverageReport(): Promise<{ data: CoverageReportItem[]; requestId: string }> {
 		return this.request<CoverageReportItem[]>('/api/v1/routing/coverage-report');
+	}
+
+	// Phase 8: Messaging Methods
+	async listMessages(params?: {
+		page?: number;
+		per_page?: number;
+		status?: string;
+		destination?: string;
+		sender_id?: string;
+		customer_org_id?: string;
+		provider_connection_id?: string;
+		date_from?: string;
+		date_to?: string;
+	}): Promise<{ data: { items: MessageView[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', String(params.page));
+		if (params?.per_page) q.set('per_page', String(params.per_page));
+		if (params?.status) q.set('status', params.status);
+		if (params?.destination) q.set('destination', params.destination);
+		if (params?.sender_id) q.set('sender_id', params.sender_id);
+		if (params?.customer_org_id) q.set('customer_org_id', params.customer_org_id);
+		if (params?.provider_connection_id) q.set('provider_connection_id', params.provider_connection_id);
+		if (params?.date_from) q.set('date_from', params.date_from);
+		if (params?.date_to) q.set('date_to', params.date_to);
+
+		const queryStr = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: MessageView[]; total: number; page: number; per_page: number }>(`/api/v1/messages${queryStr}`);
+	}
+
+	async getMessage(id: string): Promise<{ data: MessageDetailView; requestId: string }> {
+		return this.request<MessageDetailView>(`/api/v1/messages/${id}`);
+	}
+
+	async testSendMessage(req: TestSendRequest): Promise<{ data: any; requestId: string }> {
+		return this.request<any>('/api/v1/messaging/test-send', {
+			method: 'POST',
+			body: JSON.stringify(req)
+		});
+	}
+
+	async getSMPPSessions(): Promise<{ data: { sessions: SessionStats[] }; requestId: string }> {
+		return this.request<{ sessions: SessionStats[] }>('/api/v1/messaging/smpp/sessions');
+	}
+
+	async getQueueStatus(): Promise<{ data: QueueBacklogStats; requestId: string }> {
+		return this.request<QueueBacklogStats>('/api/v1/messaging/queue/status');
+	}
+
+	async getUnmatchedDLRs(params?: {
+		page?: number;
+		per_page?: number;
+		match_status?: string;
+	}): Promise<{ data: { items: UnmatchedDLR[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', String(params.page));
+		if (params?.per_page) q.set('per_page', String(params.per_page));
+		if (params?.match_status) q.set('match_status', params.match_status);
+
+		const queryStr = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: UnmatchedDLR[]; total: number; page: number; per_page: number }>(`/api/v1/messaging/dlrs/unmatched${queryStr}`);
+	}
+
+	async listSettlementExceptions(params?: {
+		page?: number;
+		per_page?: number;
+		resolved?: boolean;
+	}): Promise<{ data: { items: SettlementException[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', String(params.page));
+		if (params?.per_page) q.set('per_page', String(params.per_page));
+		if (params?.resolved !== undefined) q.set('resolved', String(params.resolved));
+
+		const queryStr = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: SettlementException[]; total: number; page: number; per_page: number }>(`/api/v1/messaging/settlement/exceptions${queryStr}`);
+	}
+
+	async resolveSettlementException(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/messaging/settlement/exceptions/${id}/resolve`, {
+			method: 'POST'
+		});
+	}
+
+	async runReconciliation(): Promise<{ data: ReconciliationReport; requestId: string }> {
+		return this.request<ReconciliationReport>('/api/v1/messaging/reconciliation/run', {
+			method: 'POST'
+		});
+	}
+
+	async listReconciliationRuns(limit = 20): Promise<{ data: { items: ReconciliationRun[] }; requestId: string }> {
+		return this.request<{ items: ReconciliationRun[] }>(`/api/v1/messaging/reconciliation/history?limit=${limit}`);
+	}
+
+	async listDLRMappings(connectionId?: string): Promise<{ data: { items: DLRMapping[] }; requestId: string }> {
+		const query = connectionId ? `?connection_id=${connectionId}` : '';
+		return this.request<{ items: DLRMapping[] }>(`/api/v1/messaging/dlr-mappings${query}`);
+	}
+
+	async createDLRMapping(mapping: Partial<DLRMapping>): Promise<{ data: DLRMapping; requestId: string }> {
+		return this.request<DLRMapping>('/api/v1/messaging/dlr-mappings', {
+			method: 'POST',
+			body: JSON.stringify(mapping)
+		});
+	}
+
+	async updateDLRMapping(id: string, mapping: Partial<DLRMapping>): Promise<{ data: DLRMapping; requestId: string }> {
+		return this.request<DLRMapping>(`/api/v1/messaging/dlr-mappings/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(mapping)
+		});
+	}
+
+	async deleteDLRMapping(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/messaging/dlr-mappings/${id}`, {
+			method: 'DELETE'
+		});
 	}
 }
 

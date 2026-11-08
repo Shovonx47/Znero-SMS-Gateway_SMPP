@@ -15,22 +15,22 @@ var blockedCIDRs []*net.IPNet
 
 func init() {
 	cidrs := []string{
-		"10.0.0.0/8",          // RFC 1918 Private-Use
-		"172.16.0.0/12",       // RFC 1918 Private-Use
-		"192.168.0.0/16",      // RFC 1918 Private-Use
-		"169.254.0.0/16",      // RFC 3927 Link-Local / Cloud Metadata
-		"100.64.0.0/10",       // RFC 6598 Shared Address Space (Carrier NAT)
-		"198.18.0.0/15",       // RFC 2544 Benchmarking
-		"192.0.0.0/24",        // RFC 6890 IETF Protocol Assignments
-		"192.0.2.0/24",        // RFC 5737 Documentation (TEST-NET-1)
-		"198.51.100.0/24",     // RFC 5737 Documentation (TEST-NET-2)
-		"203.0.113.0/24",      // RFC 5737 Documentation (TEST-NET-3)
-		"224.0.0.0/4",         // RFC 5771 Multicast
-		"240.0.0.0/4",         // RFC 1112 Reserved
-		"0.0.0.0/8",           // RFC 1122 This host on this network
-		"fc00::/7",            // RFC 4193 Unique Local IPv6
-		"fe80::/10",           // RFC 4291 Link-Local IPv6
-		"ff00::/8",            // RFC 4291 Multicast IPv6
+		"10.0.0.0/8",      // RFC 1918 Private-Use
+		"172.16.0.0/12",   // RFC 1918 Private-Use
+		"192.168.0.0/16",  // RFC 1918 Private-Use
+		"169.254.0.0/16",  // RFC 3927 Link-Local / Cloud Metadata
+		"100.64.0.0/10",   // RFC 6598 Shared Address Space (Carrier NAT)
+		"198.18.0.0/15",   // RFC 2544 Benchmarking
+		"192.0.0.0/24",    // RFC 6890 IETF Protocol Assignments
+		"192.0.2.0/24",    // RFC 5737 Documentation (TEST-NET-1)
+		"198.51.100.0/24", // RFC 5737 Documentation (TEST-NET-2)
+		"203.0.113.0/24",  // RFC 5737 Documentation (TEST-NET-3)
+		"224.0.0.0/4",     // RFC 5771 Multicast
+		"240.0.0.0/4",     // RFC 1112 Reserved
+		"0.0.0.0/8",       // RFC 1122 This host on this network
+		"fc00::/7",        // RFC 4193 Unique Local IPv6
+		"fe80::/10",       // RFC 4291 Link-Local IPv6
+		"ff00::/8",        // RFC 4291 Multicast IPv6
 	}
 
 	for _, cidr := range cidrs {
@@ -179,4 +179,3 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, address string) (
 
 	return rawConn, nil
 }
-

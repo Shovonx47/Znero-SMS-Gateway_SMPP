@@ -406,4 +406,3 @@ func (s *Session) heartbeatLoop() {
 		}
 	}
 }
-

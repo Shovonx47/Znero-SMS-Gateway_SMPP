@@ -28,13 +28,13 @@ const (
 )
 
 var (
-	ErrMissingKey         = errors.New("secrets encryption key is required")
-	ErrInvalidKeyLength   = errors.New("secrets encryption key must decode to exactly 32 bytes (256 bits)")
-	ErrInsecureDevKey     = errors.New("refusing to use known development encryption key outside development environment")
-	ErrMalformedCipher    = errors.New("malformed encrypted secret envelope")
-	ErrUnknownKeyID       = errors.New("unknown encryption key version ID")
-	ErrDecryptionFailed   = errors.New("secret authentication or decryption failed (tampered or wrong key)")
-	ErrEmptySecretValue   = errors.New("secret value cannot be empty")
+	ErrMissingKey       = errors.New("secrets encryption key is required")
+	ErrInvalidKeyLength = errors.New("secrets encryption key must decode to exactly 32 bytes (256 bits)")
+	ErrInsecureDevKey   = errors.New("refusing to use known development encryption key outside development environment")
+	ErrMalformedCipher  = errors.New("malformed encrypted secret envelope")
+	ErrUnknownKeyID     = errors.New("unknown encryption key version ID")
+	ErrDecryptionFailed = errors.New("secret authentication or decryption failed (tampered or wrong key)")
+	ErrEmptySecretValue = errors.New("secret value cannot be empty")
 )
 
 // knownDevKeys lists weak or sample keys that must always be rejected outside APP_ENV=development.

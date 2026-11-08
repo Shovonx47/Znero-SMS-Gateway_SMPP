@@ -20,33 +20,33 @@ import (
 )
 
 var (
-	ErrInvalidCredentials     = errors.New("invalid email or password")
-	ErrAccountLocked          = errors.New("account is temporarily locked due to multiple failed login attempts; please try again in 15 minutes")
-	ErrAccountSuspended       = errors.New("account is suspended")
-	ErrOrgSuspended           = errors.New("organization is suspended")
-	ErrInvalidMFACode         = errors.New("invalid authentication code or recovery code")
-	ErrInvalidChallenge       = errors.New("invalid or expired authentication challenge")
-	ErrMFANotEnabled          = errors.New("MFA is not enabled for this user")
-	ErrCannotSuspendSelf      = errors.New("you cannot suspend your own account")
-	ErrPrivilegeEscalation    = errors.New("privilege escalation: cannot grant permissions you do not possess")
-	ErrEmailAlreadyExists     = errors.New("user with this email already exists")
+	ErrInvalidCredentials      = errors.New("invalid email or password")
+	ErrAccountLocked           = errors.New("account is temporarily locked due to multiple failed login attempts; please try again in 15 minutes")
+	ErrAccountSuspended        = errors.New("account is suspended")
+	ErrOrgSuspended            = errors.New("organization is suspended")
+	ErrInvalidMFACode          = errors.New("invalid authentication code or recovery code")
+	ErrInvalidChallenge        = errors.New("invalid or expired authentication challenge")
+	ErrMFANotEnabled           = errors.New("MFA is not enabled for this user")
+	ErrCannotSuspendSelf       = errors.New("you cannot suspend your own account")
+	ErrPrivilegeEscalation     = errors.New("privilege escalation: cannot grant permissions you do not possess")
+	ErrEmailAlreadyExists      = errors.New("user with this email already exists")
 	ErrSessionExpiredOrRevoked = errors.New("session has expired or been revoked")
-	ErrCurrentPasswordInvalid = errors.New("current password is incorrect")
+	ErrCurrentPasswordInvalid  = errors.New("current password is incorrect")
 )
 
 // Precomputed Argon2id dummy hash for constant-time comparison when email is not found.
 const dummyArgon2idHash = "$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQxMjM0NTY3OA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 type Service struct {
-	repo       Repository
-	orgRepo    org.Repository
-	rbacRepo   rbac.Repository
-	auditSvc   *audit.Service
-	tokenMgr   *tokens.TokenManager
-	mailer     Mailer
-	pool       *pgxpool.Pool
-	mfaKeyHex  string
-	env        string
+	repo      Repository
+	orgRepo   org.Repository
+	rbacRepo  rbac.Repository
+	auditSvc  *audit.Service
+	tokenMgr  *tokens.TokenManager
+	mailer    Mailer
+	pool      *pgxpool.Pool
+	mfaKeyHex string
+	env       string
 }
 
 func NewService(

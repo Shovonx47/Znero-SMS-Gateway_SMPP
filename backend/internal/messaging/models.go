@@ -26,21 +26,21 @@ const (
 
 // Standard Messaging Rejection & Failure Reason Codes
 const (
-	ReasonMissingSellRate            = "missing_sell_rate"
-	ReasonNoRouteAvailable           = "no_route_available"
-	ReasonInsufficientFunds          = "insufficient_funds"
-	ReasonInvalidDestination         = "invalid_destination"
-	ReasonInvalidSenderID            = "invalid_sender_id"
-	ReasonMaxSegmentsExceeded        = "max_segments_exceeded"
-	ReasonCustomerSuspended          = "customer_suspended"
-	ReasonDestinationBarred          = "destination_barred"
-	ReasonWalletNotFound             = "wallet_not_found"
-	ReasonDuplicateClientReference   = "duplicate_client_reference"
-	ReasonKilledAtDispatch           = "killed_at_dispatch"
-	ReasonMaxAttemptsExhausted       = "max_attempts_exhausted"
-	ReasonPermanentCarrierReject     = "permanent_carrier_reject"
-	ReasonAmbiguousCarrierOutcome    = "ambiguous_carrier_outcome"
-	ReasonClientCancelled            = "client_cancelled"
+	ReasonMissingSellRate          = "missing_sell_rate"
+	ReasonNoRouteAvailable         = "no_route_available"
+	ReasonInsufficientFunds        = "insufficient_funds"
+	ReasonInvalidDestination       = "invalid_destination"
+	ReasonInvalidSenderID          = "invalid_sender_id"
+	ReasonMaxSegmentsExceeded      = "max_segments_exceeded"
+	ReasonCustomerSuspended        = "customer_suspended"
+	ReasonDestinationBarred        = "destination_barred"
+	ReasonWalletNotFound           = "wallet_not_found"
+	ReasonDuplicateClientReference = "duplicate_client_reference"
+	ReasonKilledAtDispatch         = "killed_at_dispatch"
+	ReasonMaxAttemptsExhausted     = "max_attempts_exhausted"
+	ReasonPermanentCarrierReject   = "permanent_carrier_reject"
+	ReasonAmbiguousCarrierOutcome  = "ambiguous_carrier_outcome"
+	ReasonClientCancelled          = "client_cancelled"
 )
 
 // Allowed State Machine Transitions
@@ -117,7 +117,7 @@ type Message struct {
 	CreatedAt            time.Time        `json:"created_at"`
 	CustomerOrgID        uuid.UUID        `json:"customer_org_id"`
 	ClientReference      *string          `json:"client_reference,omitempty"`
-	OriginalDestination string           `json:"original_destination"`
+	OriginalDestination  string           `json:"original_destination"`
 	Destination          string           `json:"destination"`
 	SenderID             string           `json:"sender_id"`
 	SenderIDType         string           `json:"sender_id_type"`
@@ -179,20 +179,20 @@ type MessageOutbox struct {
 
 // MessageAttempt records an individual transmission attempt to an upstream provider.
 type MessageAttempt struct {
-	ID                 uuid.UUID        `json:"id"`
-	MessageID          uuid.UUID        `json:"message_id"`
-	MessageCreatedAt   time.Time        `json:"message_created_at"`
-	AttemptNumber      int              `json:"attempt_number"`
-	ConnectionID       uuid.UUID        `json:"connection_id"`
-	Status             string           `json:"status"` // submitting|accepted|retryable_reject|fatal_reject|unknown
-	ProviderMessageID  *string          `json:"provider_message_id,omitempty"`
-	ErrorCode          *string          `json:"error_code,omitempty"`
-	ErrorMessage       *string          `json:"error_message,omitempty"`
-	BuyCost            *decimal.Decimal `json:"buy_cost,omitempty"`
-	BuyCurrency        *string          `json:"buy_currency,omitempty"`
-	LatencyMs          *int             `json:"latency_ms,omitempty"`
-	StartedAt          time.Time        `json:"started_at"`
-	FinishedAt         *time.Time       `json:"finished_at,omitempty"`
+	ID                uuid.UUID        `json:"id"`
+	MessageID         uuid.UUID        `json:"message_id"`
+	MessageCreatedAt  time.Time        `json:"message_created_at"`
+	AttemptNumber     int              `json:"attempt_number"`
+	ConnectionID      uuid.UUID        `json:"connection_id"`
+	Status            string           `json:"status"` // submitting|accepted|retryable_reject|fatal_reject|unknown
+	ProviderMessageID *string          `json:"provider_message_id,omitempty"`
+	ErrorCode         *string          `json:"error_code,omitempty"`
+	ErrorMessage      *string          `json:"error_message,omitempty"`
+	BuyCost           *decimal.Decimal `json:"buy_cost,omitempty"`
+	BuyCurrency       *string          `json:"buy_currency,omitempty"`
+	LatencyMs         *int             `json:"latency_ms,omitempty"`
+	StartedAt         time.Time        `json:"started_at"`
+	FinishedAt        *time.Time       `json:"finished_at,omitempty"`
 }
 
 // MessageEvent represents an append-only lifecycle transition event.
@@ -210,15 +210,15 @@ type MessageEvent struct {
 
 // MessageDLR represents an append-only DLR status report receipt.
 type MessageDLR struct {
-	ID                 uuid.UUID  `json:"id"`
-	MessageID          *uuid.UUID `json:"message_id,omitempty"`
-	MessageCreatedAt   *time.Time `json:"message_created_at,omitempty"`
-	ConnectionID       *uuid.UUID `json:"connection_id,omitempty"`
-	ProviderMessageID  string     `json:"provider_message_id"`
-	Status             string     `json:"status"`
-	ErrorCode          *string    `json:"error_code,omitempty"`
-	RawReceipt         *string    `json:"raw_receipt,omitempty"`
-	ReceivedAt         time.Time  `json:"received_at"`
+	ID                uuid.UUID  `json:"id"`
+	MessageID         *uuid.UUID `json:"message_id,omitempty"`
+	MessageCreatedAt  *time.Time `json:"message_created_at,omitempty"`
+	ConnectionID      *uuid.UUID `json:"connection_id,omitempty"`
+	ProviderMessageID string     `json:"provider_message_id"`
+	Status            string     `json:"status"`
+	ErrorCode         *string    `json:"error_code,omitempty"`
+	RawReceipt        *string    `json:"raw_receipt,omitempty"`
+	ReceivedAt        time.Time  `json:"received_at"`
 }
 
 // SubmitRequest is the client submission DTO.
@@ -246,26 +246,26 @@ type SubmitResponse struct {
 
 // MessageView is the sanitized read view with tenant field-stripping applied.
 type MessageView struct {
-	ID                   uuid.UUID        `json:"id"`
-	CreatedAt            time.Time        `json:"created_at"`
-	CustomerOrgID        uuid.UUID        `json:"customer_org_id"`
-	ClientReference      *string          `json:"client_reference,omitempty"`
-	OriginalDestination string           `json:"original_destination"`
-	Destination          string           `json:"destination"`
-	SenderID             string           `json:"sender_id"`
-	SenderIDType         string           `json:"sender_id_type"`
-	Encoding             string           `json:"encoding"`
-	Body                 string           `json:"body,omitempty"` // Masked unless message.content.view held
-	BodyLength           int              `json:"body_length"`
-	TotalParts           int              `json:"total_parts"`
-	Status               string           `json:"status"`
-	FailureReason        *string          `json:"failure_reason,omitempty"`
-	SellPrice            decimal.Decimal  `json:"sell_price"`
-	SellCurrency         string           `json:"sell_currency"`
-	Attempts             int              `json:"attempts"`
-	ExpiresAt            time.Time        `json:"expires_at"`
-	SubmittedAt          *time.Time       `json:"submitted_at,omitempty"`
-	DeliveredAt          *time.Time       `json:"delivered_at,omitempty"`
+	ID                  uuid.UUID       `json:"id"`
+	CreatedAt           time.Time       `json:"created_at"`
+	CustomerOrgID       uuid.UUID       `json:"customer_org_id"`
+	ClientReference     *string         `json:"client_reference,omitempty"`
+	OriginalDestination string          `json:"original_destination"`
+	Destination         string          `json:"destination"`
+	SenderID            string          `json:"sender_id"`
+	SenderIDType        string          `json:"sender_id_type"`
+	Encoding            string          `json:"encoding"`
+	Body                string          `json:"body,omitempty"` // Masked unless message.content.view held
+	BodyLength          int             `json:"body_length"`
+	TotalParts          int             `json:"total_parts"`
+	Status              string          `json:"status"`
+	FailureReason       *string         `json:"failure_reason,omitempty"`
+	SellPrice           decimal.Decimal `json:"sell_price"`
+	SellCurrency        string          `json:"sell_currency"`
+	Attempts            int             `json:"attempts"`
+	ExpiresAt           time.Time       `json:"expires_at"`
+	SubmittedAt         *time.Time      `json:"submitted_at,omitempty"`
+	DeliveredAt         *time.Time      `json:"delivered_at,omitempty"`
 
 	// Platform-Only Fields (stripped for non-platform callers)
 	ProviderConnectionID *uuid.UUID       `json:"provider_connection_id,omitempty"`
@@ -279,21 +279,126 @@ type MessageView struct {
 
 // OutboxPayload is serialized into message_outbox.payload
 type OutboxPayload struct {
-	MessageID            uuid.UUID       `json:"message_id"`
-	MessageCreatedAt     time.Time       `json:"message_created_at"`
-	CustomerOrgID        uuid.UUID       `json:"customer_org_id"`
-	Destination          string          `json:"destination"`
-	SenderID             string          `json:"sender_id"`
-	SenderIDType         string          `json:"sender_id_type"`
-	Encoding             string          `json:"encoding"`
-	TotalParts           int             `json:"total_parts"`
-	SellPrice            decimal.Decimal `json:"sell_price"`
-	SellCurrency         string          `json:"sell_currency"`
+	MessageID              uuid.UUID       `json:"message_id"`
+	MessageCreatedAt       time.Time       `json:"message_created_at"`
+	CustomerOrgID          uuid.UUID       `json:"customer_org_id"`
+	Destination            string          `json:"destination"`
+	SenderID               string          `json:"sender_id"`
+	SenderIDType           string          `json:"sender_id_type"`
+	Encoding               string          `json:"encoding"`
+	TotalParts             int             `json:"total_parts"`
+	SellPrice              decimal.Decimal `json:"sell_price"`
+	SellCurrency           string          `json:"sell_currency"`
 	CandidateConnectionIDs []uuid.UUID     `json:"candidate_connection_ids"`
 	CurrentConnectionID    uuid.UUID       `json:"current_connection_id"`
 	FailedConnectionIDs    []uuid.UUID     `json:"failed_connection_ids,omitempty"`
 	AttemptNumber          int             `json:"attempt_number"`
-	MaxAttempts          int             `json:"max_attempts"`
-	Body                 string          `json:"body"`
+	MaxAttempts            int             `json:"max_attempts"`
+	Body                   string          `json:"body"`
 }
 
+// DLRMapping represents a custom status override for an upstream SMSC.
+type DLRMapping struct {
+	ID           uuid.UUID  `json:"id"`
+	ConnectionID uuid.UUID  `json:"connection_id"`
+	UpstreamStat string     `json:"upstream_stat"`
+	UpstreamErr  *string    `json:"upstream_err,omitempty"`
+	MappedStatus string     `json:"mapped_status"`
+	Description  *string    `json:"description,omitempty"`
+	Version      int        `json:"version"`
+	CreatedBy    *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// UnmatchedDLR represents a DLR awaiting provider message ID resolution.
+type UnmatchedDLR struct {
+	ID                uuid.UUID  `json:"id"`
+	ConnectionID      *uuid.UUID `json:"connection_id,omitempty"`
+	ProviderMessageID string     `json:"provider_message_id"`
+	Status            string     `json:"status"`
+	ErrorCode         *string    `json:"error_code,omitempty"`
+	RawReceipt        *string    `json:"raw_receipt,omitempty"`
+	MatchStatus       string     `json:"match_status"` // unmatched|matched|flagged_unmatched
+	RetryCount        int        `json:"retry_count"`
+	LastRetryAt       *time.Time `json:"last_retry_at,omitempty"`
+	ReceivedAt        time.Time  `json:"received_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// SettlementException represents a financial or reconciliation discrepancy.
+type SettlementException struct {
+	ID               uuid.UUID       `json:"id"`
+	MessageID        uuid.UUID       `json:"message_id"`
+	MessageCreatedAt time.Time       `json:"message_created_at"`
+	CustomerOrgID    *uuid.UUID      `json:"customer_org_id,omitempty"`
+	HoldID           *uuid.UUID      `json:"hold_id,omitempty"`
+	ExceptionType    string          `json:"exception_type"`
+	Severity         string          `json:"severity"` // info|warning|critical
+	Details          json.RawMessage `json:"details"`
+	Resolved         bool            `json:"resolved"`
+	ResolvedBy       *uuid.UUID      `json:"resolved_by,omitempty"`
+	ResolvedAt       *time.Time      `json:"resolved_at,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+}
+
+// ReconciliationRun records the execution summary of a ledger-messaging check.
+type ReconciliationRun struct {
+	ID               uuid.UUID       `json:"id"`
+	StartedAt        time.Time       `json:"started_at"`
+	CompletedAt      *time.Time      `json:"completed_at,omitempty"`
+	MessagesChecked  int             `json:"messages_checked"`
+	DiscrepancyCount int             `json:"discrepancy_count"`
+	SummaryJSON      json.RawMessage `json:"summary_json"`
+	InitiatedBy      *uuid.UUID      `json:"initiated_by,omitempty"`
+}
+
+// ReconciliationReport holds the detailed output of an on-demand reconciliation.
+type ReconciliationReport struct {
+	MessagesChecked    int                      `json:"messages_checked"`
+	TerminalCount      int                      `json:"terminal_count"`
+	InFlightCount      int                      `json:"in_flight_count"`
+	UnresolvedUnknown  int                      `json:"unresolved_unknown"`
+	UnmatchedDLRsCount int                      `json:"unmatched_dlrs_count"`
+	Discrepancies      []map[string]interface{} `json:"discrepancies"`
+	DiscrepancyCount   int                      `json:"discrepancy_count"`
+	LedgerMatches      bool                     `json:"ledger_matches"`
+}
+
+// QueueBacklogStats provides live metrics on the transactional outbox.
+type QueueBacklogStats struct {
+	PendingCount      int        `json:"pending_count"`
+	SendingCount      int        `json:"sending_count"`
+	OldestPendingTime *time.Time `json:"oldest_pending_time,omitempty"`
+	OldestAgeSeconds  float64    `json:"oldest_age_seconds"`
+}
+
+// MessageDetailView contains full journey details for a single message.
+type MessageDetailView struct {
+	Message  MessageView      `json:"message"`
+	Parts    []MessagePart    `json:"parts"`
+	Attempts []MessageAttempt `json:"attempts"`
+	Events   []MessageEvent   `json:"events"`
+	DLRs     []MessageDLR     `json:"dlrs"`
+	HoldInfo *HoldSummary     `json:"hold_info,omitempty"`
+}
+
+// HoldSummary summarizes the ledger hold associated with a message.
+type HoldSummary struct {
+	HoldID       uuid.UUID        `json:"hold_id"`
+	WalletID     uuid.UUID        `json:"wallet_id"`
+	OriginalHold decimal.Decimal  `json:"original_hold"`
+	Captured     *decimal.Decimal `json:"captured,omitempty"`
+	Status       string           `json:"status"` // active|captured|released|expired
+	ExpiresAt    time.Time        `json:"expires_at"`
+}
+
+// TestSendRequest is the platform operator test dispatch DTO.
+type TestSendRequest struct {
+	CustomerOrgID   uuid.UUID `json:"customer_org_id"`
+	Destination     string    `json:"destination"`
+	SenderID        string    `json:"sender_id"`
+	Text            string    `json:"text"`
+	Encoding        string    `json:"encoding,omitempty"`
+	ValiditySeconds *int      `json:"validity_seconds,omitempty"`
+}

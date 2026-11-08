@@ -9,27 +9,27 @@ import (
 )
 
 var (
-	ErrWalletNotFound          = errors.New("wallet not found")
-	ErrWalletFrozen            = errors.New("wallet is frozen; no debits or holds permitted")
-	ErrWalletClosed            = errors.New("wallet is closed")
-	ErrInsufficientFunds       = errors.New("insufficient available funds")
-	ErrNegativeAmount          = errors.New("amount must be strictly positive")
-	ErrCurrencyMismatch        = errors.New("currency mismatch between wallet and transaction")
-	ErrUnbalancedTransaction   = errors.New("double-entry transaction entries are unbalanced")
-	ErrIdempotencyConflict     = errors.New("idempotency key reused with differing parameters")
-	ErrHoldNotFound            = errors.New("hold not found")
-	ErrHoldNotActive           = errors.New("hold is not active")
-	ErrHoldExpired             = errors.New("hold has expired")
-	ErrHoldCaptureExceeded     = errors.New("captured amount exceeds original hold amount")
-	ErrTransactionNotFound     = errors.New("ledger transaction not found")
+	ErrWalletNotFound             = errors.New("wallet not found")
+	ErrWalletFrozen               = errors.New("wallet is frozen; no debits or holds permitted")
+	ErrWalletClosed               = errors.New("wallet is closed")
+	ErrInsufficientFunds          = errors.New("insufficient available funds")
+	ErrNegativeAmount             = errors.New("amount must be strictly positive")
+	ErrCurrencyMismatch           = errors.New("currency mismatch between wallet and transaction")
+	ErrUnbalancedTransaction      = errors.New("double-entry transaction entries are unbalanced")
+	ErrIdempotencyConflict        = errors.New("idempotency key reused with differing parameters")
+	ErrHoldNotFound               = errors.New("hold not found")
+	ErrHoldNotActive              = errors.New("hold is not active")
+	ErrHoldExpired                = errors.New("hold has expired")
+	ErrHoldCaptureExceeded        = errors.New("captured amount exceeds original hold amount")
+	ErrTransactionNotFound        = errors.New("ledger transaction not found")
 	ErrTransactionAlreadyReversed = errors.New("transaction has already been reversed")
-	ErrReversalNotAllowed      = errors.New("transaction cannot be reversed")
-	ErrReasonRequired          = errors.New("reason is mandatory for adjustments and reversals")
-	ErrMakerCannotApprove      = errors.New("maker cannot approve their own change request")
-	ErrCrossTenantAccess       = errors.New("access denied: resource is outside tenant boundary")
-	ErrPermissionDenied        = errors.New("permission denied")
-	ErrAmountExceedsMaximum    = errors.New("amount exceeds maximum allowed bound of 1,000,000.0000")
-	ErrValidation              = errors.New("validation failed")
+	ErrReversalNotAllowed         = errors.New("transaction cannot be reversed")
+	ErrReasonRequired             = errors.New("reason is mandatory for adjustments and reversals")
+	ErrMakerCannotApprove         = errors.New("maker cannot approve their own change request")
+	ErrCrossTenantAccess          = errors.New("access denied: resource is outside tenant boundary")
+	ErrPermissionDenied           = errors.New("permission denied")
+	ErrAmountExceedsMaximum       = errors.New("amount exceeds maximum allowed bound of 1,000,000.0000")
+	ErrValidation                 = errors.New("validation failed")
 )
 
 // Precision scale for monetary values (4 decimal places = 0.0001)
@@ -44,7 +44,7 @@ type Wallet struct {
 	OrganizationName    string          `json:"organization_name,omitempty"`
 	OrganizationType    string          `json:"organization_type,omitempty"`
 	Currency            string          `json:"currency"`
-	Status              string          `json:"status"` // active | frozen | closed
+	Status              string          `json:"status"`       // active | frozen | closed
 	AccountType         string          `json:"account_type"` // prepaid | postpaid
 	LowBalanceThreshold decimal.Decimal `json:"low_balance_threshold"`
 	CachedBalance       decimal.Decimal `json:"cached_balance"`
@@ -58,30 +58,30 @@ type Wallet struct {
 
 // LedgerAccount represents a double-entry balance sheet account.
 type LedgerAccount struct {
-	ID        uuid.UUID `json:"id"`
-	Code      string    `json:"code"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"` // asset | liability | equity | revenue | expense | wallet
-	Currency  string    `json:"currency"`
+	ID        uuid.UUID  `json:"id"`
+	Code      string     `json:"code"`
+	Name      string     `json:"name"`
+	Type      string     `json:"type"` // asset | liability | equity | revenue | expense | wallet
+	Currency  string     `json:"currency"`
 	WalletID  *uuid.UUID `json:"wallet_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // LedgerTransaction represents a financial transaction grouping at least two balanced entries.
 type LedgerTransaction struct {
-	ID                     uuid.UUID       `json:"id"`
-	Type                   string          `json:"type"` // topup | adjustment | charge | refund | reversal | hold_capture | transfer
-	ReferenceType          *string         `json:"reference_type,omitempty"`
-	ReferenceID            *uuid.UUID      `json:"reference_id,omitempty"`
-	IdempotencyKey         *string         `json:"idempotency_key,omitempty"`
-	Description            string          `json:"description"`
-	Reason                 *string         `json:"reason,omitempty"`
-	ReversalOfTransactionID *uuid.UUID     `json:"reversal_of_transaction_id,omitempty"`
-	TenantOrgID            *uuid.UUID      `json:"tenant_org_id,omitempty"`
-	ActorUserID            *uuid.UUID      `json:"actor_user_id,omitempty"`
-	ActorOrgID             *uuid.UUID      `json:"actor_org_id,omitempty"`
-	CreatedAt              time.Time       `json:"created_at"`
-	Entries                []LedgerEntry   `json:"entries,omitempty"`
+	ID                      uuid.UUID     `json:"id"`
+	Type                    string        `json:"type"` // topup | adjustment | charge | refund | reversal | hold_capture | transfer
+	ReferenceType           *string       `json:"reference_type,omitempty"`
+	ReferenceID             *uuid.UUID    `json:"reference_id,omitempty"`
+	IdempotencyKey          *string       `json:"idempotency_key,omitempty"`
+	Description             string        `json:"description"`
+	Reason                  *string       `json:"reason,omitempty"`
+	ReversalOfTransactionID *uuid.UUID    `json:"reversal_of_transaction_id,omitempty"`
+	TenantOrgID             *uuid.UUID    `json:"tenant_org_id,omitempty"`
+	ActorUserID             *uuid.UUID    `json:"actor_user_id,omitempty"`
+	ActorOrgID              *uuid.UUID    `json:"actor_org_id,omitempty"`
+	CreatedAt               time.Time     `json:"created_at"`
+	Entries                 []LedgerEntry `json:"entries,omitempty"`
 }
 
 // LedgerEntry represents a single debit or credit line in a balanced transaction.
@@ -193,14 +193,13 @@ type StatementFilter struct {
 
 // TransactionFilter provides filtering parameters for ledger transactions explorer.
 type TransactionFilter struct {
-	WalletID        *uuid.UUID `json:"wallet_id,omitempty"`
-	TransactionType *string    `json:"type,omitempty"`
-	StartDate       *time.Time `json:"start_date,omitempty"`
-	EndDate         *time.Time `json:"end_date,omitempty"`
+	WalletID        *uuid.UUID       `json:"wallet_id,omitempty"`
+	TransactionType *string          `json:"type,omitempty"`
+	StartDate       *time.Time       `json:"start_date,omitempty"`
+	EndDate         *time.Time       `json:"end_date,omitempty"`
 	MinAmount       *decimal.Decimal `json:"min_amount,omitempty"`
 	MaxAmount       *decimal.Decimal `json:"max_amount,omitempty"`
-	Search          string     `json:"search,omitempty"`
-	Page            int        `json:"page"`
-	PageSize        int        `json:"page_size"`
+	Search          string           `json:"search,omitempty"`
+	Page            int              `json:"page"`
+	PageSize        int              `json:"page_size"`
 }
-

@@ -28,6 +28,30 @@ type Repository interface {
 	FetchOutboxPending(ctx context.Context, limit int, workerID string, lockDuration time.Duration) ([]MessageOutbox, error)
 	UpdateOutboxStatus(ctx context.Context, tx pgx.Tx, outboxID uuid.UUID, status string, nextAttemptAt *time.Time) error
 	EnsureMonthlyPartitions(ctx context.Context, monthsAhead int) error
+	GetProviderLookup(ctx context.Context, connectionID uuid.UUID, providerMsgID string) (*uuid.UUID, *time.Time, error)
+	RecordRawDLR(ctx context.Context, tx pgx.Tx, dlr MessageDLR) error
+	InsertUnmatchedDLR(ctx context.Context, tx pgx.Tx, item UnmatchedDLR) error
+	GetUnmatchedDLRs(ctx context.Context, page, pageSize int, statusFilter string) ([]UnmatchedDLR, int, error)
+	UpdateUnmatchedDLRStatus(ctx context.Context, id uuid.UUID, status string) error
+	GetDLRMappingsForConnection(ctx context.Context, connectionID uuid.UUID) ([]DLRMapping, error)
+	CreateDLRMapping(ctx context.Context, m *DLRMapping) error
+	UpdateDLRMapping(ctx context.Context, m *DLRMapping) error
+	DeleteDLRMapping(ctx context.Context, id uuid.UUID) error
+	ListDLRMappings(ctx context.Context, connectionID *uuid.UUID) ([]DLRMapping, error)
+	RecordSettlementException(ctx context.Context, exc SettlementException) error
+	ListSettlementExceptions(ctx context.Context, orgID *uuid.UUID, resolved *bool, page, pageSize int) ([]SettlementException, int, error)
+	ResolveSettlementException(ctx context.Context, id uuid.UUID, resolvedBy uuid.UUID) error
+	RecordReconciliationRun(ctx context.Context, run ReconciliationRun) error
+	ListReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error)
+	GetQueueBacklogStats(ctx context.Context) (QueueBacklogStats, error)
+	GetMessageAttempts(ctx context.Context, messageID uuid.UUID) ([]MessageAttempt, error)
+	GetMessageEvents(ctx context.Context, messageID uuid.UUID) ([]MessageEvent, error)
+	GetMessageDLRs(ctx context.Context, messageID uuid.UUID) ([]MessageDLR, error)
+	FindStuckMessages(ctx context.Context, before time.Time, limit int) ([]Message, error)
+	FindUnknownMessages(ctx context.Context, before time.Time, limit int) ([]Message, error)
+	FindNoDLRSubmittedMessages(ctx context.Context, before time.Time, limit int) ([]Message, error)
+	FindPendingUnmatchedDLRs(ctx context.Context, limit int) ([]UnmatchedDLR, error)
+	ListMessagesAdvanced(ctx context.Context, orgID *uuid.UUID, status, destination, senderID string, connID *uuid.UUID, fromDate, toDate *time.Time, page, pageSize int) ([]Message, int, error)
 }
 
 type pgRepository struct {
@@ -627,3 +651,759 @@ func (r *pgRepository) EnsureMonthlyPartitions(ctx context.Context, monthsAhead 
 	return nil
 }
 
+func (r *pgRepository) GetProviderLookup(ctx context.Context, connectionID uuid.UUID, providerMsgID string) (*uuid.UUID, *time.Time, error) {
+	query := `
+		SELECT message_id, message_created_at
+		FROM message_provider_lookups
+		WHERE connection_id = $1 AND provider_message_id = $2
+	`
+	var msgID uuid.UUID
+	var createdAt time.Time
+	err := r.pool.QueryRow(ctx, query, connectionID, providerMsgID).Scan(&msgID, &createdAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	return &msgID, &createdAt, nil
+}
+
+func (r *pgRepository) RecordRawDLR(ctx context.Context, tx pgx.Tx, dlr MessageDLR) error {
+	if dlr.ID == uuid.Nil {
+		dlr.ID = uuid.New()
+	}
+	if dlr.ReceivedAt.IsZero() {
+		dlr.ReceivedAt = time.Now().UTC()
+	}
+	query := `
+		INSERT INTO message_dlrs (
+			id, message_id, message_created_at, connection_id, provider_message_id,
+			status, error_code, raw_receipt, received_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	var err error
+	if tx != nil {
+		_, err = tx.Exec(ctx, query,
+			dlr.ID, dlr.MessageID, dlr.MessageCreatedAt, dlr.ConnectionID,
+			dlr.ProviderMessageID, dlr.Status, dlr.ErrorCode, dlr.RawReceipt, dlr.ReceivedAt,
+		)
+	} else {
+		_, err = r.pool.Exec(ctx, query,
+			dlr.ID, dlr.MessageID, dlr.MessageCreatedAt, dlr.ConnectionID,
+			dlr.ProviderMessageID, dlr.Status, dlr.ErrorCode, dlr.RawReceipt, dlr.ReceivedAt,
+		)
+	}
+	return err
+}
+
+func (r *pgRepository) InsertUnmatchedDLR(ctx context.Context, tx pgx.Tx, item UnmatchedDLR) error {
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
+	if item.ReceivedAt.IsZero() {
+		item.ReceivedAt = time.Now().UTC()
+	}
+	if item.MatchStatus == "" {
+		item.MatchStatus = "unmatched"
+	}
+	query := `
+		INSERT INTO unmatched_dlrs (
+			id, connection_id, provider_message_id, status, error_code,
+			raw_receipt, match_status, retry_count, received_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+	`
+	var err error
+	if tx != nil {
+		_, err = tx.Exec(ctx, query,
+			item.ID, item.ConnectionID, item.ProviderMessageID, item.Status, item.ErrorCode,
+			item.RawReceipt, item.MatchStatus, item.RetryCount, item.ReceivedAt,
+		)
+	} else {
+		_, err = r.pool.Exec(ctx, query,
+			item.ID, item.ConnectionID, item.ProviderMessageID, item.Status, item.ErrorCode,
+			item.RawReceipt, item.MatchStatus, item.RetryCount, item.ReceivedAt,
+		)
+	}
+	return err
+}
+
+func (r *pgRepository) GetUnmatchedDLRs(ctx context.Context, page, pageSize int, statusFilter string) ([]UnmatchedDLR, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	offset := (page - 1) * pageSize
+
+	baseWhere := "WHERE 1=1"
+	var args []interface{}
+	argIdx := 1
+	if statusFilter != "" {
+		baseWhere += fmt.Sprintf(" AND match_status = $%d", argIdx)
+		args = append(args, statusFilter)
+		argIdx++
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM unmatched_dlrs %s", baseWhere)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, connection_id, provider_message_id, status, error_code,
+		       raw_receipt, match_status, retry_count, last_retry_at, received_at, updated_at
+		FROM unmatched_dlrs
+		%s
+		ORDER BY received_at DESC
+		LIMIT $%d OFFSET $%d
+	`, baseWhere, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []UnmatchedDLR
+	for rows.Next() {
+		var item UnmatchedDLR
+		if err := rows.Scan(
+			&item.ID, &item.ConnectionID, &item.ProviderMessageID, &item.Status, &item.ErrorCode,
+			&item.RawReceipt, &item.MatchStatus, &item.RetryCount, &item.LastRetryAt,
+			&item.ReceivedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, item)
+	}
+
+	return list, total, nil
+}
+
+func (r *pgRepository) UpdateUnmatchedDLRStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE unmatched_dlrs
+		SET match_status = $1, retry_count = retry_count + 1, last_retry_at = now(), updated_at = now()
+		WHERE id = $2
+	`, status, id)
+	return err
+}
+
+func (r *pgRepository) GetDLRMappingsForConnection(ctx context.Context, connectionID uuid.UUID) ([]DLRMapping, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, connection_id, upstream_stat, upstream_err, mapped_status, description, version, created_by, created_at, updated_at
+		FROM provider_connection_dlr_mappings
+		WHERE connection_id = $1
+	`, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []DLRMapping
+	for rows.Next() {
+		var m DLRMapping
+		if err := rows.Scan(
+			&m.ID, &m.ConnectionID, &m.UpstreamStat, &m.UpstreamErr, &m.MappedStatus,
+			&m.Description, &m.Version, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) CreateDLRMapping(ctx context.Context, m *DLRMapping) error {
+	if m.ID == uuid.Nil {
+		m.ID = uuid.New()
+	}
+	m.Version = 1
+	m.CreatedAt = time.Now().UTC()
+	m.UpdatedAt = m.CreatedAt
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO provider_connection_dlr_mappings (
+			id, connection_id, upstream_stat, upstream_err, mapped_status, description, version, created_by, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, m.ID, m.ConnectionID, m.UpstreamStat, m.UpstreamErr, m.MappedStatus, m.Description, m.Version, m.CreatedBy, m.CreatedAt, m.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO provider_connection_dlr_mappings_history (
+			mapping_id, connection_id, upstream_stat, upstream_err, mapped_status, description, version, changed_by, change_type
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'create')
+	`, m.ID, m.ConnectionID, m.UpstreamStat, m.UpstreamErr, m.MappedStatus, m.Description, m.Version, m.CreatedBy)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *pgRepository) UpdateDLRMapping(ctx context.Context, m *DLRMapping) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var currentVersion int
+	err = tx.QueryRow(ctx, "SELECT version FROM provider_connection_dlr_mappings WHERE id = $1 FOR UPDATE", m.ID).Scan(&currentVersion)
+	if err != nil {
+		return err
+	}
+
+	m.Version = currentVersion + 1
+	m.UpdatedAt = time.Now().UTC()
+
+	_, err = tx.Exec(ctx, `
+		UPDATE provider_connection_dlr_mappings
+		SET upstream_stat = $1, upstream_err = $2, mapped_status = $3, description = $4, version = $5, updated_at = $6
+		WHERE id = $7
+	`, m.UpstreamStat, m.UpstreamErr, m.MappedStatus, m.Description, m.Version, m.UpdatedAt, m.ID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO provider_connection_dlr_mappings_history (
+			mapping_id, connection_id, upstream_stat, upstream_err, mapped_status, description, version, changed_by, change_type
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'update')
+	`, m.ID, m.ConnectionID, m.UpstreamStat, m.UpstreamErr, m.MappedStatus, m.Description, m.Version, m.CreatedBy)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *pgRepository) DeleteDLRMapping(ctx context.Context, id uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, "DELETE FROM provider_connection_dlr_mappings WHERE id = $1", id)
+	return err
+}
+
+func (r *pgRepository) ListDLRMappings(ctx context.Context, connectionID *uuid.UUID) ([]DLRMapping, error) {
+	query := `
+		SELECT id, connection_id, upstream_stat, upstream_err, mapped_status, description, version, created_by, created_at, updated_at
+		FROM provider_connection_dlr_mappings
+	`
+	var rows pgx.Rows
+	var err error
+	if connectionID != nil {
+		query += " WHERE connection_id = $1 ORDER BY updated_at DESC"
+		rows, err = r.pool.Query(ctx, query, *connectionID)
+	} else {
+		query += " ORDER BY updated_at DESC"
+		rows, err = r.pool.Query(ctx, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []DLRMapping
+	for rows.Next() {
+		var m DLRMapping
+		if err := rows.Scan(
+			&m.ID, &m.ConnectionID, &m.UpstreamStat, &m.UpstreamErr, &m.MappedStatus,
+			&m.Description, &m.Version, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) RecordSettlementException(ctx context.Context, exc SettlementException) error {
+	if exc.ID == uuid.Nil {
+		exc.ID = uuid.New()
+	}
+	if exc.CreatedAt.IsZero() {
+		exc.CreatedAt = time.Now().UTC()
+	}
+	if exc.Severity == "" {
+		exc.Severity = "warning"
+	}
+	if len(exc.Details) == 0 {
+		exc.Details = []byte("{}")
+	}
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO settlement_exceptions (
+			id, message_id, message_created_at, customer_org_id, hold_id,
+			exception_type, severity, details, resolved, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, exc.ID, exc.MessageID, exc.MessageCreatedAt, exc.CustomerOrgID, exc.HoldID,
+		exc.ExceptionType, exc.Severity, exc.Details, exc.Resolved, exc.CreatedAt)
+	return err
+}
+
+func (r *pgRepository) ListSettlementExceptions(ctx context.Context, orgID *uuid.UUID, resolved *bool, page, pageSize int) ([]SettlementException, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	offset := (page - 1) * pageSize
+
+	baseWhere := "WHERE 1=1"
+	var args []interface{}
+	argIdx := 1
+	if orgID != nil {
+		baseWhere += fmt.Sprintf(" AND customer_org_id = $%d", argIdx)
+		args = append(args, *orgID)
+		argIdx++
+	}
+	if resolved != nil {
+		baseWhere += fmt.Sprintf(" AND resolved = $%d", argIdx)
+		args = append(args, *resolved)
+		argIdx++
+	}
+
+	var total int
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM settlement_exceptions %s", baseWhere)
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, message_id, message_created_at, customer_org_id, hold_id,
+		       exception_type, severity, details, resolved, resolved_by, resolved_at, created_at
+		FROM settlement_exceptions
+		%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, baseWhere, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []SettlementException
+	for rows.Next() {
+		var exc SettlementException
+		if err := rows.Scan(
+			&exc.ID, &exc.MessageID, &exc.MessageCreatedAt, &exc.CustomerOrgID, &exc.HoldID,
+			&exc.ExceptionType, &exc.Severity, &exc.Details, &exc.Resolved,
+			&exc.ResolvedBy, &exc.ResolvedAt, &exc.CreatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, exc)
+	}
+
+	return list, total, nil
+}
+
+func (r *pgRepository) ResolveSettlementException(ctx context.Context, id uuid.UUID, resolvedBy uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE settlement_exceptions
+		SET resolved = true, resolved_by = $1, resolved_at = now()
+		WHERE id = $2
+	`, resolvedBy, id)
+	return err
+}
+
+func (r *pgRepository) RecordReconciliationRun(ctx context.Context, run ReconciliationRun) error {
+	if run.ID == uuid.Nil {
+		run.ID = uuid.New()
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now().UTC()
+	}
+	if len(run.SummaryJSON) == 0 {
+		run.SummaryJSON = []byte("{}")
+	}
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO messaging_reconciliation_runs (
+			id, started_at, completed_at, messages_checked, discrepancy_count, summary_json, initiated_by
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, run.ID, run.StartedAt, run.CompletedAt, run.MessagesChecked, run.DiscrepancyCount, run.SummaryJSON, run.InitiatedBy)
+	return err
+}
+
+func (r *pgRepository) ListReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, started_at, completed_at, messages_checked, discrepancy_count, summary_json, initiated_by
+		FROM messaging_reconciliation_runs
+		ORDER BY started_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ReconciliationRun
+	for rows.Next() {
+		var item ReconciliationRun
+		if err := rows.Scan(
+			&item.ID, &item.StartedAt, &item.CompletedAt, &item.MessagesChecked,
+			&item.DiscrepancyCount, &item.SummaryJSON, &item.InitiatedBy,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, item)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) GetQueueBacklogStats(ctx context.Context) (QueueBacklogStats, error) {
+	var stats QueueBacklogStats
+	err := r.pool.QueryRow(ctx, `
+		SELECT 
+			COUNT(*) FILTER (WHERE status = 'pending'),
+			COUNT(*) FILTER (WHERE status = 'sending'),
+			MIN(created_at) FILTER (WHERE status IN ('pending', 'sending'))
+		FROM message_outbox
+		WHERE status IN ('pending', 'sending')
+	`).Scan(&stats.PendingCount, &stats.SendingCount, &stats.OldestPendingTime)
+	if err != nil {
+		return stats, err
+	}
+	if stats.OldestPendingTime != nil {
+		stats.OldestAgeSeconds = time.Since(*stats.OldestPendingTime).Seconds()
+	}
+	return stats, nil
+}
+
+func (r *pgRepository) GetMessageAttempts(ctx context.Context, messageID uuid.UUID) ([]MessageAttempt, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, message_id, message_created_at, attempt_number, connection_id, status,
+		       provider_message_id, error_code, error_message, buy_cost, buy_currency, latency_ms,
+		       started_at, finished_at
+		FROM message_attempts
+		WHERE message_id = $1
+		ORDER BY attempt_number ASC
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MessageAttempt
+	for rows.Next() {
+		var a MessageAttempt
+		if err := rows.Scan(
+			&a.ID, &a.MessageID, &a.MessageCreatedAt, &a.AttemptNumber, &a.ConnectionID, &a.Status,
+			&a.ProviderMessageID, &a.ErrorCode, &a.ErrorMessage, &a.BuyCost, &a.BuyCurrency, &a.LatencyMs,
+			&a.StartedAt, &a.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, a)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) GetMessageEvents(ctx context.Context, messageID uuid.UUID) ([]MessageEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, message_id, message_created_at, event_type, from_status, to_status, actor_type, details, created_at
+		FROM message_events
+		WHERE message_id = $1
+		ORDER BY created_at ASC
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MessageEvent
+	for rows.Next() {
+		var e MessageEvent
+		if err := rows.Scan(
+			&e.ID, &e.MessageID, &e.MessageCreatedAt, &e.EventType, &e.FromStatus, &e.ToStatus,
+			&e.ActorType, &e.Details, &e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, e)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) GetMessageDLRs(ctx context.Context, messageID uuid.UUID) ([]MessageDLR, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, message_id, message_created_at, connection_id, provider_message_id, status, error_code, raw_receipt, received_at
+		FROM message_dlrs
+		WHERE message_id = $1
+		ORDER BY received_at ASC
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MessageDLR
+	for rows.Next() {
+		var d MessageDLR
+		if err := rows.Scan(
+			&d.ID, &d.MessageID, &d.MessageCreatedAt, &d.ConnectionID, &d.ProviderMessageID,
+			&d.Status, &d.ErrorCode, &d.RawReceipt, &d.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, d)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) FindStuckMessages(ctx context.Context, before time.Time, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
+		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
+		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
+		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		FROM messages
+		WHERE status IN ('accepted', 'queued', 'submitting') AND created_at < $1
+		LIMIT $2
+	`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
+			&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.BodyLength, &m.TotalParts,
+			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
+			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
+			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) FindUnknownMessages(ctx context.Context, before time.Time, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
+		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
+		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
+		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		FROM messages
+		WHERE status = 'unknown' AND created_at < $1
+		LIMIT $2
+	`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
+			&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.BodyLength, &m.TotalParts,
+			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
+			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
+			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) FindNoDLRSubmittedMessages(ctx context.Context, before time.Time, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
+		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
+		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
+		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		FROM messages
+		WHERE status = 'submitted' AND created_at < $1
+		LIMIT $2
+	`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
+			&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.BodyLength, &m.TotalParts,
+			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
+			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
+			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) FindPendingUnmatchedDLRs(ctx context.Context, limit int) ([]UnmatchedDLR, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, connection_id, provider_message_id, status, error_code, raw_receipt, match_status, retry_count, last_retry_at, received_at, updated_at
+		FROM unmatched_dlrs
+		WHERE match_status = 'unmatched'
+		ORDER BY received_at ASC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []UnmatchedDLR
+	for rows.Next() {
+		var item UnmatchedDLR
+		if err := rows.Scan(
+			&item.ID, &item.ConnectionID, &item.ProviderMessageID, &item.Status, &item.ErrorCode,
+			&item.RawReceipt, &item.MatchStatus, &item.RetryCount, &item.LastRetryAt,
+			&item.ReceivedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, item)
+	}
+	return list, nil
+}
+
+func (r *pgRepository) ListMessagesAdvanced(
+	ctx context.Context,
+	orgID *uuid.UUID,
+	status, destination, senderID string,
+	connID *uuid.UUID,
+	fromDate, toDate *time.Time,
+	page, pageSize int,
+) ([]Message, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	offset := (page - 1) * pageSize
+
+	baseWhere := "WHERE 1=1"
+	var args []interface{}
+	argIdx := 1
+
+	if orgID != nil {
+		baseWhere += fmt.Sprintf(" AND customer_org_id = $%d", argIdx)
+		args = append(args, *orgID)
+		argIdx++
+	}
+	if status != "" {
+		baseWhere += fmt.Sprintf(" AND status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+	if destination != "" {
+		baseWhere += fmt.Sprintf(" AND (destination LIKE $%d OR original_destination LIKE $%d)", argIdx, argIdx)
+		args = append(args, "%"+destination+"%")
+		argIdx++
+	}
+	if senderID != "" {
+		baseWhere += fmt.Sprintf(" AND sender_id ILIKE $%d", argIdx)
+		args = append(args, "%"+senderID+"%")
+		argIdx++
+	}
+	if connID != nil {
+		baseWhere += fmt.Sprintf(" AND provider_connection_id = $%d", argIdx)
+		args = append(args, *connID)
+		argIdx++
+	}
+	if fromDate != nil {
+		baseWhere += fmt.Sprintf(" AND created_at >= $%d", argIdx)
+		args = append(args, *fromDate)
+		argIdx++
+	}
+	if toDate != nil {
+		baseWhere += fmt.Sprintf(" AND created_at <= $%d", argIdx)
+		args = append(args, *toDate)
+		argIdx++
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM messages %s", baseWhere)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
+		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
+		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
+		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		FROM messages
+		%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, baseWhere, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
+			&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.BodyLength, &m.TotalParts,
+			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
+			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
+			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, m)
+	}
+
+	return list, total, nil
+}

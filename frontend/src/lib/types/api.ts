@@ -1341,4 +1341,188 @@ export interface CoverageReportItem {
 	is_routable: boolean;
 }
 
+// Phase 8: Messaging Types
+export interface MessageView {
+	id: string;
+	created_at: string;
+	customer_org_id: string;
+	client_reference?: string;
+	original_destination: string;
+	destination: string;
+	sender_id: string;
+	sender_id_type: string;
+	encoding: string;
+	body?: string;
+	body_length: number;
+	total_parts: number;
+	status: string;
+	failure_reason?: string;
+	sell_price: string;
+	sell_currency: string;
+	attempts: number;
+	expires_at: string;
+	submitted_at?: string;
+	delivered_at?: string;
+
+	// Platform only
+	provider_connection_id?: string;
+	provider_message_id?: string;
+	estimated_buy_cost?: string;
+	actual_buy_cost?: string;
+	buy_currency?: string;
+	route_plan_id?: string;
+	margin?: string;
+}
+
+export interface MessagePart {
+	id: string;
+	message_id: string;
+	part_number: number;
+	total_parts: number;
+	status: string;
+	provider_message_id?: string;
+	updated_at: string;
+}
+
+export interface MessageAttempt {
+	id: string;
+	attempt_number: number;
+	connection_id: string;
+	status: string;
+	provider_message_id?: string;
+	error_code?: string;
+	error_message?: string;
+	buy_cost?: string;
+	buy_currency?: string;
+	latency_ms?: number;
+	started_at: string;
+	finished_at?: string;
+}
+
+export interface MessageEvent {
+	id: string;
+	event_type: string;
+	from_status?: string;
+	to_status: string;
+	actor_type: string;
+	details?: any;
+	created_at: string;
+}
+
+export interface MessageDLR {
+	id: string;
+	connection_id?: string;
+	provider_message_id: string;
+	status: string;
+	error_code?: string;
+	raw_receipt?: string;
+	received_at: string;
+}
+
+export interface HoldSummary {
+	hold_id: string;
+	wallet_id: string;
+	original_hold: string;
+	captured?: string;
+	status: string;
+	expires_at: string;
+}
+
+export interface MessageDetailView {
+	message: MessageView;
+	parts: MessagePart[];
+	attempts: MessageAttempt[];
+	events: MessageEvent[];
+	dlrs: MessageDLR[];
+	hold_info?: HoldSummary;
+}
+
+export interface SessionStats {
+	connection_id: string;
+	bound: boolean;
+	in_flight: number;
+	current_tps: number;
+	success_count: number;
+	failure_count: number;
+	last_error_code: string;
+	reconnect_count: number;
+}
+
+export interface QueueBacklogStats {
+	pending_count: number;
+	sending_count: number;
+	oldest_pending_time?: string;
+	oldest_age_seconds: number;
+}
+
+export interface UnmatchedDLR {
+	id: string;
+	connection_id?: string;
+	provider_message_id: string;
+	status: string;
+	error_code?: string;
+	raw_receipt?: string;
+	match_status: string;
+	retry_count: number;
+	last_retry_at?: string;
+	received_at: string;
+}
+
+export interface SettlementException {
+	id: string;
+	message_id: string;
+	message_created_at: string;
+	customer_org_id?: string;
+	hold_id?: string;
+	exception_type: string;
+	severity: string;
+	details: any;
+	resolved: boolean;
+	resolved_by?: string;
+	resolved_at?: string;
+	created_at: string;
+}
+
+export interface ReconciliationRun {
+	id: string;
+	started_at: string;
+	completed_at?: string;
+	messages_checked: number;
+	discrepancy_count: number;
+	summary_json: any;
+	initiated_by?: string;
+}
+
+export interface ReconciliationReport {
+	messages_checked: number;
+	terminal_count: number;
+	in_flight_count: number;
+	unresolved_unknown: number;
+	unmatched_dlrs_count: number;
+	discrepancies: any[];
+	discrepancy_count: number;
+	ledger_matches: boolean;
+}
+
+export interface DLRMapping {
+	id: string;
+	connection_id: string;
+	upstream_stat: string;
+	upstream_err?: string;
+	mapped_status: string;
+	description?: string;
+	version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface TestSendRequest {
+	customer_org_id: string;
+	destination: string;
+	sender_id: string;
+	text: string;
+	validity_seconds?: number;
+}
+
+
 

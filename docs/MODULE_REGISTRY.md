@@ -221,6 +221,31 @@ This document maintains the registry of all modules in the Znero International m
   - Background periodic reload worker (60s interval) with atomic pointer swap and last-known-good fallback on DB errors.
 - **Database Tables:** `route_plans`, `route_plan_history`, `route_plan_entries`, `route_plan_entry_history`, `customer_route_assignments`, `customer_route_assignment_history`, `routing_rules`, `routing_rule_history`, `provider_connection_overrides`.
 
+### 1.22 `messaging`
+- **Location:** `backend/internal/messaging`
+- **Responsibilities:**
+  - Message lifecycle management with monthly partitioned `messages` tables and unpartitioned lookup tables (`message_idempotency_keys`, `message_provider_lookups`).
+  - Atomic ingestion pipeline reserving wallet funds (`PlaceHoldTx`) and writing to transactional outbox (`message_outbox`) in a single database transaction.
+  - Outbox dispatcher polling unhandled messages with advisory locks, resolving routes via `routing.Engine`, checking sender ID regulations, and dispatching to SMPP sessions.
+  - Strict submission error classification (`accepted`, `retryable_reject`, `fatal_reject`, `unknown` on network drop/timeout) with non-repeating route failover (`routing.Engine.Next()`).
+  - DLR processing pipeline parsing SMPP 3.4 receipts & TLVs, candidate normalization (hex/decimal), and applying per-connection status mappings (`provider_connection_dlr_mappings`).
+  - Monotonic state transitions preventing out-of-order DLR regressions; recording discrepancies in `settlement_exceptions`.
+  - Atomic financial settlement in the same transaction as state updates (`CaptureTx` on delivery, `ReleaseTx` on terminal failure or expiry).
+  - Messaging Reaper background worker (PostgreSQL advisory lock `8888, 1001`) sweeping stuck queued/submitting messages, expiring abandoned `unknown` states, expiring old unreceipted messages, and retrying buffered unmatched DLRs.
+  - Messaging reconciliation service verifying state invariants, active holds on terminal messages, and ledger vs message revenue totals.
+- **Database Tables:** `messages` (partitioned monthly), `message_outbox`, `message_events`, `message_attempts`, `message_dlrs`, `message_idempotency_keys`, `message_provider_lookups`, `provider_connection_dlr_mappings`, `provider_connection_dlr_mappings_history`, `unmatched_dlrs`, `settlement_exceptions`, `messaging_reconciliation_runs`.
+
+### 1.23 `smpp`
+- **Location:** `backend/internal/smpp`
+- **Responsibilities:**
+  - High-performance clean-room SMPP 3.4 protocol encoder/decoder (`internal/smpp/pdu`) supporting standard PDUs and vendor TLVs.
+  - SSRF-safe outbound dialer with DNS pre-resolution blocking private, loopback, carrier-grade NAT, and AWS metadata CIDRs.
+  - Strict TLS 1.2+ configuration enforcing SNI hostname verification (`InsecureSkipVerify: false`).
+  - Connection manager maintaining transceiver and transmitter/receiver session pairs, sliding window flow control, and automatic exponential reconnect backoff.
+  - Periodic session metrics persister (5s interval) syncing live session states, in-flight counters, TPS, and uptime to `provider_connection_sessions`.
+  - Realistic mock SMSC carrier simulator (`mocksmsc`) on port 2775 with configurable latency, reject codes, and DLR delivery modes (`immediate`, `delayed`, `undeliverable`, `failed`, `none`).
+- **Database Tables:** `provider_connection_sessions`.
+
 ---
 
 ## 2. Shared Packages (`pkg/`)
@@ -239,9 +264,10 @@ This document maintains the registry of all modules in the Znero International m
 
 ---
 
-## 3. Future Roadmap Modules (Phase 8+)
+## 3. Future Roadmap Modules (Phase 8B & Phase 9)
 
 | Module | Target Phase | Planned Responsibilities |
 | :--- | :--- | :--- |
-| **`smpp`** | Phase 8 | Native SMPP 3.4 server/client gateway with connection pooling, DLR ingestion, per-message ledger billing hooks. |
+| **`customer_api`** | Phase 8B | External customer-facing HTTP REST API for bulk and single SMS dispatch, webhooks, and balance checks. |
+| **`smpp_server`** | Phase 8B | Inbound customer SMPP 3.4 server accepting binds, submit_sm PDUs, and forwarding DLRs. |
 | **`reporting`** | Phase 9 | Aggregated traffic analytics, delivery latency metrics, margin and P&L dashboards. |

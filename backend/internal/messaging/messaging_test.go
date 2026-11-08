@@ -63,12 +63,12 @@ type msgKit struct {
 	ledgerSvc     *ledger.Service
 	keyring       *secrets.KeyRing
 
-	custOrgID     uuid.UUID
-	custUser      *tenant.Context
-	walletID      uuid.UUID
-	provConnID1   uuid.UUID
-	provConnID2   uuid.UUID
-	routePlanID   uuid.UUID
+	custOrgID   uuid.UUID
+	custUser    *tenant.Context
+	walletID    uuid.UUID
+	provConnID1 uuid.UUID
+	provConnID2 uuid.UUID
+	routePlanID uuid.UUID
 }
 
 func newMsgKit(t *testing.T) *msgKit {
@@ -263,7 +263,7 @@ func TestConfig_HoldTimingValidation(t *testing.T) {
 	// Valid configuration: HoldExpiry (72h) > TTL (24h) + UnknownWindow (24h) = 48h
 	validCfg := messaging.Config{
 		MessageTTL:               24 * time.Hour,
-		UnknownResolutionWindow: 24 * time.Hour,
+		UnknownResolutionWindow:  24 * time.Hour,
 		HoldExpiry:               72 * time.Hour,
 		MaxSegmentsLimit:         10,
 		PartitionPrecreateMonths: 3,
@@ -564,20 +564,20 @@ func TestSubmit_Idempotency_AcrossMonthBoundary(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	msg1 := &messaging.Message{
-		ID:                   msgID1,
-		CreatedAt:            now,
-		CustomerOrgID:        mk.custOrgID,
-		ClientReference:      &clientRef,
+		ID:                  msgID1,
+		CreatedAt:           now,
+		CustomerOrgID:       mk.custOrgID,
+		ClientReference:     &clientRef,
 		OriginalDestination: "+12025550199",
-		Destination:          "+12025550199",
-		SenderID:             "TEST",
-		MessageType:          "sms",
-		Encoding:             "GSM7",
-		EncryptedBody:        []byte("body1"),
-		KeyID:                "v1",
-		Status:               messaging.StatusAccepted,
-		ExpiresAt:            now.Add(24 * time.Hour),
-		UpdatedAt:            now,
+		Destination:         "+12025550199",
+		SenderID:            "TEST",
+		MessageType:         "sms",
+		Encoding:            "GSM7",
+		EncryptedBody:       []byte("body1"),
+		KeyID:               "v1",
+		Status:              messaging.StatusAccepted,
+		ExpiresAt:           now.Add(24 * time.Hour),
+		UpdatedAt:           now,
 	}
 	if err := mk.repo.InsertMessageAtomic(ctx, tx, msg1, nil, nil, nil); err != nil {
 		t.Fatalf("insert month 1 message: %v", err)
@@ -736,19 +736,19 @@ func TestPartitions_PrecreationAndDefaultPartition(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	futureMsg := &messaging.Message{
-		ID:                   futureMsgID,
-		CreatedAt:            farFuture,
-		CustomerOrgID:        mk.custOrgID,
+		ID:                  futureMsgID,
+		CreatedAt:           farFuture,
+		CustomerOrgID:       mk.custOrgID,
 		OriginalDestination: "+12025550199",
-		Destination:          "+12025550199",
-		SenderID:             "FUTURE",
-		MessageType:          "sms",
-		Encoding:             "GSM7",
-		EncryptedBody:        []byte("future"),
-		KeyID:                "v1",
-		Status:               messaging.StatusAccepted,
-		ExpiresAt:            farFuture.Add(24 * time.Hour),
-		UpdatedAt:            farFuture,
+		Destination:         "+12025550199",
+		SenderID:            "FUTURE",
+		MessageType:         "sms",
+		Encoding:            "GSM7",
+		EncryptedBody:       []byte("future"),
+		KeyID:               "v1",
+		Status:              messaging.StatusAccepted,
+		ExpiresAt:           farFuture.Add(24 * time.Hour),
+		UpdatedAt:           farFuture,
 	}
 
 	if err := mk.repo.InsertMessageAtomic(ctx, tx, futureMsg, nil, nil, nil); err != nil {

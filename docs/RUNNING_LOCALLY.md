@@ -93,6 +93,15 @@ Seeds clearly labeled fictional `DEV SAMPLE` route plans (Priority and Least Cos
 > To clean up all `DEV SAMPLE` Phase 7 sample routing data:
 > `.\scripts\seed-routing-sample.ps1 -Cleanup`
 
+### Step 9 (Optional): Seed Phase 8 Sample Messaging Carrier, Connection & Routing Plan
+Seeds clearly labeled fictional `DEV SAMPLE` provider connection configured for local mock SMSC (`127.0.0.1:2775`, system_id: `mock_smsc`, password: `mock_pass`), an active route plan, buy/sell rate cards, and pre-funded customer wallet for end-to-end SMS testing (strictly guarded by `APP_ENV=development`):
+```powershell
+.\scripts\seed-messaging-sample.ps1
+```
+> [!NOTE]
+> To clean up all `DEV SAMPLE` Phase 8 sample routing and provider data (retains append-only ledger entries):
+> `.\scripts\seed-messaging-sample.ps1 -Cleanup`
+
 ---
 
 ## 3. Daily Development Workflow
@@ -123,6 +132,12 @@ For protocol testing and development against upstream carrier simulators without
   - **Wallets & Balances**: [http://localhost:5173/wallets](http://localhost:5173/wallets)
   - **Invoices & Billing**: [http://localhost:5173/invoices](http://localhost:5173/invoices)
   - **Ledger Reconciliation**: [http://localhost:5173/reconciliation](http://localhost:5173/reconciliation)
+  - **Messages Explorer**: [http://localhost:5173/messages](http://localhost:5173/messages)
+  - **SMPP Sessions**: [http://localhost:5173/messaging/smpp-sessions](http://localhost:5173/messaging/smpp-sessions)
+  - **Queue Backlog Monitor**: [http://localhost:5173/messaging/queue-monitor](http://localhost:5173/messaging/queue-monitor)
+  - **Unmatched DLRs**: [http://localhost:5173/messaging/unmatched-dlrs](http://localhost:5173/messaging/unmatched-dlrs)
+  - **Messaging Reconciliation**: [http://localhost:5173/messaging/reconciliation](http://localhost:5173/messaging/reconciliation)
+  - **DLR Mappings**: [http://localhost:5173/messaging/dlr-mappings](http://localhost:5173/messaging/dlr-mappings)
 - **Backend API Root**: [http://127.0.0.1:8080/api/v1](http://127.0.0.1:8080/api/v1)
 - **Process Liveness**: [http://127.0.0.1:8080/healthz](http://127.0.0.1:8080/healthz)
 - **Dependency Readiness**: [http://127.0.0.1:8080/readyz](http://127.0.0.1:8080/readyz)

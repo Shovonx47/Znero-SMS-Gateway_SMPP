@@ -31,6 +31,7 @@ const (
 	DLRModeDuplicate        DLRMode = "duplicate"
 	DLRModeBeforeSubmitResp DLRMode = "before_submit_resp"
 	DLRModeFailed           DLRMode = "failed"
+	DLRModeUndeliverable    DLRMode = "undeliverable"
 	DLRModeExpired          DLRMode = "expired"
 )
 
@@ -71,14 +72,14 @@ type Server struct {
 	listener  net.Listener
 	tlsConfig *tls.Config
 
-	mu               sync.RWMutex
-	activeBinds      int
-	submitted        []SubmittedMessage
-	running          bool
-	closeCh          chan struct{}
-	msgCounter       uint64
-	smscSeq          uint32
-	onMessageHook    func(msg SubmittedMessage)
+	mu            sync.RWMutex
+	activeBinds   int
+	submitted     []SubmittedMessage
+	running       bool
+	closeCh       chan struct{}
+	msgCounter    uint64
+	smscSeq       uint32
+	onMessageHook func(msg SubmittedMessage)
 }
 
 // NewServer creates a new mock SMSC server.
@@ -369,7 +370,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				(submitReq.RegisteredDelivery&pdu.RegDeliverySMSCDeliveryReceipt != 0) {
 
 				switch dlrMode {
-				case DLRModeImmediate, DLRModeFailed, DLRModeExpired:
+				case DLRModeImmediate, DLRModeFailed, DLRModeUndeliverable, DLRModeExpired:
 					s.sendDLR(conn, providerMsgID, submitReq.SourceAddr, submitReq.DestAddr, dlrMode)
 				case DLRModeDuplicate:
 					s.sendDLR(conn, providerMsgID, submitReq.SourceAddr, submitReq.DestAddr, DLRModeImmediate)
@@ -405,6 +406,10 @@ func (s *Server) sendDLR(w io.Writer, msgID, src, dst string, mode DLRMode) {
 	var msgState byte = 2 // DELIVRD
 
 	if mode == DLRModeFailed {
+		stat = "REJECTD"
+		errCode = "008"
+		msgState = 8 // REJECTED
+	} else if mode == DLRModeUndeliverable {
 		stat = "UNDELIV"
 		errCode = "005"
 		msgState = 5 // UNDELIVERABLE
@@ -482,4 +487,3 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
-

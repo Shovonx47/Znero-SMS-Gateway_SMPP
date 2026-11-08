@@ -133,4 +133,3 @@ func SplitMessageParts(text string, encoding string) ([]string, [][]byte) {
 
 	return partBodies, udhs
 }
-

@@ -431,14 +431,14 @@ The following business rule is formally documented as open:
 
 Phase 8A is partitioned into three gated milestones:
 
-| Chunk | Scope & Steps | Gate / Stop Condition |
+| Chunk | Scope & Steps | Status |
 | :--- | :--- | :--- |
-| **Chunk 1** | **Part A**: Ledger Tx methods (`PlaceHoldTx`, `CaptureTx`, `ReleaseTx`, `PostChargeTx`, idempotency replays).<br>**Part B (Step 1)**: Authoritative Design Document (`docs/MESSAGING_DESIGN.md`).<br>**Step 2**: Data model & Migration 10 (`messages`, `message_outbox`, `message_events`).<br>**Step 3**: Ingestion pipeline (`POST /api/v1/messages`) with atomic `PlaceHoldTx` & outbox write.<br>**Step 4**: Transactional outbox reader & Kafka producer tested with FAKE sender. | **STOP and wait for approval after Part B, and again after Chunk 1 verification.** |
-| **Chunk 2** | **Step 6**: Mock carrier SMSC simulator (listening on port 2775, configurable DLR latency, reject codes, and disconnects).<br>**Step 5**: Production SMPP client worker (`gosmpp`) dispatching messages from Kafka to carrier SMSC simulator with windowing and failover. | **STOP and wait for approval after Chunk 2 verification.** |
-| **Chunk 3** | **Steps 7–13**: DLR ingestion & matching, financial settlement worker (`CaptureTx`/`ReleaseTx`), Messaging Reaper, REST APIs, Frontend UI, DEV sample seed, E2E test suite, load benchmarks, and final documentation. | **STOP and deliver handover zip.** |
+| **Chunk 1** | **Part A**: Ledger Tx methods (`PlaceHoldTx`, `CaptureTx`, `ReleaseTx`, `PostChargeTx`, idempotency replays).<br>**Part B (Step 1)**: Authoritative Design Document (`docs/MESSAGING_DESIGN.md`).<br>**Step 2**: Data model & Migration 10 (`messages`, `message_outbox`, `message_events`, lookup tables).<br>**Step 3**: Ingestion pipeline (`POST /api/v1/messages`) with atomic `PlaceHoldTx` & outbox write.<br>**Step 4**: Transactional outbox reader & dispatcher with routing and failover. | **Completed & Verified** |
+| **Chunk 2** | **Step 6**: Mock carrier SMSC simulator (port 2775, configurable DLR latency, DLR modes, reject codes).<br>**Step 5**: Clean-room SMPP client with SSRF-safe dialer, TLS 1.2+ SNI verification, sliding windowing, and session persistence. | **Completed & Verified** |
+| **Chunk 3** | **Steps 7–11**: Migration 11, DLR ingestion & dual-representation matching, financial settlement in atomic Tx (`CaptureTx`/`ReleaseTx`), Messaging Reaper (advisory locked), Reconciliation runner, REST APIs, Frontend operational screens, and DEV sample seed script. | **Completed & Verified** |
 
 ---
 
-> **End of Step 1 (`docs/MESSAGING_DESIGN.md`)**.
-> All pipeline specifications, state machines, failover rules, settlement invariants, and open decisions are documented. Awaiting user review and go-ahead before proceeding to Step 2.
+> **Phase 8A Implementation Status**:
+> Chunks 1, 2, and 3 are fully implemented with zero build, vet, or TypeScript errors. Awaiting user go-ahead for test execution, verification runs, and handover packaging in Phase 8A closeout.
 

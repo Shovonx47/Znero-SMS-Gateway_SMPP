@@ -110,10 +110,10 @@ const (
 
 // Registered Delivery Flags
 const (
-	RegDeliveryNone               uint8 = 0x00
+	RegDeliveryNone                uint8 = 0x00
 	RegDeliverySMSCDeliveryReceipt uint8 = 0x01
-	RegDeliverySMEOriginatedAck   uint8 = 0x04
-	RegDeliveryIntermediateNotify uint8 = 0x10
+	RegDeliverySMEOriginatedAck    uint8 = 0x04
+	RegDeliveryIntermediateNotify  uint8 = 0x10
 )
 
 // SMPP 3.4 TLV Tags (Optional Parameters)

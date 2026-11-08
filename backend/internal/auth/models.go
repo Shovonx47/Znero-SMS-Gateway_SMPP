@@ -7,20 +7,20 @@ import (
 )
 
 type User struct {
-	ID                  uuid.UUID  `json:"id"`
-	OrganizationID      uuid.UUID  `json:"organization_id"`
-	Email               string     `json:"email"`
-	PasswordHash        *string    `json:"-"`
-	Status              string     `json:"status"` // "active", "suspended", "invited"
-	MFAEnabled          bool       `json:"mfa_enabled"`
-	MFASecretEncrypted  *string    `json:"-"`
-	MFAEnrolledAt       *time.Time `json:"mfa_enrolled_at,omitempty"`
-	FailedLoginAttempts int        `json:"failed_login_attempts"`
-	LockedUntil         *time.Time `json:"locked_until,omitempty"`
-	Roles               []string   `json:"roles"`
+	ID                  uuid.UUID   `json:"id"`
+	OrganizationID      uuid.UUID   `json:"organization_id"`
+	Email               string      `json:"email"`
+	PasswordHash        *string     `json:"-"`
+	Status              string      `json:"status"` // "active", "suspended", "invited"
+	MFAEnabled          bool        `json:"mfa_enabled"`
+	MFASecretEncrypted  *string     `json:"-"`
+	MFAEnrolledAt       *time.Time  `json:"mfa_enrolled_at,omitempty"`
+	FailedLoginAttempts int         `json:"failed_login_attempts"`
+	LockedUntil         *time.Time  `json:"locked_until,omitempty"`
+	Roles               []string    `json:"roles"`
 	RoleIDs             []uuid.UUID `json:"role_ids"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	CreatedAt           time.Time   `json:"created_at"`
+	UpdatedAt           time.Time   `json:"updated_at"`
 }
 
 type SessionInfo struct {
@@ -38,11 +38,11 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-	AccessToken string  `json:"access_token,omitempty"`
-	ExpiresIn   int     `json:"expires_in,omitempty"` // seconds
-	User        *User   `json:"user,omitempty"`
-	MFARequired bool    `json:"mfa_required,omitempty"`
-	MFAToken    string  `json:"mfa_challenge_token,omitempty"`
+	AccessToken string `json:"access_token,omitempty"`
+	ExpiresIn   int    `json:"expires_in,omitempty"` // seconds
+	User        *User  `json:"user,omitempty"`
+	MFARequired bool   `json:"mfa_required,omitempty"`
+	MFAToken    string `json:"mfa_challenge_token,omitempty"`
 }
 
 type MFAVerifyRequest struct {

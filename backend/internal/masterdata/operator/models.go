@@ -41,17 +41,17 @@ type HistoryEntry struct {
 }
 
 type CreateOperatorRequest struct {
-	Name               string          `json:"name"`
-	BrandName          string          `json:"brand_name"`
-	ParentCompany      string          `json:"parent_company"`
-	CountryID          uuid.UUID       `json:"country_id"`
-	MCC                string          `json:"mcc"`
-	MNC                string          `json:"mnc"`
-	NetworkTechnology  []string        `json:"network_technology"`
-	Capabilities       json.RawMessage `json:"capabilities"`
-	DataSource         string          `json:"data_source"`
-	EffectiveDate      *time.Time      `json:"effective_date,omitempty"`
-	Reason             string          `json:"reason"`
+	Name              string          `json:"name"`
+	BrandName         string          `json:"brand_name"`
+	ParentCompany     string          `json:"parent_company"`
+	CountryID         uuid.UUID       `json:"country_id"`
+	MCC               string          `json:"mcc"`
+	MNC               string          `json:"mnc"`
+	NetworkTechnology []string        `json:"network_technology"`
+	Capabilities      json.RawMessage `json:"capabilities"`
+	DataSource        string          `json:"data_source"`
+	EffectiveDate     *time.Time      `json:"effective_date,omitempty"`
+	Reason            string          `json:"reason"`
 }
 
 type UpdateOperatorRequest struct {

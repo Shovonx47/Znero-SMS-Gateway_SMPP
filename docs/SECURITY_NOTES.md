@@ -195,3 +195,29 @@
 - **Confidentiality & Anti-Leakage:**
   - Provider buy rates, upstream supplier IDs, and margins are stripped at the data layer and never rendered in customer or reseller statements or invoice line items.
   - Spreadsheet formula injection protection (`'`, `+`, `-`, `=`, `@` prepended with a single quote) is applied to all CSV and JSON statement exports.
+
+---
+
+## 13. Phase 8A Security: Messaging Pipeline, SMPP Transport & Settlement Invariants
+
+- **Dial-Time SSRF Defense & DNS Rebinding Immunity (`backend/internal/smpp/manager.go`):**
+  - While provider configurations are validated at creation time, upstream carrier connections are re-validated at network dial time using a custom `SafeDialer`.
+  - The dialer performs real-time DNS resolution, iterates across all returned IP addresses, and ensures **every** address is outside loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local / cloud metadata ranges (`169.254.0.0/16`, `fe80::/10`), and carrier-grade NAT (`100.64.0.0/10`).
+  - Network sockets dial the validated numeric IP directly while strictly preserving the original hostname in `tls.Config.ServerName` for certificate and SNI validation.
+- **Strict TLS 1.2+ Transport Security:**
+  - TLS sessions mandate a minimum version of TLS 1.2 (`tls.VersionTLS12`).
+  - `InsecureSkipVerify: false` is permanently enforced. Certificates must validate against system root trust stores.
+- **Provider Credential Isolation:**
+  - Provider SMPP passwords and secrets are decrypted from encrypted envelopes exclusively in memory at connection bind time and are never stored in plain variables, heap-retained structures, or log lines.
+- **Atomic Two-Phase Financial Invariants (`PlaceHoldTx`, `CaptureTx`, `ReleaseTx`):**
+  - Hold placement shares an atomic PostgreSQL transaction with the `messages` insert and transactional outbox write. If hold placement fails due to insufficient funds, the message is never accepted.
+  - Final message state transitions and financial settlement (`CaptureTx` on delivery, `ReleaseTx` on terminal rejection) execute in the **exact same database transaction**. Financial state and message status can never drift out of sync.
+- **Monotonic Status Transitions & Tamper Resistance:**
+  - Delivery receipts strictly obey monotonic terminal rules: once a message enters `delivered`, `undelivered`, `expired`, `failed`, or `rejected`, it cannot be altered by out-of-order or spoofed DLRs. Conflicting DLRs are rejected and quarantined into `settlement_exceptions`.
+  - Ambiguous transmission outcomes (socket drops, timeouts after PDU write) are classified strictly as `SendStatusUnknown` and are **never** resent or failed over, eliminating duplicate billing and message spam.
+- **Content Masking & Tenant Privacy:**
+  - Message bodies are masked (`••••••••`) by default across message explorer endpoints and can only be unmasked by actors explicitly granted the `message.content.view` permission.
+  - Carrier provider IDs, internal routing scores, buy rates, and provider connection references are completely stripped from customer and reseller API responses.
+  - Formula injection protection (`CSV/JSON`) is enforced on message query exports.
+- **PostgreSQL Advisory Lock Concurrency Protection:**
+  - Background outbox polling and reaper jobs run under mutual exclusion via PostgreSQL advisory locks (`pg_try_advisory_lock(8888, 1001)`), guaranteeing exactly-one execution across clustered application nodes.

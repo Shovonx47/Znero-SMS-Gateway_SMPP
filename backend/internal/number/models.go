@@ -63,28 +63,28 @@ type BulkLookupResult struct {
 }
 
 type TransformRule struct {
-	ID            uuid.UUID         `json:"id"`
-	Name          string            `json:"name"`
-	Description   string            `json:"description"`
-	Operation     string            `json:"operation"` // add_prefix, remove_prefix, replace_prefix, add_country_code, remove_country_code
-	MatchPattern  string            `json:"match_pattern"`
-	Params        map[string]string `json:"params"`
-	Scope         string            `json:"scope"` // global, country, operator
-	CountryID     *uuid.UUID        `json:"country_id,omitempty"`
-	CountryName   string            `json:"country_name,omitempty"`
-	CountryISO2   string            `json:"country_iso2,omitempty"`
-	OperatorID    *uuid.UUID        `json:"operator_id,omitempty"`
-	OperatorName  string            `json:"operator_name,omitempty"`
-	Direction     string            `json:"direction"` // inbound, outbound, both
-	Priority      int               `json:"priority"`  // lower number = higher precedence
-	ActiveFrom    *time.Time        `json:"active_from,omitempty"`
-	ActiveTo      *time.Time        `json:"active_to,omitempty"`
-	Status        string            `json:"status"` // active, inactive
-	Version       int               `json:"version"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	CreatedBy     *uuid.UUID        `json:"created_by,omitempty"`
-	UpdatedBy     *uuid.UUID        `json:"updated_by,omitempty"`
+	ID           uuid.UUID         `json:"id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Operation    string            `json:"operation"` // add_prefix, remove_prefix, replace_prefix, add_country_code, remove_country_code
+	MatchPattern string            `json:"match_pattern"`
+	Params       map[string]string `json:"params"`
+	Scope        string            `json:"scope"` // global, country, operator
+	CountryID    *uuid.UUID        `json:"country_id,omitempty"`
+	CountryName  string            `json:"country_name,omitempty"`
+	CountryISO2  string            `json:"country_iso2,omitempty"`
+	OperatorID   *uuid.UUID        `json:"operator_id,omitempty"`
+	OperatorName string            `json:"operator_name,omitempty"`
+	Direction    string            `json:"direction"` // inbound, outbound, both
+	Priority     int               `json:"priority"`  // lower number = higher precedence
+	ActiveFrom   *time.Time        `json:"active_from,omitempty"`
+	ActiveTo     *time.Time        `json:"active_to,omitempty"`
+	Status       string            `json:"status"` // active, inactive
+	Version      int               `json:"version"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	CreatedBy    *uuid.UUID        `json:"created_by,omitempty"`
+	UpdatedBy    *uuid.UUID        `json:"updated_by,omitempty"`
 }
 
 type CreateTransformRuleRequest struct {

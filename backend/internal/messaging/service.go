@@ -291,7 +291,7 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		CreatedAt:            now,
 		CustomerOrgID:        tc.ActorOrgID,
 		ClientReference:      clientRef,
-		OriginalDestination: rawDest,
+		OriginalDestination:  rawDest,
 		Destination:          cleanDest,
 		SenderID:             senderID,
 		SenderIDType:         decision.Request.SenderIDType,
@@ -418,23 +418,23 @@ func (s *Service) storeRejectedMessage(
 ) error {
 	now := time.Now().UTC()
 	msg := &Message{
-		ID:                   uuid.New(),
-		CreatedAt:            now,
-		CustomerOrgID:        customerOrgID,
-		ClientReference:      clientRef,
+		ID:                  uuid.New(),
+		CreatedAt:           now,
+		CustomerOrgID:       customerOrgID,
+		ClientReference:     clientRef,
 		OriginalDestination: origDest,
-		Destination:          dest,
-		SenderID:             senderID,
-		MessageType:          "sms",
-		Encoding:             encoding,
-		EncryptedBody:        []byte{},
-		KeyID:                s.keyring.ActiveKeyID(),
-		BodyLength:           bodyLen,
-		TotalParts:           parts,
-		Status:               StatusRejected,
-		FailureReason:        &reason,
-		ExpiresAt:            now,
-		UpdatedAt:            now,
+		Destination:         dest,
+		SenderID:            senderID,
+		MessageType:         "sms",
+		Encoding:            encoding,
+		EncryptedBody:       []byte{},
+		KeyID:               s.keyring.ActiveKeyID(),
+		BodyLength:          bodyLen,
+		TotalParts:          parts,
+		Status:              StatusRejected,
+		FailureReason:       &reason,
+		ExpiresAt:           now,
+		UpdatedAt:           now,
 	}
 	event := &MessageEvent{
 		ID:               uuid.New(),
@@ -515,25 +515,25 @@ func (s *Service) ListMessages(ctx context.Context, tc *tenant.Context, status s
 // from non-platform callers, and masking the body if message.content.view is absent.
 func (s *Service) toMessageView(tc *tenant.Context, m *Message) *MessageView {
 	view := &MessageView{
-		ID:                   m.ID,
-		CreatedAt:            m.CreatedAt,
-		CustomerOrgID:        m.CustomerOrgID,
-		ClientReference:      m.ClientReference,
+		ID:                  m.ID,
+		CreatedAt:           m.CreatedAt,
+		CustomerOrgID:       m.CustomerOrgID,
+		ClientReference:     m.ClientReference,
 		OriginalDestination: m.OriginalDestination,
-		Destination:          m.Destination,
-		SenderID:             m.SenderID,
-		SenderIDType:         m.SenderIDType,
-		Encoding:             m.Encoding,
-		BodyLength:           m.BodyLength,
-		TotalParts:           m.TotalParts,
-		Status:               m.Status,
-		FailureReason:        m.FailureReason,
-		SellPrice:            m.SellPrice,
-		SellCurrency:         m.SellCurrency,
-		Attempts:             m.Attempts,
-		ExpiresAt:            m.ExpiresAt,
-		SubmittedAt:          m.SubmittedAt,
-		DeliveredAt:          m.DeliveredAt,
+		Destination:         m.Destination,
+		SenderID:            m.SenderID,
+		SenderIDType:        m.SenderIDType,
+		Encoding:            m.Encoding,
+		BodyLength:          m.BodyLength,
+		TotalParts:          m.TotalParts,
+		Status:              m.Status,
+		FailureReason:       m.FailureReason,
+		SellPrice:           m.SellPrice,
+		SellCurrency:        m.SellCurrency,
+		Attempts:            m.Attempts,
+		ExpiresAt:           m.ExpiresAt,
+		SubmittedAt:         m.SubmittedAt,
+		DeliveredAt:         m.DeliveredAt,
 	}
 
 	// Platform caller: expose provider connection, buy costs, and margin
@@ -564,4 +564,297 @@ func (s *Service) toMessageView(tc *tenant.Context, m *Message) *MessageView {
 	}
 
 	return view
+}
+
+// MessageFilter defines parameters for listing messages.
+type MessageFilter struct {
+	CustomerOrgID *uuid.UUID
+	Status        string
+	Destination   string
+	SenderID      string
+	ConnectionID  *uuid.UUID
+	DateFrom      *time.Time
+	DateTo        *time.Time
+	Page          int
+	PageSize      int
+}
+
+// GetMessageDetail fetches a complete message journey view including parts, attempts, events, and DLRs.
+func (s *Service) GetMessageDetail(ctx context.Context, id uuid.UUID, tc *tenant.Context) (*MessageDetailView, error) {
+	msg, parts, err := s.repo.GetMessageByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("message %s not found", id)
+	}
+
+	// Multi-tenant isolation: non-platform users can only view messages belonging to their subtree
+	if !tc.IsPlatformOrg() && msg.CustomerOrgID != tc.ActorOrgID {
+		return nil, fmt.Errorf("forbidden: message belongs to another organization")
+	}
+
+	attempts, _ := s.repo.GetMessageAttempts(ctx, id)
+	events, _ := s.repo.GetMessageEvents(ctx, id)
+	dlrs, _ := s.repo.GetMessageDLRs(ctx, id)
+
+	view := s.toMessageView(tc, msg)
+
+	// If not platform, strip provider IDs and buy costs from attempts and DLRs
+	if !tc.IsPlatformOrg() {
+		for i := range attempts {
+			attempts[i].ConnectionID = uuid.Nil
+			attempts[i].ProviderMessageID = nil
+			attempts[i].BuyCost = nil
+			attempts[i].BuyCurrency = nil
+		}
+		for i := range dlrs {
+			dlrs[i].ConnectionID = nil
+			dlrs[i].ProviderMessageID = "••••"
+		}
+	}
+
+	var holdSummary *HoldSummary
+	if msg.HoldID != nil {
+		// Read hold status from ledger
+		var wID uuid.UUID
+		var origHold decimal.Decimal
+		var hStatus string
+		var expAt time.Time
+		err := s.pool.QueryRow(ctx, `
+			SELECT wallet_id, amount, status, expires_at
+			FROM holds
+			WHERE id = $1
+		`, *msg.HoldID).Scan(&wID, &origHold, &hStatus, &expAt)
+		if err == nil {
+			holdSummary = &HoldSummary{
+				HoldID:       *msg.HoldID,
+				WalletID:     wID,
+				OriginalHold: origHold,
+				Status:       hStatus,
+				ExpiresAt:    expAt,
+			}
+			if hStatus == "captured" {
+				holdSummary.Captured = &msg.SellPrice
+			}
+		}
+	}
+
+	return &MessageDetailView{
+		Message:  *view,
+		Parts:    parts,
+		Attempts: attempts,
+		Events:   events,
+		DLRs:     dlrs,
+		HoldInfo: holdSummary,
+	}, nil
+}
+
+// ListMessagesAdvanced lists messages with full search and filter support.
+func (s *Service) ListMessagesAdvanced(ctx context.Context, filter MessageFilter, tc *tenant.Context) ([]MessageView, int, error) {
+	targetOrg := filter.CustomerOrgID
+	if !tc.IsPlatformOrg() {
+		targetOrg = &tc.ActorOrgID
+		filter.ConnectionID = nil // Non-platform cannot filter by carrier connection
+	}
+
+	msgs, total, err := s.repo.ListMessagesAdvanced(
+		ctx,
+		targetOrg,
+		filter.Status,
+		filter.Destination,
+		filter.SenderID,
+		filter.ConnectionID,
+		filter.DateFrom,
+		filter.DateTo,
+		filter.Page,
+		filter.PageSize,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	views := make([]MessageView, len(msgs))
+	for i := range msgs {
+		views[i] = *s.toMessageView(tc, &msgs[i])
+	}
+
+	return views, total, nil
+}
+
+// ExportMessages generates a formula-safe CSV or JSON string without sensitive payloads or provider details.
+func (s *Service) ExportMessages(ctx context.Context, filter MessageFilter, format string, tc *tenant.Context) ([]byte, string, error) {
+	filter.Page = 1
+	filter.PageSize = 5000 // Upper bound for export
+
+	views, _, err := s.ListMessagesAdvanced(ctx, filter, tc)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if format == "json" {
+		// Strip message body from export completely
+		for i := range views {
+			views[i].Body = ""
+		}
+		data, err := json.MarshalIndent(views, "", "  ")
+		return data, "application/json", err
+	}
+
+	// CSV Export
+	var sb strings.Builder
+	if tc.IsPlatformOrg() {
+		sb.WriteString("Message ID,Created At,Customer Org,Destination,Sender ID,Status,Sell Price,Currency,Parts,Attempts,Provider Connection,Provider Message ID,Actual Cost,Margin\n")
+		for _, m := range views {
+			provConn := ""
+			if m.ProviderConnectionID != nil {
+				provConn = m.ProviderConnectionID.String()
+			}
+			provMsgID := ""
+			if m.ProviderMessageID != nil {
+				provMsgID = sanitizeFormula(*m.ProviderMessageID)
+			}
+			cost := ""
+			if m.ActualBuyCost != nil {
+				cost = m.ActualBuyCost.String()
+			}
+			margin := ""
+			if m.Margin != nil {
+				margin = m.Margin.String()
+			}
+
+			sb.WriteString(fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s,%s,%s\n",
+				m.ID.String(),
+				m.CreatedAt.Format(time.RFC3339),
+				m.CustomerOrgID.String(),
+				sanitizeFormula(m.Destination),
+				sanitizeFormula(m.SenderID),
+				m.Status,
+				m.SellPrice.String(),
+				m.SellCurrency,
+				m.TotalParts,
+				m.Attempts,
+				provConn,
+				provMsgID,
+				cost,
+				margin,
+			))
+		}
+	} else {
+		sb.WriteString("Message ID,Created At,Destination,Sender ID,Status,Sell Price,Currency,Parts,Attempts\n")
+		for _, m := range views {
+			sb.WriteString(fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%d,%d\n",
+				m.ID.String(),
+				m.CreatedAt.Format(time.RFC3339),
+				sanitizeFormula(m.Destination),
+				sanitizeFormula(m.SenderID),
+				m.Status,
+				m.SellPrice.String(),
+				m.SellCurrency,
+				m.TotalParts,
+				m.Attempts,
+			))
+		}
+	}
+
+	return []byte(sb.String()), "text/csv", nil
+}
+
+func sanitizeFormula(s string) string {
+	if s == "" {
+		return ""
+	}
+	f := s[0]
+	if f == '=' || f == '+' || f == '-' || f == '@' || f == '\t' || f == '\r' {
+		return "'" + s
+	}
+	return s
+}
+
+// DLR Mappings Management (Platform Only)
+func (s *Service) ListDLRMappings(ctx context.Context, connID *uuid.UUID) ([]DLRMapping, error) {
+	return s.repo.ListDLRMappings(ctx, connID)
+}
+
+func (s *Service) CreateDLRMapping(ctx context.Context, m *DLRMapping, tc *tenant.Context) error {
+	if !tc.IsPlatformOrg() {
+		return fmt.Errorf("forbidden: only platform operators can manage DLR mappings")
+	}
+	m.CreatedBy = &tc.ActorUserID
+	err := s.repo.CreateDLRMapping(ctx, m)
+	if err == nil && s.auditSvc != nil {
+		afterBytes, _ := json.Marshal(m)
+		_ = s.auditSvc.Record(ctx, nil, audit.Entry{
+			ActorUserID: &tc.ActorUserID,
+			ActorOrgID:  &tc.ActorOrgID,
+			TargetOrgID: &tc.ActorOrgID,
+			Module:      "messaging",
+			Action:      "dlr_mapping.create",
+			EntityType:  "dlr_mapping",
+			EntityID:    m.ID.String(),
+			AfterValue:  afterBytes,
+		})
+	}
+	return err
+}
+
+func (s *Service) UpdateDLRMapping(ctx context.Context, m *DLRMapping, tc *tenant.Context) error {
+	if !tc.IsPlatformOrg() {
+		return fmt.Errorf("forbidden: only platform operators can manage DLR mappings")
+	}
+	m.CreatedBy = &tc.ActorUserID
+	err := s.repo.UpdateDLRMapping(ctx, m)
+	if err == nil && s.auditSvc != nil {
+		afterBytes, _ := json.Marshal(m)
+		_ = s.auditSvc.Record(ctx, nil, audit.Entry{
+			ActorUserID: &tc.ActorUserID,
+			ActorOrgID:  &tc.ActorOrgID,
+			TargetOrgID: &tc.ActorOrgID,
+			Module:      "messaging",
+			Action:      "dlr_mapping.update",
+			EntityType:  "dlr_mapping",
+			EntityID:    m.ID.String(),
+			AfterValue:  afterBytes,
+		})
+	}
+	return err
+}
+
+func (s *Service) DeleteDLRMapping(ctx context.Context, id uuid.UUID, tc *tenant.Context) error {
+	if !tc.IsPlatformOrg() {
+		return fmt.Errorf("forbidden: only platform operators can manage DLR mappings")
+	}
+	err := s.repo.DeleteDLRMapping(ctx, id)
+	if err == nil && s.auditSvc != nil {
+		_ = s.auditSvc.Record(ctx, nil, audit.Entry{
+			ActorUserID: &tc.ActorUserID,
+			ActorOrgID:  &tc.ActorOrgID,
+			TargetOrgID: &tc.ActorOrgID,
+			Module:      "messaging",
+			Action:      "dlr_mapping.delete",
+			EntityType:  "dlr_mapping",
+			EntityID:    id.String(),
+		})
+	}
+	return err
+}
+
+// Settlement Exceptions Management
+func (s *Service) ListSettlementExceptions(ctx context.Context, resolved *bool, page, pageSize int, tc *tenant.Context) ([]SettlementException, int, error) {
+	if !tc.IsPlatformOrg() {
+		return s.repo.ListSettlementExceptions(ctx, &tc.ActorOrgID, resolved, page, pageSize)
+	}
+	return s.repo.ListSettlementExceptions(ctx, nil, resolved, page, pageSize)
+}
+
+func (s *Service) ResolveSettlementException(ctx context.Context, id uuid.UUID, tc *tenant.Context) error {
+	if !tc.IsPlatformOrg() {
+		return fmt.Errorf("forbidden: only platform operators can resolve settlement exceptions")
+	}
+	return s.repo.ResolveSettlementException(ctx, id, tc.ActorUserID)
+}
+
+// Queue Backlog Status
+func (s *Service) GetQueueStatus(ctx context.Context) (QueueBacklogStats, error) {
+	return s.repo.GetQueueBacklogStats(ctx)
 }

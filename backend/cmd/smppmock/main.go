@@ -21,7 +21,7 @@ func main() {
 	password := flag.String("password", "mock_pass", "Expected password")
 	useTLS := flag.Bool("tls", false, "Enable TLS with self-signed certificate")
 	singleSession := flag.Bool("single-session", false, "Enforce single bound session")
-	dlrModeStr := flag.String("dlr-mode", "immediate", "DLR mode: none, immediate, delayed, lost, duplicate, before_submit_resp, failed, expired")
+	dlrModeStr := flag.String("dlr-mode", "immediate", "DLR mode: none, immediate, delayed, lost, duplicate, before_submit_resp, failed, undeliverable, expired")
 	dlrDelay := flag.Duration("dlr-delay", 2*time.Second, "Delay for delayed DLR mode")
 	errCodeStr := flag.String("error-code", "0x00", "Injected error code (hex like 0x58 or decimal)")
 	latency := flag.Duration("latency", 0, "Simulated submit latency")
@@ -81,4 +81,3 @@ func main() {
 	_ = server.Close()
 	fmt.Println("Mock SMSC stopped cleanly.")
 }
-
