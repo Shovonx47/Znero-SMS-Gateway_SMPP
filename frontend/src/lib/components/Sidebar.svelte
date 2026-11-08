@@ -319,6 +319,18 @@
 						<span>Sender IDs</span>
 					</a>
 				{/if}
+
+				<a
+					href="/integration"
+					class="flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold transition {isActive('/integration')
+						? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300'
+						: 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/60'}"
+				>
+					<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+					</svg>
+					<span>API & Integration</span>
+				</a>
 			</div>
 		{/if}
 
@@ -657,6 +669,56 @@
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 						</svg>
 						<span>DLR Mappings</span>
+					</a>
+				{/if}
+
+				{#if auth.tenant?.actor_org_type === 'platform' || can('message.platform.view')}
+					<a
+						href="/messaging/customer-sessions"
+						class="flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold transition {isActive('/messaging/customer-sessions')
+							? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300'
+							: 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/60'}"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+						</svg>
+						<span>Customer SMPP</span>
+					</a>
+
+					<a
+						href="/messaging/webhooks"
+						class="flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold transition {isActive('/messaging/webhooks')
+							? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300'
+							: 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/60'}"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+						</svg>
+						<span>Webhook Logs</span>
+					</a>
+
+					<a
+						href="/messaging/inbound-numbers"
+						class="flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold transition {isActive('/messaging/inbound-numbers')
+							? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300'
+							: 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/60'}"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+						</svg>
+						<span>Inbound Numbers</span>
+					</a>
+
+					<a
+						href="/messaging/inbound-messages"
+						class="flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold transition {isActive('/messaging/inbound-messages')
+							? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300'
+							: 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/60'}"
+					>
+						<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-2m-4-1v8m0 0l3-3m-3 3L9 8m-5 5h2.586a1 1 0 01.707.293l2.414 2.414a1 1 0 00.707.293h3.172a1 1 0 00.707-.293l2.414-2.414a1 1 0 01.707-.293H20" />
+						</svg>
+						<span>Inbound Messages</span>
 					</a>
 				{/if}
 			</div>

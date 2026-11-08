@@ -542,11 +542,6 @@ func (e *Engine) Simulate(ctx context.Context, req SimulateRequest) (*SimulateRe
 	return simResult, nil
 }
 
-func (e *Engine) selectPlan(snap *RoutingSnapshot, customerOrgID uuid.UUID, countryID uuid.UUID, evalTime time.Time) *RoutePlan {
-	p, _ := e.selectPlanWithReason(snap, customerOrgID, countryID, evalTime)
-	return p
-}
-
 func (e *Engine) selectPlanWithReason(snap *RoutingSnapshot, customerOrgID uuid.UUID, countryID uuid.UUID, evalTime time.Time) (*RoutePlan, string) {
 	if evalTime.IsZero() {
 		evalTime = time.Now().UTC()

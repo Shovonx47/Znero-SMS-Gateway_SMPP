@@ -1342,10 +1342,10 @@ func (s *Service) ConfirmImport(ctx context.Context, tc *tenant.Context, jobID u
 	}
 
 	if job.EntityType == "prefix" {
-		defer s.prefixSvc.ListAllActive(context.Background())
+		defer func() { _, _ = s.prefixSvc.ListAllActive(context.Background()) }()
 	}
 	if (job.EntityType == "rate_card_rate" || job.EntityType == "customer_sell_rate") && s.ratingSvc != nil {
-		defer s.ratingSvc.ReloadEngine(context.Background())
+		defer func() { _ = s.ratingSvc.ReloadEngine(context.Background()) }()
 	}
 
 	return s.repo.GetJobByID(ctx, jobID)
@@ -1442,7 +1442,7 @@ func (s *Service) RollbackImport(ctx context.Context, tc *tenant.Context, jobID 
 	}
 
 	if (job.EntityType == "rate_card_rate" || job.EntityType == "customer_sell_rate") && s.ratingSvc != nil {
-		defer s.ratingSvc.ReloadEngine(context.Background())
+		defer func() { _ = s.ratingSvc.ReloadEngine(context.Background()) }()
 	}
 
 	return nil
@@ -1703,10 +1703,10 @@ func (s *Service) ApplyChange(ctx context.Context, tx pgx.Tx, cr *approval.Chang
 	}
 
 	if job.EntityType == "prefix" {
-		defer s.prefixSvc.ListAllActive(context.Background())
+		defer func() { _, _ = s.prefixSvc.ListAllActive(context.Background()) }()
 	}
 	if (job.EntityType == "rate_card_rate" || job.EntityType == "customer_sell_rate") && s.ratingSvc != nil {
-		defer s.ratingSvc.ReloadEngine(context.Background())
+		defer func() { _ = s.ratingSvc.ReloadEngine(context.Background()) }()
 	}
 
 	return nil

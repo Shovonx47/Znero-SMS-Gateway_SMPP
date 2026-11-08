@@ -82,7 +82,7 @@ func (s *Service) CreateRole(ctx context.Context, tc *tenant.Context, req Create
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	created, err := s.repo.CreateRole(ctx, tx, Role{
 		OrganizationID: targetOrgID,
@@ -143,7 +143,7 @@ func (s *Service) UpdateRole(ctx context.Context, tc *tenant.Context, id uuid.UU
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if err := s.repo.UpdateRole(ctx, tx, id, name, strings.TrimSpace(req.Description), req.Permissions); err != nil {
 		return nil, err
@@ -216,7 +216,7 @@ func (s *Service) DeleteRole(ctx context.Context, tc *tenant.Context, id uuid.UU
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if err := s.repo.DeleteRole(ctx, tx, id); err != nil {
 		return err

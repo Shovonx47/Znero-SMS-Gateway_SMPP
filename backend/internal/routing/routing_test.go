@@ -653,10 +653,8 @@ func TestStrategy_LeastCost_ExactDecimal(t *testing.T) {
 	// Set rates with exact decimal values:
 	// conn1: 0.0025, conn2: 0.0015, conn3: 0.0020
 	// Sorted least cost should be: conn2 (0.0015), conn3 (0.0020), conn1 (0.0025)
-	snap := routing.CurrentSnapshot()
-	if snap == nil {
+	if routing.CurrentSnapshot() == nil {
 		routing.TryReload(ctx, rk.e.Pool)
-		snap = routing.CurrentSnapshot()
 	}
 
 	plan, _ := rk.routingSvc.CreatePlan(ctx, rk.e.Override, &routing.RoutePlan{
@@ -681,7 +679,7 @@ func TestStrategy_LeastCost_ExactDecimal(t *testing.T) {
 	})
 
 	routing.TryReload(ctx, rk.e.Pool)
-	snap = routing.CurrentSnapshot()
+	snap := routing.CurrentSnapshot()
 
 	// Inject exact decimal costs into snapshot connections
 	c1 := snap.Connections[conn1]

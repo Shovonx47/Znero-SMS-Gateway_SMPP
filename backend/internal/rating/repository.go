@@ -924,7 +924,6 @@ func (r *pgRepository) ListRates(ctx context.Context, filter RateListFilter) ([]
 	if filter.CountryID != nil {
 		conditions = append(conditions, fmt.Sprintf("r.country_id = $%d", argIdx))
 		args = append(args, *filter.CountryID)
-		argIdx++
 	}
 	if filter.OperatorID != nil {
 		conditions = append(conditions, fmt.Sprintf("r.operator_id = $%d", argIdx))
@@ -1908,7 +1907,6 @@ func (r *pgRepository) GenerateMarginReport(ctx context.Context, filter MarginRe
 	if filter.CountryID != nil {
 		conditions = append(conditions, fmt.Sprintf("r.country_id = $%d", argIdx))
 		args = append(args, *filter.CountryID)
-		argIdx++
 	}
 
 	whereClause := "WHERE " + strings.Join(conditions, " AND ")

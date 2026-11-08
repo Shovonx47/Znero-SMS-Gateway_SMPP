@@ -1384,7 +1384,7 @@ func TestRelease_IdempotentOnAlreadyReleased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dbTx.Rollback(ctx)
+	defer func() { _ = dbTx.Rollback(ctx) }()
 	if err := h.ledgerSvc.ReleaseTx(ctx, dbTx, hold.ID); err != nil {
 		t.Fatalf("ReleaseTx on already-released hold must return nil, got: %v", err)
 	}

@@ -221,3 +221,28 @@
   - Formula injection protection (`CSV/JSON`) is enforced on message query exports.
 - **PostgreSQL Advisory Lock Concurrency Protection:**
   - Background outbox polling and reaper jobs run under mutual exclusion via PostgreSQL advisory locks (`pg_try_advisory_lock(8888, 1001)`), guaranteeing exactly-one execution across clustered application nodes.
+
+---
+
+## 14. Phase 8B Security: Customer Edge, SMPP Server, Webhooks & Inbound Pipeline
+
+- **Constant-Time API Key Hashing & Verification (`customeredge`):**
+  - Plaintext API keys are never stored in the database. Only the non-secret prefix (`zn_live_...`) and the SHA-256 hash are persisted.
+  - Verification uses `crypto/subtle.ConstantTimeCompare` to eliminate timing side-channel attacks. Authenticated principals are cached in memory for at most 10 seconds to avoid per-request database hits while respecting revoking actions promptly.
+  - Brute-force protection automatically locks out client IPs for 5 minutes after 10 consecutive failed authentication attempts within 60 seconds.
+- **SSRF Defense on Customer Webhook Dispatches (`webhook/dispatcher.go`):**
+  - Dispatches to customer webhook URLs resolve DNS at network dial time using `smpp.SafeDialer`. Every resolved IP address is checked against private subnets (RFC 1918), loopback, link-local, multicast, and cloud metadata (169.254.169.254).
+  - HTTP redirects are strictly forbidden (`CheckRedirect: func(...) { return http.ErrUseLastResponse }`) to prevent open redirect SSRF bypasses.
+  - Customer response bodies are strictly capped at 4KB using `io.LimitReader` to prevent memory exhaustion or logging denial-of-service.
+- **Write-Only Webhook Signing Secrets & HMAC-SHA256 Signatures:**
+  - Webhook signing secrets are generated as 32-byte cryptographically secure random values and displayed to the customer **exactly once** upon creation.
+  - Secrets are encrypted at rest with AES-256-GCM via the KMS KeyRing.
+  - Dispatches include timestamped HMAC-SHA256 signatures (`X-Znero-Signature: t=<ts>,v1=<sig>`) enabling customer applications to verify payload integrity and reject replay attacks.
+- **Single PDU Enforcement on Customer SMPP (`smppserver/session.go`):**
+  - The customer SMPP server rejects fragmented submissions (UDH concatenation `esm_class & 0x40 != 0` and SAR TLVs) with `ESME_RINVMSGLEN`. This eliminates multi-part aggregation exploits, unbilled segment leakage, and downstream reassembly desynchronization.
+  - Argon2id constant-time verification is enforced on all customer SMPP binds.
+- **Inbound MO Message Ingestion & Isolation:**
+  - Inbound MO messages from mobile subscribers are matched strictly to platform virtual numbers (`inbound_numbers`). If unassigned, messages are logged as unrouted without customer leakage.
+  - Inbound message bodies are encrypted at rest via AES-256-GCM KMS keys before persistence in `inbound_messages`.
+- **Token Bucket Throughput Protection:**
+  - Customer TPS limits are enforced via thread-safe token buckets across both REST API and SMPP protocols. Bulk requests (`POST /sms/bulk`) execute upfront atomic reservations to prevent partial burst violations.

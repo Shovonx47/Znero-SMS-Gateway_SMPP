@@ -30,12 +30,32 @@ type SessionStatsProvider interface {
 	GetAllSessionStats(ctx context.Context) ([]SessionStats, error)
 }
 
+// CustomerSessionInfo captures operational telemetry for a bound customer SMPP session.
+type CustomerSessionInfo struct {
+	ID            uuid.UUID `json:"id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	CustomerOrgID uuid.UUID `json:"customer_org_id"`
+	SystemID      string    `json:"system_id"`
+	BindType      string    `json:"bind_type"`
+	RemoteIP      string    `json:"remote_ip"`
+	Bound         bool      `json:"bound"`
+	InFlight      int       `json:"in_flight"`
+	BoundAt       time.Time `json:"bound_at"`
+}
+
+// CustomerSessionProvider supplies live customer SMPP sessions and disconnection controls.
+type CustomerSessionProvider interface {
+	GetActiveCustomerSessions() []CustomerSessionInfo
+	ForceDisconnect(sessionID uuid.UUID) error
+}
+
 // Handler serves HTTP endpoints for messaging, messages explorer, and platform operational monitoring.
 type Handler struct {
-	svc          *Service
-	reconcileSvc *ReconciliationService
-	sessionProv  SessionStatsProvider
-	repo         Repository
+	svc              *Service
+	reconcileSvc     *ReconciliationService
+	sessionProv      SessionStatsProvider
+	customerSessProv CustomerSessionProvider
+	repo             Repository
 }
 
 // NewHandler creates a new Handler instance.
@@ -51,6 +71,11 @@ func NewHandler(
 		sessionProv:  sessionProv,
 		repo:         repo,
 	}
+}
+
+// SetCustomerSessionProvider connects the customer SMPP server tracker to the handler.
+func (h *Handler) SetCustomerSessionProvider(p CustomerSessionProvider) {
+	h.customerSessProv = p
 }
 
 // RegisterRoutes mounts all messaging routes onto the Fiber router.
@@ -77,6 +102,15 @@ func (h *Handler) RegisterRoutes(router fiber.Router, authMiddleware fiber.Handl
 	mgmt.Post("/dlr-mappings", rbac.RequirePermission("message.dlr_mapping.manage"), h.createDLRMapping)
 	mgmt.Put("/dlr-mappings/:id", rbac.RequirePermission("message.dlr_mapping.manage"), h.updateDLRMapping)
 	mgmt.Delete("/dlr-mappings/:id", rbac.RequirePermission("message.dlr_mapping.manage"), h.deleteDLRMapping)
+
+	// Phase 8B Platform Endpoints: Customer SMPP Sessions, Inbound Numbers/Messages, Webhook Deliveries
+	mgmt.Get("/customer/sessions", rbac.RequirePermission("message.platform.view"), h.getCustomerSMPPSessions)
+	mgmt.Post("/customer/sessions/:id/disconnect", rbac.RequirePermission("message.platform.manage"), h.disconnectCustomerSMPPSession)
+	mgmt.Get("/inbound/numbers", rbac.RequirePermission("message.platform.view"), h.listInboundNumbers)
+	mgmt.Post("/inbound/numbers", rbac.RequirePermission("message.platform.manage"), h.createInboundNumber)
+	mgmt.Put("/inbound/numbers/:id", rbac.RequirePermission("message.platform.manage"), h.updateInboundNumber)
+	mgmt.Get("/inbound/messages", rbac.RequirePermission("message.platform.view"), h.listInboundMessages)
+	mgmt.Get("/webhooks/deliveries", rbac.RequirePermission("message.platform.view"), h.listPlatformWebhookDeliveries)
 }
 
 func (h *Handler) listMessages(c *fiber.Ctx) error {
@@ -446,4 +480,162 @@ func (h *Handler) deleteDLRMapping(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, fiber.Map{"success": true})
+}
+
+func (h *Handler) getCustomerSMPPSessions(c *fiber.Ctx) error {
+	if h.customerSessProv == nil {
+		return httpx.OK(c, fiber.Map{"sessions": []CustomerSessionInfo{}})
+	}
+	sessions := h.customerSessProv.GetActiveCustomerSessions()
+	return httpx.OK(c, fiber.Map{"sessions": sessions})
+}
+
+func (h *Handler) disconnectCustomerSMPPSession(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil || tc == nil || !tc.IsPlatformOrg() {
+		return httpx.Forbidden("only platform administrators can disconnect customer SMPP sessions")
+	}
+
+	idStr := c.Params("id")
+	sessionID, err := uuid.Parse(idStr)
+	if err != nil {
+		return httpx.BadRequest("invalid session ID")
+	}
+
+	if h.customerSessProv == nil {
+		return httpx.BadRequest("customer SMPP server not running")
+	}
+
+	if err := h.customerSessProv.ForceDisconnect(sessionID); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+
+	return httpx.OK(c, fiber.Map{"success": true})
+}
+
+func (h *Handler) listInboundNumbers(c *fiber.Ctx) error {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	pageSize, _ := strconv.Atoi(c.Query("per_page", "20"))
+	status := c.Query("status", "")
+
+	var customerOrgID *uuid.UUID
+	if cid := c.Query("customer_org_id"); cid != "" {
+		if u, err := uuid.Parse(cid); err == nil {
+			customerOrgID = &u
+		}
+	}
+
+	items, total, err := h.repo.ListInboundNumbers(c.UserContext(), customerOrgID, status, page, pageSize)
+	if err != nil {
+		return httpx.Internal(err)
+	}
+
+	return httpx.OK(c, fiber.Map{
+		"items":    items,
+		"total":    total,
+		"page":     page,
+		"per_page": pageSize,
+	})
+}
+
+func (h *Handler) createInboundNumber(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil || tc == nil || !tc.IsPlatformOrg() {
+		return httpx.Forbidden("only platform administrators can configure inbound numbers")
+	}
+
+	var n InboundNumber
+	if err := c.BodyParser(&n); err != nil {
+		return httpx.BadRequest("invalid body: " + err.Error())
+	}
+
+	if strings.TrimSpace(n.NumberRaw) == "" {
+		return httpx.BadRequest("number_raw is required")
+	}
+	if n.NumberE164 == "" {
+		n.NumberE164 = strings.TrimSpace(n.NumberRaw)
+		if !strings.HasPrefix(n.NumberE164, "+") {
+			n.NumberE164 = "+" + n.NumberE164
+		}
+	}
+
+	if err := h.repo.CreateInboundNumber(c.UserContext(), &n); err != nil {
+		return httpx.Internal(err)
+	}
+
+	return httpx.JSON(c, fiber.StatusCreated, n)
+}
+
+func (h *Handler) updateInboundNumber(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil || tc == nil || !tc.IsPlatformOrg() {
+		return httpx.Forbidden("only platform administrators can update inbound numbers")
+	}
+
+	idStr := c.Params("id")
+	numID, err := uuid.Parse(idStr)
+	if err != nil {
+		return httpx.BadRequest("invalid inbound number ID")
+	}
+
+	var n InboundNumber
+	if err := c.BodyParser(&n); err != nil {
+		return httpx.BadRequest("invalid body: " + err.Error())
+	}
+	n.ID = numID
+
+	if err := h.repo.UpdateInboundNumber(c.UserContext(), &n); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+
+	return httpx.OK(c, n)
+}
+
+func (h *Handler) listInboundMessages(c *fiber.Ctx) error {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	pageSize, _ := strconv.Atoi(c.Query("per_page", "20"))
+
+	var customerOrgID *uuid.UUID
+	if cid := c.Query("customer_org_id"); cid != "" {
+		if u, err := uuid.Parse(cid); err == nil {
+			customerOrgID = &u
+		}
+	}
+
+	items, total, err := h.repo.ListInboundMessages(c.UserContext(), customerOrgID, page, pageSize)
+	if err != nil {
+		return httpx.Internal(err)
+	}
+
+	return httpx.OK(c, fiber.Map{
+		"items":    items,
+		"total":    total,
+		"page":     page,
+		"per_page": pageSize,
+	})
+}
+
+func (h *Handler) listPlatformWebhookDeliveries(c *fiber.Ctx) error {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	pageSize, _ := strconv.Atoi(c.Query("per_page", "20"))
+	status := c.Query("status", "")
+
+	targetOrg := uuid.Nil
+	if cid := c.Query("customer_org_id"); cid != "" {
+		if u, err := uuid.Parse(cid); err == nil {
+			targetOrg = u
+		}
+	}
+
+	items, total, err := h.repo.ListWebhookDeliveries(c.UserContext(), targetOrg, nil, status, page, pageSize)
+	if err != nil {
+		return httpx.Internal(err)
+	}
+
+	return httpx.OK(c, fiber.Map{
+		"items":    items,
+		"total":    total,
+		"page":     page,
+		"per_page": pageSize,
+	})
 }

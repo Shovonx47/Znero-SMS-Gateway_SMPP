@@ -360,7 +360,7 @@ func runSeed(ctx context.Context, pool *pgxpool.Pool) error {
 	// 5. Assign to Customer Org
 	var customerOrgID uuid.UUID
 	if err := pool.QueryRow(ctx, `SELECT organization_id FROM users WHERE email = 'dev-customer-admin@dev.znero.test'`).Scan(&customerOrgID); err != nil {
-		pool.QueryRow(ctx, `SELECT id FROM organizations WHERE type = 'customer' LIMIT 1`).Scan(&customerOrgID)
+		_ = pool.QueryRow(ctx, `SELECT id FROM organizations WHERE type = 'customer' LIMIT 1`).Scan(&customerOrgID)
 	}
 	if customerOrgID != uuid.Nil {
 		_, err = ratingSvc.CreateAssignment(ctx, platformTC, customerOrgID, sellCardID, now.Add(-24*time.Hour), nil, "assign standard card to customer")
@@ -375,7 +375,7 @@ func runSeed(ctx context.Context, pool *pgxpool.Pool) error {
 	var resellerOrgID uuid.UUID
 	var resellerOrgPath string
 	if err := pool.QueryRow(ctx, `SELECT u.organization_id, o.path FROM users u JOIN organizations o ON o.id = u.organization_id WHERE u.email = 'dev-reseller-admin@dev.znero.test'`).Scan(&resellerOrgID, &resellerOrgPath); err != nil {
-		pool.QueryRow(ctx, `SELECT id, path FROM organizations WHERE type = 'reseller' LIMIT 1`).Scan(&resellerOrgID, &resellerOrgPath)
+		_ = pool.QueryRow(ctx, `SELECT id, path FROM organizations WHERE type = 'reseller' LIMIT 1`).Scan(&resellerOrgID, &resellerOrgPath)
 	}
 	if resellerOrgID != uuid.Nil {
 		_, err = ratingSvc.CreateResellerCostAssignment(ctx, platformTC, resellerOrgID, costCardID, now.Add(-24*time.Hour), nil, "assign cost card to reseller")

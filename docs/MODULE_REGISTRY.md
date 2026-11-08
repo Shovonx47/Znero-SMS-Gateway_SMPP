@@ -246,6 +246,34 @@ This document maintains the registry of all modules in the Znero International m
   - Realistic mock SMSC carrier simulator (`mocksmsc`) on port 2775 with configurable latency, reject codes, and DLR delivery modes (`immediate`, `delayed`, `undeliverable`, `failed`, `none`).
 - **Database Tables:** `provider_connection_sessions`.
 
+### `customeredge`
+- **Location:** `backend/internal/customeredge`
+- **Responsibilities:**
+  - Customer-facing HTTP REST API (`/api/v1/customer`) supporting single SMS (`POST /sms`), bulk SMS (`POST /sms/bulk`), price & encoding estimates (`POST /sms/estimate`), message status queries (`GET /sms/:id`, `GET /sms`), live wallet balance & limits (`GET /balance`), active rates (`GET /rates`), account details (`GET /account`), and inbound messages (`GET /inbound`).
+  - Edge authenticator with constant-time SHA-256 API key verification, 10s TTL in-memory caching, client IP allowlist enforcement, and brute-force lockout protection.
+  - Token bucket rate limiting per customer org TPS limit (`max_tps`), supporting upfront atomic token reservation for bulk batches up to 1000 items.
+  - Public error catalog mapping internal errors to RFC 7807 problem details and coarse customer statuses.
+- **Database Tables:** `customer_api_keys`, `customer_api_key_history`, `customer_usage_counters`.
+
+### `smppserver`
+- **Location:** `backend/internal/smppserver`
+- **Responsibilities:**
+  - High-performance customer SMPP 3.4 server listening on port 2776 (TCP) and 3550 (TLS), accepting transmitter, receiver, and transceiver binds.
+  - Authenticates `customer_smpp_accounts` using Argon2id constant-time password verification, IP allowlists, allowed bind types, and concurrent bind quotas.
+  - Strict single PDU enforcement: rejects UDH concatenation and SAR fragmentation with `ESME_RINVMSGLEN` (0x00000001).
+  - Transactional submission: `submit_sm_resp` emitted only after database transaction commit, returning 32-hex message ID.
+  - Customer DLR Dispatcher: background worker routing delivery receipts from `smpp_dlr_queue` to bound customer receiver/transceiver sessions using standard receipt text + TLVs (`TagReceiptedMessageId`, `TagMessageState`).
+- **Database Tables:** `customer_smpp_accounts`, `customer_smpp_sessions`, `smpp_dlr_queue`.
+
+### `webhook`
+- **Location:** `backend/internal/webhook`
+- **Responsibilities:**
+  - Asynchronous customer webhook dispatcher worker claiming deliveries with `FOR UPDATE SKIP LOCKED`.
+  - SSRF-safe HTTP client with 8-second timeout, 4KB response capture cap, and forbidden redirects.
+  - HMAC-SHA256 request signing (`X-Znero-Signature: t=<timestamp>,v1=<sig>`) with KMS-decrypted secret.
+  - Exponential backoff retry and automatic webhook disabling (`disabled_auto`) after 10 consecutive delivery failures.
+- **Database Tables:** `customer_webhooks`, `customer_webhooks_history`, `customer_webhook_deliveries`, `customer_webhook_attempts`.
+
 ---
 
 ## 2. Shared Packages (`pkg/`)
@@ -264,10 +292,8 @@ This document maintains the registry of all modules in the Znero International m
 
 ---
 
-## 3. Future Roadmap Modules (Phase 8B & Phase 9)
+## 3. Future Roadmap Modules (Phase 9)
 
 | Module | Target Phase | Planned Responsibilities |
 | :--- | :--- | :--- |
-| **`customer_api`** | Phase 8B | External customer-facing HTTP REST API for bulk and single SMS dispatch, webhooks, and balance checks. |
-| **`smpp_server`** | Phase 8B | Inbound customer SMPP 3.4 server accepting binds, submit_sm PDUs, and forwarding DLRs. |
 | **`reporting`** | Phase 9 | Aggregated traffic analytics, delivery latency metrics, margin and P&L dashboards. |

@@ -12,12 +12,15 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"github.com/znero-international/znero/backend/internal/ledger"
 )
 
 // Repository specifies the persistence interface for messaging operations.
 type Repository interface {
 	InsertMessageAtomic(ctx context.Context, tx pgx.Tx, msg *Message, parts []MessagePart, outbox *MessageOutbox, event *MessageEvent) error
 	CheckIdempotency(ctx context.Context, customerOrgID uuid.UUID, clientRef string) (*uuid.UUID, *time.Time, error)
+	CheckIdempotencyWithFingerprint(ctx context.Context, customerOrgID uuid.UUID, clientRef string) (*uuid.UUID, *time.Time, *string, error)
+	GetMessageLocator(ctx context.Context, messageID uuid.UUID) (*MessageLocator, error)
 	GetMessage(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, []MessagePart, error)
 	GetMessageByID(ctx context.Context, id uuid.UUID) (*Message, []MessagePart, error)
 	ListMessages(ctx context.Context, customerOrgID *uuid.UUID, status string, page, pageSize int) ([]Message, int, error)
@@ -52,6 +55,30 @@ type Repository interface {
 	FindNoDLRSubmittedMessages(ctx context.Context, before time.Time, limit int) ([]Message, error)
 	FindPendingUnmatchedDLRs(ctx context.Context, limit int) ([]UnmatchedDLR, error)
 	ListMessagesAdvanced(ctx context.Context, orgID *uuid.UUID, status, destination, senderID string, connID *uuid.UUID, fromDate, toDate *time.Time, page, pageSize int) ([]Message, int, error)
+	IncrementUsageCountersTx(ctx context.Context, tx pgx.Tx, customerOrgID uuid.UUID, parts int, dailyCap, monthlyCap *int64) error
+	GetCustomerUsage(ctx context.Context, customerOrgID uuid.UUID) (dailyCount int64, monthlyCount int64, dailyCap int64, monthlyCap int64, tpsLimit int, err error)
+	TransitionToFinalStateTx(ctx context.Context, tx pgx.Tx, ledgerSvc *ledger.Service, billingTrig string, params FinalStateParams) error
+	InsertSMPPDLRQueue(ctx context.Context, tx pgx.Tx, item SMPPDLRQueueItem) error
+	FetchPendingSMPPDLRs(ctx context.Context, limit int, leasedBy string, leaseDuration time.Duration) ([]SMPPDLRQueueItem, error)
+	UpdateSMPPDLRQueueStatus(ctx context.Context, id uuid.UUID, status string) error
+	CreateWebhook(ctx context.Context, wh *CustomerWebhook) error
+	GetWebhook(ctx context.Context, id uuid.UUID, customerOrgID uuid.UUID) (*CustomerWebhook, error)
+	ListWebhooks(ctx context.Context, customerOrgID uuid.UUID) ([]CustomerWebhook, error)
+	UpdateWebhook(ctx context.Context, wh *CustomerWebhook) error
+	DeleteWebhook(ctx context.Context, id uuid.UUID, customerOrgID uuid.UUID) error
+	ListWebhookDeliveries(ctx context.Context, customerOrgID uuid.UUID, webhookID *uuid.UUID, status string, page, pageSize int) ([]CustomerWebhookDelivery, int, error)
+	GetWebhookDeliveryWithAttempts(ctx context.Context, deliveryID uuid.UUID, customerOrgID uuid.UUID) (*CustomerWebhookDelivery, []CustomerWebhookAttempt, error)
+	FetchPendingWebhookDeliveries(ctx context.Context, limit int, leasedBy string, leaseDuration time.Duration) ([]CustomerWebhookDelivery, error)
+	RecordWebhookAttempt(ctx context.Context, attempt CustomerWebhookAttempt, nextStatus string, nextAttempt *time.Time) error
+	CreateInboundNumber(ctx context.Context, n *InboundNumber) error
+	UpdateInboundNumber(ctx context.Context, n *InboundNumber) error
+	GetInboundNumber(ctx context.Context, id uuid.UUID) (*InboundNumber, error)
+	MatchInboundNumber(ctx context.Context, destinationE164 string) (*InboundNumber, error)
+	ListInboundNumbers(ctx context.Context, customerOrgID *uuid.UUID, status string, page, pageSize int) ([]InboundNumber, int, error)
+	RecordInboundMessage(ctx context.Context, msg *InboundMessage) error
+	QueueInboundWebhook(ctx context.Context, customerOrgID uuid.UUID, payload map[string]interface{}) error
+	ListInboundMessages(ctx context.Context, customerOrgID *uuid.UUID, page, pageSize int) ([]InboundMessage, int, error)
+	CleanExpiredData(ctx context.Context, retentionDays int) (dlrsCleaned int64, webhooksCleaned int64, err error)
 }
 
 type pgRepository struct {
@@ -87,24 +114,41 @@ func (r *pgRepository) InsertMessageAtomic(
 			sender_id, sender_id_type, message_type, encoding, encrypted_body, key_id,
 			body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
 			estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-			provider_message_id, attempts, max_attempts, expires_at, updated_at
+			provider_message_id, attempts, max_attempts, expires_at, updated_at,
+			ingress_channel, ingress_account_id, dlr_requested
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11, $12,
 			$13, $14, $15, $16, $17, $18, $19,
 			$20, $21, $22, $23, $24,
-			$25, $26, $27, $28, $29
+			$25, $26, $27, $28, $29,
+			$30, $31, $32
 		)
 	`
+	ingressChan := msg.IngressChannel
+	if ingressChan == "" {
+		ingressChan = "platform"
+	}
 	_, err := tx.Exec(ctx, msgQuery,
 		msg.ID, msg.CreatedAt, msg.CustomerOrgID, msg.ClientReference, msg.OriginalDestination, msg.Destination,
 		msg.SenderID, msg.SenderIDType, msg.MessageType, msg.Encoding, msg.EncryptedBody, msg.KeyID,
 		msg.BodyLength, msg.TotalParts, msg.Status, msg.FailureReason, msg.HoldID, msg.SellPrice, msg.SellCurrency,
 		msg.EstimatedBuyCost, msg.ActualBuyCost, msg.BuyCurrency, msg.RoutePlanID, msg.ProviderConnectionID,
 		msg.ProviderMessageID, msg.Attempts, msg.MaxAttempts, msg.ExpiresAt, msg.CreatedAt,
+		ingressChan, msg.IngressAccountID, msg.DLRRequested,
 	)
 	if err != nil {
 		return fmt.Errorf("insert message row: %w", err)
+	}
+
+	// 1b. Insert unpartitioned locator to allow fast O(1) single-partition pruning on point lookups by ID
+	locatorQuery := `
+		INSERT INTO message_locator (message_id, created_at, customer_org_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (message_id) DO NOTHING
+	`
+	if _, err := tx.Exec(ctx, locatorQuery, msg.ID, msg.CreatedAt, msg.CustomerOrgID); err != nil {
+		return fmt.Errorf("insert message locator: %w", err)
 	}
 
 	// 2. Insert unpartitioned idempotency lookup (Amendment 2: enforces uniqueness across month boundaries)
@@ -112,11 +156,11 @@ func (r *pgRepository) InsertMessageAtomic(
 	if msg.ClientReference != nil && *msg.ClientReference != "" {
 		lookupQuery := `
 			INSERT INTO message_idempotency_lookups (
-				customer_org_id, client_reference, message_id, message_created_at, created_at
-			) VALUES ($1, $2, $3, $4, $5)
+				customer_org_id, client_reference, message_id, message_created_at, request_fingerprint, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6)
 		`
 		_, err := tx.Exec(ctx, lookupQuery,
-			msg.CustomerOrgID, *msg.ClientReference, msg.ID, msg.CreatedAt, msg.CreatedAt,
+			msg.CustomerOrgID, *msg.ClientReference, msg.ID, msg.CreatedAt, msg.RequestFingerprint, msg.CreatedAt,
 		)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -276,26 +320,26 @@ func (r *pgRepository) GetMessage(ctx context.Context, id uuid.UUID, createdAt t
 	return &m, parts, nil
 }
 
-// GetMessageByID queries messages across partitions without knowing created_at.
+// GetMessageByID queries messages by ID, using the unpartitioned message_locator table to prune partitions.
 func (r *pgRepository) GetMessageByID(ctx context.Context, id uuid.UUID) (*Message, []MessagePart, error) {
+	// 1. Try unpartitioned locator first for O(1) single-partition routing
+	var createdAt time.Time
+	err := r.pool.QueryRow(ctx, "SELECT created_at FROM message_locator WHERE message_id = $1", id).Scan(&createdAt)
+	if err == nil {
+		return r.GetMessage(ctx, id, createdAt)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, fmt.Errorf("query message locator: %w", err)
+	}
+
+	// 2. Fallback across partitions if locator has not recorded it
 	query := `
-		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
-		       sender_id, sender_id_type, message_type, encoding, encrypted_body, key_id,
-		       body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
-		       estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		SELECT created_at
 		FROM messages
 		WHERE id = $1
 		LIMIT 1
 	`
-	var m Message
-	err := r.pool.QueryRow(ctx, query, id).Scan(
-		&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
-		&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.EncryptedBody, &m.KeyID,
-		&m.BodyLength, &m.TotalParts, &m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency,
-		&m.EstimatedBuyCost, &m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
-		&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
-	)
+	err = r.pool.QueryRow(ctx, query, id).Scan(&createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, nil
 	}
@@ -303,7 +347,7 @@ func (r *pgRepository) GetMessageByID(ctx context.Context, id uuid.UUID) (*Messa
 		return nil, nil, err
 	}
 
-	return r.GetMessage(ctx, m.ID, m.CreatedAt)
+	return r.GetMessage(ctx, id, createdAt)
 }
 
 // ListMessages returns paginated messages filtered by customer org and optional status.
@@ -1406,4 +1450,1196 @@ func (r *pgRepository) ListMessagesAdvanced(
 	}
 
 	return list, total, nil
+}
+
+// CheckIdempotencyWithFingerprint returns the existing message and the saved request fingerprint.
+func (r *pgRepository) CheckIdempotencyWithFingerprint(ctx context.Context, customerOrgID uuid.UUID, clientRef string) (*uuid.UUID, *time.Time, *string, error) {
+	query := `
+		SELECT message_id, message_created_at, request_fingerprint
+		FROM message_idempotency_lookups
+		WHERE customer_org_id = $1 AND client_reference = $2
+	`
+	var msgID uuid.UUID
+	var createdAt time.Time
+	var fingerprint *string
+	err := r.pool.QueryRow(ctx, query, customerOrgID, clientRef).Scan(&msgID, &createdAt, &fingerprint)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return &msgID, &createdAt, fingerprint, nil
+}
+
+// GetMessageLocator finds the message created_at partition key and customer_org_id from unpartitioned locator table.
+func (r *pgRepository) GetMessageLocator(ctx context.Context, messageID uuid.UUID) (*MessageLocator, error) {
+	query := `SELECT message_id, created_at, customer_org_id FROM message_locator WHERE message_id = $1`
+	var loc MessageLocator
+	err := r.pool.QueryRow(ctx, query, messageID).Scan(&loc.MessageID, &loc.CreatedAt, &loc.CustomerOrgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &loc, nil
+}
+
+// IncrementUsageCountersTx atomically updates daily and monthly counters and validates against caps.
+func (r *pgRepository) IncrementUsageCountersTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	customerOrgID uuid.UUID,
+	parts int,
+	dailyCap *int64,
+	monthlyCap *int64,
+) error {
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	if dailyCap != nil && *dailyCap > 0 {
+		var count int64
+		q := `
+			INSERT INTO customer_usage_counters (customer_org_id, period_type, period_start, message_count, updated_at)
+			VALUES ($1, 'day', $2, $3, now())
+			ON CONFLICT (customer_org_id, period_type, period_start)
+			DO UPDATE SET message_count = customer_usage_counters.message_count + EXCLUDED.message_count,
+			              updated_at = now()
+			RETURNING message_count
+		`
+		if err := tx.QueryRow(ctx, q, customerOrgID, dayStart, parts).Scan(&count); err != nil {
+			return fmt.Errorf("increment daily usage: %w", err)
+		}
+		if count > *dailyCap {
+			return fmt.Errorf("daily quota exceeded: %d/%d messages used", count, *dailyCap)
+		}
+	}
+
+	if monthlyCap != nil && *monthlyCap > 0 {
+		var count int64
+		q := `
+			INSERT INTO customer_usage_counters (customer_org_id, period_type, period_start, message_count, updated_at)
+			VALUES ($1, 'month', $2, $3, now())
+			ON CONFLICT (customer_org_id, period_type, period_start)
+			DO UPDATE SET message_count = customer_usage_counters.message_count + EXCLUDED.message_count,
+			              updated_at = now()
+			RETURNING message_count
+		`
+		if err := tx.QueryRow(ctx, q, customerOrgID, monthStart, parts).Scan(&count); err != nil {
+			return fmt.Errorf("increment monthly usage: %w", err)
+		}
+		if count > *monthlyCap {
+			return fmt.Errorf("monthly quota exceeded: %d/%d messages used", count, *monthlyCap)
+		}
+	}
+
+	return nil
+}
+
+// GetCustomerUsage returns current daily and monthly usage counts and configured caps.
+func (r *pgRepository) GetCustomerUsage(ctx context.Context, customerOrgID uuid.UUID) (dailyCount int64, monthlyCount int64, dailyCap int64, monthlyCap int64, tpsLimit int, err error) {
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	_ = r.pool.QueryRow(ctx, `
+		SELECT coalesce(message_count, 0)
+		FROM customer_usage_counters
+		WHERE customer_org_id = $1 AND period_type = 'day' AND period_start = $2
+	`, customerOrgID, dayStart).Scan(&dailyCount)
+
+	_ = r.pool.QueryRow(ctx, `
+		SELECT coalesce(message_count, 0)
+		FROM customer_usage_counters
+		WHERE customer_org_id = $1 AND period_type = 'month' AND period_start = $2
+	`, customerOrgID, monthStart).Scan(&monthlyCount)
+
+	var dCap, mCap *int64
+	var tps *int
+	row := r.pool.QueryRow(ctx, `
+		SELECT daily_message_cap, monthly_message_cap, tps_limit
+		FROM customer_profiles
+		WHERE organization_id = $1
+	`, customerOrgID)
+	if err := row.Scan(&dCap, &mCap, &tps); err == nil {
+		if dCap != nil {
+			dailyCap = *dCap
+		}
+		if mCap != nil {
+			monthlyCap = *mCap
+		}
+		if tps != nil {
+			tpsLimit = *tps
+		}
+	}
+
+	return dailyCount, monthlyCount, dailyCap, monthlyCap, tpsLimit, nil
+}
+
+// TransitionToFinalStateTx executes monotonic state transition, financial settlement, audit recording,
+// and atomically queues customer delivery receipts (SMPP DLR / Webhook) inside one caller transaction.
+func (r *pgRepository) TransitionToFinalStateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	ledgerSvc *ledger.Service,
+	billingTrig string,
+	params FinalStateParams,
+) error {
+	// 1. Fetch current message state FOR UPDATE targeting exact partition
+	var current Message
+	queryLock := `
+		SELECT id, created_at, customer_org_id, client_reference, destination, sender_id,
+		       status, hold_id, sell_price, sell_currency, ingress_channel, ingress_account_id, dlr_requested
+		FROM messages
+		WHERE id = $1 AND created_at = $2
+		FOR UPDATE
+	`
+	err := tx.QueryRow(ctx, queryLock, params.MessageID, params.MessageCreatedAt).Scan(
+		&current.ID, &current.CreatedAt, &current.CustomerOrgID, &current.ClientReference,
+		&current.Destination, &current.SenderID, &current.Status, &current.HoldID,
+		&current.SellPrice, &current.SellCurrency, &current.IngressChannel, &current.IngressAccountID,
+		&current.DLRRequested,
+	)
+	if err != nil {
+		return fmt.Errorf("lock message for transition: %w", err)
+	}
+
+	// Monotonic check: terminal state cannot transition again
+	if IsTerminalStatus(current.Status) {
+		return nil
+	}
+
+	if !CanTransition(current.Status, params.ToStatus) {
+		return fmt.Errorf("invalid state transition: %s -> %s", current.Status, params.ToStatus)
+	}
+
+	now := time.Now().UTC()
+	var deliveredAt *time.Time
+	if params.ToStatus == StatusDelivered {
+		deliveredAt = &now
+	}
+
+	// 2. Financial settlement according to billing trigger
+	if current.HoldID != nil && ledgerSvc != nil {
+		shouldCapture := false
+		switch billingTrig {
+		case "submission":
+			// Captured at carrier acceptance, or delivered
+			shouldCapture = (params.ToStatus == StatusSubmitted || params.ToStatus == StatusDelivered)
+		case "delivery":
+			fallthrough
+		default:
+			shouldCapture = (params.ToStatus == StatusDelivered)
+		}
+
+		if shouldCapture {
+			idempotencyKey := fmt.Sprintf("capture-%s", current.ID.String())
+			_, capErr := ledgerSvc.CaptureTx(ctx, tx, *current.HoldID, current.SellPrice, &idempotencyKey)
+			if capErr != nil {
+				return fmt.Errorf("capture hold on %s: %w", params.ToStatus, capErr)
+			}
+		} else if params.ToStatus == StatusFailed || params.ToStatus == StatusExpired || params.ToStatus == StatusUndelivered || params.ToStatus == StatusRejected {
+			relErr := ledgerSvc.ReleaseTx(ctx, tx, *current.HoldID)
+			if relErr != nil {
+				return fmt.Errorf("release hold on %s: %w", params.ToStatus, relErr)
+			}
+		}
+	}
+
+	// 3. Update message row
+	var reasonVal *string
+	if params.Reason != "" {
+		reasonVal = &params.Reason
+	}
+	updQuery := `
+		UPDATE messages
+		SET status = $1,
+		    failure_reason = coalesce($2, failure_reason),
+		    actual_buy_cost = coalesce($3, actual_buy_cost),
+		    provider_connection_id = coalesce($4, provider_connection_id),
+		    provider_message_id = coalesce($5, provider_message_id),
+		    delivered_at = coalesce($6, delivered_at),
+		    updated_at = $7
+		WHERE id = $8 AND created_at = $9
+	`
+	_, err = tx.Exec(ctx, updQuery,
+		params.ToStatus, reasonVal, params.BuyCost, params.ConnectionID, params.ProviderMsgID,
+		deliveredAt, now, params.MessageID, params.MessageCreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("update message status: %w", err)
+	}
+
+	// 4. Record audit event
+	detailBytes, _ := json.Marshal(params.Details)
+	evQuery := `
+		INSERT INTO message_events (
+			id, message_id, message_created_at, event_type, from_status,
+			to_status, actor_type, details, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	_, err = tx.Exec(ctx, evQuery,
+		uuid.New(), params.MessageID, params.MessageCreatedAt, "status_transition",
+		current.Status, params.ToStatus, "system", detailBytes, now,
+	)
+	if err != nil {
+		return fmt.Errorf("record status event: %w", err)
+	}
+
+	// 5. Customer Notification Hooks: queue SMPP DLR if ingress channel was SMPP and DLR requested
+	if current.IngressChannel == "smpp" && current.IngressAccountID != nil && current.DLRRequested {
+		dlrPayload, _ := json.Marshal(map[string]interface{}{
+			"message_id":   params.MessageID.String(),
+			"status":       params.ToStatus,
+			"reason":       params.Reason,
+			"delivered_at": deliveredAt,
+		})
+		smppDlrQuery := `
+			INSERT INTO smpp_dlr_queue (
+				account_id, message_id, message_ref, client_reference,
+				destination, sender_id, status, error_code, payload,
+				expires_at, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+		`
+		msgRef := params.MessageID.String()
+		errCode := "000"
+		if reasonVal != nil {
+			errCode = *reasonVal
+		}
+		_, _ = tx.Exec(ctx, smppDlrQuery,
+			*current.IngressAccountID, params.MessageID, msgRef, current.ClientReference,
+			current.Destination, current.SenderID, params.ToStatus, errCode, dlrPayload,
+			now.Add(24*time.Hour),
+		)
+	}
+
+	// 6. Customer Notification Hooks: queue Webhook deliveries if active webhooks exist for this event
+	eventType := "message." + params.ToStatus
+	whQuery := `
+		SELECT id, url
+		FROM customer_webhooks
+		WHERE customer_org_id = $1 AND status = 'active' AND events @> to_jsonb($2::text)
+	`
+	whRows, whErr := tx.Query(ctx, whQuery, current.CustomerOrgID, eventType)
+	if whErr == nil {
+		type activeWH struct {
+			id  uuid.UUID
+			url string
+		}
+		var activeList []activeWH
+		for whRows.Next() {
+			var w activeWH
+			if scanErr := whRows.Scan(&w.id, &w.url); scanErr == nil {
+				activeList = append(activeList, w)
+			}
+		}
+		whRows.Close()
+
+		for _, wh := range activeList {
+			payloadObj := map[string]interface{}{
+				"event":            eventType,
+				"message_id":       params.MessageID.String(),
+				"client_reference": current.ClientReference,
+				"destination":      current.Destination,
+				"sender_id":        current.SenderID,
+				"status":           params.ToStatus,
+				"reason":           params.Reason,
+				"timestamp":        now.Format(time.RFC3339),
+			}
+			payloadJSON, _ := json.Marshal(payloadObj)
+			insDeliv := `
+				INSERT INTO customer_webhook_deliveries (
+					id, webhook_id, customer_org_id, event_id, event_type, payload,
+					status, attempts, max_attempts, next_attempt_at, created_at
+				) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, 5, now(), now())
+			`
+			_, _ = tx.Exec(ctx, insDeliv, uuid.New(), wh.id, current.CustomerOrgID, uuid.New().String(), eventType, payloadJSON)
+		}
+	}
+
+	return nil
+}
+
+// InsertSMPPDLRQueue queues an SMPP delivery receipt.
+func (r *pgRepository) InsertSMPPDLRQueue(ctx context.Context, tx pgx.Tx, item SMPPDLRQueueItem) error {
+	query := `
+		INSERT INTO smpp_dlr_queue (
+			account_id, message_id, message_ref, client_reference,
+			destination, sender_id, status, error_code, payload,
+			expires_at, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+	`
+	var execer interface {
+		Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	} = r.pool
+	if tx != nil {
+		execer = tx
+	}
+	_, err := execer.Exec(ctx, query,
+		item.AccountID, item.MessageID, item.MessageRef, item.ClientReference,
+		item.Destination, item.SenderID, item.Status, item.ErrorCode, item.Payload,
+		item.ExpiresAt,
+	)
+	return err
+}
+
+// FetchPendingSMPPDLRs claims pending SMPP DLR items with a worker lease.
+func (r *pgRepository) FetchPendingSMPPDLRs(ctx context.Context, limit int, leasedBy string, leaseDuration time.Duration) ([]SMPPDLRQueueItem, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		SELECT id, account_id, message_id, message_ref, client_reference,
+		       destination, sender_id, status, error_code, payload, attempts,
+		       next_attempt_at, leased_until, leased_by, queue_status, expires_at, created_at, delivered_at
+		FROM smpp_dlr_queue
+		WHERE queue_status = 'pending'
+		  AND (leased_until IS NULL OR leased_until < now())
+		  AND expires_at > now()
+		ORDER BY next_attempt_at ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	`
+	rows, err := tx.Query(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []SMPPDLRQueueItem
+	var ids []uuid.UUID
+	for rows.Next() {
+		var it SMPPDLRQueueItem
+		if err := rows.Scan(
+			&it.ID, &it.AccountID, &it.MessageID, &it.MessageRef, &it.ClientReference,
+			&it.Destination, &it.SenderID, &it.Status, &it.ErrorCode, &it.Payload,
+			&it.Attempts, &it.NextAttemptAt, &it.LeasedUntil, &it.LeasedBy,
+			&it.QueueStatus, &it.ExpiresAt, &it.CreatedAt, &it.DeliveredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+		ids = append(ids, it.ID)
+	}
+	rows.Close()
+
+	if len(ids) > 0 {
+		leaseExpiry := time.Now().UTC().Add(leaseDuration)
+		_, err := tx.Exec(ctx, `
+			UPDATE smpp_dlr_queue
+			SET leased_by = $1, leased_until = $2, attempts = attempts + 1
+			WHERE id = ANY($3)
+		`, leasedBy, leaseExpiry, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return items, tx.Commit(ctx)
+}
+
+// UpdateSMPPDLRQueueStatus updates the status of an SMPP DLR queue item.
+func (r *pgRepository) UpdateSMPPDLRQueueStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE smpp_dlr_queue
+		SET queue_status = $1, leased_until = NULL, leased_by = NULL,
+		    delivered_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivered_at END
+		WHERE id = $2
+	`, status, id)
+	return err
+}
+
+// CreateWebhook persists a new customer webhook configuration.
+func (r *pgRepository) CreateWebhook(ctx context.Context, wh *CustomerWebhook) error {
+	if wh.ID == uuid.Nil {
+		wh.ID = uuid.New()
+	}
+	now := time.Now().UTC()
+	wh.CreatedAt = now
+	wh.UpdatedAt = now
+	wh.Version = 1
+	if wh.Status == "" {
+		wh.Status = "active"
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	eventsJSON, _ := json.Marshal(wh.Events)
+
+	q := `
+		INSERT INTO customer_webhooks (
+			id, customer_org_id, url, secret_encrypted, secret_key_id, events, status,
+			consecutive_failures, version, created_by, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`
+	_, err = tx.Exec(ctx, q,
+		wh.ID, wh.CustomerOrgID, wh.URL, wh.SecretEncrypted, wh.SecretKeyID, eventsJSON, wh.Status,
+		wh.ConsecutiveFailures, wh.Version, wh.CreatedBy, wh.CreatedAt, wh.UpdatedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	histQ := `
+		INSERT INTO customer_webhooks_history (
+			webhook_id, customer_org_id, url, events, status, consecutive_failures,
+			version, changed_by, changed_at, change_reason
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), 'create')
+	`
+	_, err = tx.Exec(ctx, histQ,
+		wh.ID, wh.CustomerOrgID, wh.URL, eventsJSON, wh.Status, wh.ConsecutiveFailures,
+		wh.Version, wh.CreatedBy,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// GetWebhook returns a webhook by ID and customer_org_id.
+func (r *pgRepository) GetWebhook(ctx context.Context, id uuid.UUID, customerOrgID uuid.UUID) (*CustomerWebhook, error) {
+	q := `
+		SELECT id, customer_org_id, url, secret_encrypted, secret_key_id, events, status,
+		       consecutive_failures, version, created_by, created_at, updated_at
+		FROM customer_webhooks
+		WHERE id = $1 AND customer_org_id = $2
+	`
+	var wh CustomerWebhook
+	var eventsJSON []byte
+	err := r.pool.QueryRow(ctx, q, id, customerOrgID).Scan(
+		&wh.ID, &wh.CustomerOrgID, &wh.URL, &wh.SecretEncrypted, &wh.SecretKeyID, &eventsJSON, &wh.Status,
+		&wh.ConsecutiveFailures, &wh.Version, &wh.CreatedBy, &wh.CreatedAt, &wh.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(eventsJSON, &wh.Events)
+	return &wh, nil
+}
+
+// ListWebhooks returns all webhooks configured for a customer org.
+func (r *pgRepository) ListWebhooks(ctx context.Context, customerOrgID uuid.UUID) ([]CustomerWebhook, error) {
+	q := `
+		SELECT id, customer_org_id, url, secret_encrypted, secret_key_id, events, status,
+		       consecutive_failures, version, created_by, created_at, updated_at
+		FROM customer_webhooks
+		WHERE customer_org_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := r.pool.Query(ctx, q, customerOrgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []CustomerWebhook
+	for rows.Next() {
+		var wh CustomerWebhook
+		var eventsJSON []byte
+		if err := rows.Scan(
+			&wh.ID, &wh.CustomerOrgID, &wh.URL, &wh.SecretEncrypted, &wh.SecretKeyID, &eventsJSON, &wh.Status,
+			&wh.ConsecutiveFailures, &wh.Version, &wh.CreatedBy, &wh.CreatedAt, &wh.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(eventsJSON, &wh.Events)
+		list = append(list, wh)
+	}
+	return list, nil
+}
+
+// UpdateWebhook updates an existing webhook and writes history.
+func (r *pgRepository) UpdateWebhook(ctx context.Context, wh *CustomerWebhook) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentVersion int
+	err = tx.QueryRow(ctx, "SELECT version FROM customer_webhooks WHERE id = $1 AND customer_org_id = $2 FOR UPDATE", wh.ID, wh.CustomerOrgID).Scan(&currentVersion)
+	if err != nil {
+		return err
+	}
+
+	wh.Version = currentVersion + 1
+	wh.UpdatedAt = time.Now().UTC()
+	eventsJSON, _ := json.Marshal(wh.Events)
+
+	q := `
+		UPDATE customer_webhooks
+		SET url = $1, secret_encrypted = $2, secret_key_id = $3, events = $4, status = $5,
+		    consecutive_failures = $6, version = $7, updated_at = $8
+		WHERE id = $9 AND customer_org_id = $10
+	`
+	_, err = tx.Exec(ctx, q,
+		wh.URL, wh.SecretEncrypted, wh.SecretKeyID, eventsJSON, wh.Status,
+		wh.ConsecutiveFailures, wh.Version, wh.UpdatedAt, wh.ID, wh.CustomerOrgID,
+	)
+	if err != nil {
+		return err
+	}
+
+	histQ := `
+		INSERT INTO customer_webhooks_history (
+			webhook_id, customer_org_id, url, events, status, consecutive_failures,
+			version, changed_by, changed_at, change_reason
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), 'update')
+	`
+	_, err = tx.Exec(ctx, histQ,
+		wh.ID, wh.CustomerOrgID, wh.URL, eventsJSON, wh.Status, wh.ConsecutiveFailures,
+		wh.Version, wh.CreatedBy,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// DeleteWebhook removes a webhook configuration.
+func (r *pgRepository) DeleteWebhook(ctx context.Context, id uuid.UUID, customerOrgID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, "DELETE FROM customer_webhooks WHERE id = $1 AND customer_org_id = $2", id, customerOrgID)
+	return err
+}
+
+// ListWebhookDeliveries returns paginated deliveries for a customer org.
+func (r *pgRepository) ListWebhookDeliveries(ctx context.Context, customerOrgID uuid.UUID, webhookID *uuid.UUID, status string, page, pageSize int) ([]CustomerWebhookDelivery, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	where := "WHERE 1=1"
+	var args []any
+	argIdx := 1
+
+	if customerOrgID != uuid.Nil {
+		where += fmt.Sprintf(" AND customer_org_id = $%d", argIdx)
+		args = append(args, customerOrgID)
+		argIdx++
+	}
+
+	if webhookID != nil {
+		where += fmt.Sprintf(" AND webhook_id = $%d", argIdx)
+		args = append(args, *webhookID)
+		argIdx++
+	}
+	if status != "" {
+		where += fmt.Sprintf(" AND status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	var total int
+	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM customer_webhook_deliveries "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := fmt.Sprintf(`
+		SELECT id, webhook_id, customer_org_id, event_id, event_type, payload,
+		       status, attempts, max_attempts, next_attempt_at, leased_until, leased_by,
+		       created_at, delivered_at
+		FROM customer_webhook_deliveries
+		%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []CustomerWebhookDelivery
+	for rows.Next() {
+		var d CustomerWebhookDelivery
+		if err := rows.Scan(
+			&d.ID, &d.WebhookID, &d.CustomerOrgID, &d.EventID, &d.EventType, &d.Payload,
+			&d.Status, &d.Attempts, &d.MaxAttempts, &d.NextAttemptAt, &d.LeasedUntil, &d.LeasedBy,
+			&d.CreatedAt, &d.DeliveredAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, d)
+	}
+
+	return list, total, nil
+}
+
+// GetWebhookDeliveryWithAttempts returns a delivery row and its attempt history.
+func (r *pgRepository) GetWebhookDeliveryWithAttempts(ctx context.Context, deliveryID uuid.UUID, customerOrgID uuid.UUID) (*CustomerWebhookDelivery, []CustomerWebhookAttempt, error) {
+	q := `
+		SELECT id, webhook_id, customer_org_id, event_id, event_type, payload,
+		       status, attempts, max_attempts, next_attempt_at, leased_until, leased_by,
+		       created_at, delivered_at
+		FROM customer_webhook_deliveries
+		WHERE id = $1 AND customer_org_id = $2
+	`
+	var d CustomerWebhookDelivery
+	err := r.pool.QueryRow(ctx, q, deliveryID, customerOrgID).Scan(
+		&d.ID, &d.WebhookID, &d.CustomerOrgID, &d.EventID, &d.EventType, &d.Payload,
+		&d.Status, &d.Attempts, &d.MaxAttempts, &d.NextAttemptAt, &d.LeasedUntil, &d.LeasedBy,
+		&d.CreatedAt, &d.DeliveredAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	attQ := `
+		SELECT id, delivery_id, attempt_number, response_code, latency_ms,
+		       response_snippet, error_class, created_at
+		FROM customer_webhook_attempts
+		WHERE delivery_id = $1
+		ORDER BY attempt_number ASC
+	`
+	rows, err := r.pool.Query(ctx, attQ, deliveryID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var attempts []CustomerWebhookAttempt
+	for rows.Next() {
+		var a CustomerWebhookAttempt
+		if err := rows.Scan(
+			&a.ID, &a.DeliveryID, &a.AttemptNumber, &a.ResponseCode, &a.LatencyMs,
+			&a.ResponseSnippet, &a.ErrorClass, &a.CreatedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		attempts = append(attempts, a)
+	}
+
+	return &d, attempts, nil
+}
+
+// FetchPendingWebhookDeliveries claims batches of pending webhook deliveries with a lease.
+func (r *pgRepository) FetchPendingWebhookDeliveries(ctx context.Context, limit int, leasedBy string, leaseDuration time.Duration) ([]CustomerWebhookDelivery, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := `
+		SELECT id, webhook_id, customer_org_id, event_id, event_type, payload,
+		       status, attempts, max_attempts, next_attempt_at, leased_until, leased_by,
+		       created_at, delivered_at
+		FROM customer_webhook_deliveries
+		WHERE status IN ('pending', 'retry')
+		  AND next_attempt_at <= now()
+		  AND (leased_until IS NULL OR leased_until < now())
+		ORDER BY next_attempt_at ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	`
+	rows, err := tx.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []CustomerWebhookDelivery
+	var ids []uuid.UUID
+	for rows.Next() {
+		var d CustomerWebhookDelivery
+		if err := rows.Scan(
+			&d.ID, &d.WebhookID, &d.CustomerOrgID, &d.EventID, &d.EventType, &d.Payload,
+			&d.Status, &d.Attempts, &d.MaxAttempts, &d.NextAttemptAt, &d.LeasedUntil, &d.LeasedBy,
+			&d.CreatedAt, &d.DeliveredAt,
+		); err != nil {
+			return nil, err
+		}
+		list = append(list, d)
+		ids = append(ids, d.ID)
+	}
+	rows.Close()
+
+	if len(ids) > 0 {
+		leaseExpiry := time.Now().UTC().Add(leaseDuration)
+		_, err := tx.Exec(ctx, `
+			UPDATE customer_webhook_deliveries
+			SET leased_by = $1, leased_until = $2, attempts = attempts + 1
+			WHERE id = ANY($3)
+		`, leasedBy, leaseExpiry, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return list, tx.Commit(ctx)
+}
+
+// RecordWebhookAttempt persists an attempt outcome and updates the delivery status.
+func (r *pgRepository) RecordWebhookAttempt(ctx context.Context, attempt CustomerWebhookAttempt, nextStatus string, nextAttempt *time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if attempt.ID == uuid.Nil {
+		attempt.ID = uuid.New()
+	}
+	if attempt.CreatedAt.IsZero() {
+		attempt.CreatedAt = time.Now().UTC()
+	}
+
+	attQ := `
+		INSERT INTO customer_webhook_attempts (
+			id, delivery_id, attempt_number, response_code, latency_ms,
+			response_snippet, error_class, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err = tx.Exec(ctx, attQ,
+		attempt.ID, attempt.DeliveryID, attempt.AttemptNumber, attempt.ResponseCode,
+		attempt.LatencyMs, attempt.ResponseSnippet, attempt.ErrorClass, attempt.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	var deliveredAt *time.Time
+	if nextStatus == "success" {
+		now := time.Now().UTC()
+		deliveredAt = &now
+	}
+
+	delivQ := `
+		UPDATE customer_webhook_deliveries
+		SET status = $1, next_attempt_at = coalesce($2, next_attempt_at), leased_until = NULL, leased_by = NULL,
+		    delivered_at = coalesce($3, delivered_at)
+		WHERE id = $4
+	`
+	_, err = tx.Exec(ctx, delivQ, nextStatus, nextAttempt, deliveredAt, attempt.DeliveryID)
+	if err != nil {
+		return err
+	}
+
+	// Update consecutive failures and auto-disable status on parent webhook
+	if nextStatus == "success" {
+		resetQ := `
+			UPDATE customer_webhooks
+			SET consecutive_failures = 0, updated_at = now()
+			WHERE id = (SELECT webhook_id FROM customer_webhook_deliveries WHERE id = $1)
+		`
+		if _, err := tx.Exec(ctx, resetQ, attempt.DeliveryID); err != nil {
+			return err
+		}
+	} else if nextStatus == "failed" {
+		failQ := `
+			UPDATE customer_webhooks
+			SET consecutive_failures = consecutive_failures + 1,
+			    status = CASE WHEN consecutive_failures + 1 >= 10 THEN 'disabled_auto' ELSE status END,
+			    updated_at = now()
+			WHERE id = (SELECT webhook_id FROM customer_webhook_deliveries WHERE id = $1)
+		`
+		if _, err := tx.Exec(ctx, failQ, attempt.DeliveryID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// Inbound Numbers CRUD & matching
+func (r *pgRepository) CreateInboundNumber(ctx context.Context, n *InboundNumber) error {
+	if n.ID == uuid.Nil {
+		n.ID = uuid.New()
+	}
+	now := time.Now().UTC()
+	n.CreatedAt = now
+	n.UpdatedAt = now
+	n.Version = 1
+	if n.Type == "" {
+		n.Type = "longcode"
+	}
+	if n.Status == "" {
+		n.Status = "active"
+	}
+	if len(n.Capabilities) == 0 {
+		n.Capabilities = []string{"sms"}
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	capsJSON, _ := json.Marshal(n.Capabilities)
+
+	q := `
+		INSERT INTO inbound_numbers (
+			id, number_raw, number_e164, country_id, provider_connection_id,
+			customer_org_id, type, status, capabilities, version, created_by,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	`
+	_, err = tx.Exec(ctx, q,
+		n.ID, n.NumberRaw, n.NumberE164, n.CountryID, n.ProviderConnectionID,
+		n.CustomerOrgID, n.Type, n.Status, capsJSON, n.Version, n.CreatedBy,
+		n.CreatedAt, n.UpdatedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	histQ := `
+		INSERT INTO inbound_numbers_history (
+			inbound_number_id, number_raw, number_e164, country_id, provider_connection_id,
+			customer_org_id, status, version, changed_by, changed_at, change_reason
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), 'create')
+	`
+	_, err = tx.Exec(ctx, histQ,
+		n.ID, n.NumberRaw, n.NumberE164, n.CountryID, n.ProviderConnectionID,
+		n.CustomerOrgID, n.Status, n.Version, n.CreatedBy,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *pgRepository) UpdateInboundNumber(ctx context.Context, n *InboundNumber) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentVersion int
+	err = tx.QueryRow(ctx, "SELECT version FROM inbound_numbers WHERE id = $1 FOR UPDATE", n.ID).Scan(&currentVersion)
+	if err != nil {
+		return err
+	}
+
+	n.Version = currentVersion + 1
+	n.UpdatedAt = time.Now().UTC()
+	capsJSON, _ := json.Marshal(n.Capabilities)
+
+	q := `
+		UPDATE inbound_numbers
+		SET number_raw = $1, number_e164 = $2, country_id = $3, provider_connection_id = $4,
+		    customer_org_id = $5, type = $6, status = $7, capabilities = $8, version = $9, updated_at = $10
+		WHERE id = $11
+	`
+	_, err = tx.Exec(ctx, q,
+		n.NumberRaw, n.NumberE164, n.CountryID, n.ProviderConnectionID,
+		n.CustomerOrgID, n.Type, n.Status, capsJSON, n.Version, n.UpdatedAt, n.ID,
+	)
+	if err != nil {
+		return err
+	}
+
+	histQ := `
+		INSERT INTO inbound_numbers_history (
+			inbound_number_id, number_raw, number_e164, country_id, provider_connection_id,
+			customer_org_id, status, version, changed_by, changed_at, change_reason
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), 'update')
+	`
+	_, err = tx.Exec(ctx, histQ,
+		n.ID, n.NumberRaw, n.NumberE164, n.CountryID, n.ProviderConnectionID,
+		n.CustomerOrgID, n.Status, n.Version, n.CreatedBy,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *pgRepository) GetInboundNumber(ctx context.Context, id uuid.UUID) (*InboundNumber, error) {
+	q := `
+		SELECT id, number_raw, number_e164, country_id, provider_connection_id,
+		       customer_org_id, type, status, capabilities, version, created_by,
+		       created_at, updated_at
+		FROM inbound_numbers
+		WHERE id = $1
+	`
+	var n InboundNumber
+	var capsJSON []byte
+	err := r.pool.QueryRow(ctx, q, id).Scan(
+		&n.ID, &n.NumberRaw, &n.NumberE164, &n.CountryID, &n.ProviderConnectionID,
+		&n.CustomerOrgID, &n.Type, &n.Status, &capsJSON, &n.Version, &n.CreatedBy,
+		&n.CreatedAt, &n.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(capsJSON, &n.Capabilities)
+	return &n, nil
+}
+
+func (r *pgRepository) MatchInboundNumber(ctx context.Context, destinationE164 string) (*InboundNumber, error) {
+	q := `
+		SELECT id, number_raw, number_e164, country_id, provider_connection_id,
+		       customer_org_id, type, status, capabilities, version, created_by,
+		       created_at, updated_at
+		FROM inbound_numbers
+		WHERE number_e164 = $1 AND status = 'active'
+	`
+	var n InboundNumber
+	var capsJSON []byte
+	err := r.pool.QueryRow(ctx, q, destinationE164).Scan(
+		&n.ID, &n.NumberRaw, &n.NumberE164, &n.CountryID, &n.ProviderConnectionID,
+		&n.CustomerOrgID, &n.Type, &n.Status, &capsJSON, &n.Version, &n.CreatedBy,
+		&n.CreatedAt, &n.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(capsJSON, &n.Capabilities)
+	return &n, nil
+}
+
+func (r *pgRepository) ListInboundNumbers(ctx context.Context, customerOrgID *uuid.UUID, status string, page, pageSize int) ([]InboundNumber, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	where := "WHERE 1=1"
+	var args []any
+	argIdx := 1
+
+	if customerOrgID != nil {
+		where += fmt.Sprintf(" AND customer_org_id = $%d", argIdx)
+		args = append(args, *customerOrgID)
+		argIdx++
+	}
+	if status != "" {
+		where += fmt.Sprintf(" AND status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	var total int
+	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM inbound_numbers "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := fmt.Sprintf(`
+		SELECT id, number_raw, number_e164, country_id, provider_connection_id,
+		       customer_org_id, type, status, capabilities, version, created_by,
+		       created_at, updated_at
+		FROM inbound_numbers
+		%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []InboundNumber
+	for rows.Next() {
+		var n InboundNumber
+		var capsJSON []byte
+		if err := rows.Scan(
+			&n.ID, &n.NumberRaw, &n.NumberE164, &n.CountryID, &n.ProviderConnectionID,
+			&n.CustomerOrgID, &n.Type, &n.Status, &capsJSON, &n.Version, &n.CreatedBy,
+			&n.CreatedAt, &n.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		_ = json.Unmarshal(capsJSON, &n.Capabilities)
+		list = append(list, n)
+	}
+
+	return list, total, nil
+}
+
+// Inbound Messages persistence
+func (r *pgRepository) RecordInboundMessage(ctx context.Context, msg *InboundMessage) error {
+	if msg.ID == uuid.Nil {
+		msg.ID = uuid.New()
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+
+	query := `
+		INSERT INTO inbound_messages (
+			id, created_at, source_raw, source_e164, destination_raw, destination_e164,
+			inbound_number_id, customer_org_id, provider_connection_id, provider_message_id,
+			encrypted_body, key_id, encoding, concat_ref, concat_part, concat_total,
+			dedupe_hash, status
+		) VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9, $10,
+			$11, $12, $13, $14, $15, $16,
+			$17, $18
+		)
+	`
+	_, err := r.pool.Exec(ctx, query,
+		msg.ID, msg.CreatedAt, msg.SourceRaw, msg.SourceE164, msg.DestinationRaw, msg.DestinationE164,
+		msg.InboundNumberID, msg.CustomerOrgID, msg.ProviderConnectionID, msg.ProviderMessageID,
+		msg.EncryptedBody, msg.KeyID, msg.Encoding, msg.ConcatRef, msg.ConcatPart, msg.ConcatTotal,
+		msg.DedupeHash, msg.Status,
+	)
+	return err
+}
+
+func (r *pgRepository) QueueInboundWebhook(ctx context.Context, customerOrgID uuid.UUID, payload map[string]interface{}) error {
+	eventType := "message.inbound"
+	whQuery := `
+		SELECT id
+		FROM customer_webhooks
+		WHERE customer_org_id = $1 AND status = 'active' AND events @> to_jsonb($2::text)
+	`
+	rows, err := r.pool.Query(ctx, whQuery, customerOrgID, eventType)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var webhookIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err == nil {
+			webhookIDs = append(webhookIDs, id)
+		}
+	}
+
+	if len(webhookIDs) == 0 {
+		return nil
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	for _, whID := range webhookIDs {
+		insDeliv := `
+			INSERT INTO customer_webhook_deliveries (
+				id, webhook_id, customer_org_id, event_id, event_type, payload,
+				status, attempts, max_attempts, next_attempt_at, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, 5, now(), now())
+		`
+		_, _ = r.pool.Exec(ctx, insDeliv, uuid.New(), whID, customerOrgID, uuid.New().String(), eventType, payloadJSON)
+	}
+
+	return nil
+}
+
+func (r *pgRepository) ListInboundMessages(ctx context.Context, customerOrgID *uuid.UUID, page, pageSize int) ([]InboundMessage, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	where := "WHERE 1=1"
+	var args []any
+	argIdx := 1
+
+	if customerOrgID != nil {
+		where += fmt.Sprintf(" AND customer_org_id = $%d", argIdx)
+		args = append(args, *customerOrgID)
+		argIdx++
+	}
+
+	var total int
+	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM inbound_messages "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, created_at, source_raw, source_e164, destination_raw, destination_e164,
+		       inbound_number_id, customer_org_id, provider_connection_id, provider_message_id,
+		       key_id, encoding, concat_ref, concat_part, concat_total, dedupe_hash, status
+		FROM inbound_messages
+		%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []InboundMessage
+	for rows.Next() {
+		var m InboundMessage
+		if err := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.SourceRaw, &m.SourceE164, &m.DestinationRaw, &m.DestinationE164,
+			&m.InboundNumberID, &m.CustomerOrgID, &m.ProviderConnectionID, &m.ProviderMessageID,
+			&m.KeyID, &m.Encoding, &m.ConcatRef, &m.ConcatPart, &m.ConcatTotal, &m.DedupeHash, &m.Status,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, m)
+	}
+	return list, total, nil
+}
+
+// CleanExpiredData cleans terminal rows older than retentionDays. Never touches append-only tables!
+func (r *pgRepository) CleanExpiredData(ctx context.Context, retentionDays int) (int64, int64, error) {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+
+	// Clean delivered or expired SMPP DLR queue items
+	dlrTag, err := r.pool.Exec(ctx, `
+		DELETE FROM smpp_dlr_queue
+		WHERE queue_status IN ('delivered', 'expired') AND created_at < $1
+	`, cutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("clean expired smpp dlrs: %w", err)
+	}
+
+	// Clean finalized webhook deliveries (cascades to customer_webhook_attempts)
+	whTag, err := r.pool.Exec(ctx, `
+		DELETE FROM customer_webhook_deliveries
+		WHERE status IN ('success', 'failed') AND created_at < $1
+	`, cutoff)
+	if err != nil {
+		return dlrTag.RowsAffected(), 0, fmt.Errorf("clean expired webhook deliveries: %w", err)
+	}
+
+	return dlrTag.RowsAffected(), whTag.RowsAffected(), nil
 }

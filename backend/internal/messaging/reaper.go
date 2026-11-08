@@ -12,14 +12,27 @@ import (
 	"github.com/znero-international/znero/backend/internal/ledger"
 )
 
+// NoDLRHoldPolicy defines how customer wallet holds are treated when a submitted message expires without DLR.
+type NoDLRHoldPolicy string
+
+const (
+	// HoldPolicyRetainUntilResolution retains the hold until the unknown-resolution window ends,
+	// then releases the hold and records a settlement exception exposure flag (default, safe).
+	HoldPolicyRetainUntilResolution NoDLRHoldPolicy = "retain_until_resolution"
+
+	// HoldPolicyImmediateRelease immediately releases the customer hold upon message TTL expiry.
+	HoldPolicyImmediateRelease NoDLRHoldPolicy = "immediate_release"
+)
+
 // ReaperConfig contains configurable durations for the messaging reaper worker.
 type ReaperConfig struct {
-	MessageTTL              time.Duration // Default 24h
-	UnknownResolutionWindow time.Duration // Default 24h
-	HoldExpiry              time.Duration // Default 72h
-	UnmatchedDLRRetryWindow time.Duration // Default 15m
-	PollInterval            time.Duration // Default 30s
-	BatchLimit              int           // Default 100
+	MessageTTL              time.Duration   // Default 24h
+	UnknownResolutionWindow time.Duration   // Default 24h
+	HoldExpiry              time.Duration   // Default 72h
+	UnmatchedDLRRetryWindow time.Duration   // Default 15m
+	PollInterval            time.Duration   // Default 30s
+	BatchLimit              int             // Default 100
+	NoDLRHoldPolicy         NoDLRHoldPolicy // Default HoldPolicyRetainUntilResolution
 }
 
 // Reaper executes safety sweeps, hold releases, ambiguous outcome resolution, and DLR retries.
@@ -62,6 +75,9 @@ func NewReaper(
 	}
 	if cfg.BatchLimit <= 0 {
 		cfg.BatchLimit = 100
+	}
+	if cfg.NoDLRHoldPolicy == "" {
+		cfg.NoDLRHoldPolicy = HoldPolicyRetainUntilResolution
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -266,9 +282,39 @@ func (r *Reaper) reapNoDLRMessages(ctx context.Context) {
 		reason := "no DLR received from upstream within message TTL"
 		_ = r.repo.UpdateMessageStatus(ctx, tx, msg.ID, msg.CreatedAt, StatusSubmitted, StatusExpired, &reason, nil, nil, nil)
 
-		// If billing trigger is on_delivery, release hold
+		// If billing trigger is on_delivery, apply configured hold policy
 		if r.dlrProc.billingTrig == "on_delivery" && msg.HoldID != nil {
-			_ = r.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+			if r.cfg.NoDLRHoldPolicy == HoldPolicyImmediateRelease {
+				_ = r.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+			} else {
+				// Default HoldPolicyRetainUntilResolution: retain until unknown-resolution window ends
+				submittedAt := msg.CreatedAt
+				if msg.SubmittedAt != nil {
+					submittedAt = *msg.SubmittedAt
+				}
+				if time.Since(submittedAt) >= r.cfg.UnknownResolutionWindow {
+					_ = r.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+
+					// Record supplier liability exposure flag in settlement_exceptions
+					details, _ := json.Marshal(map[string]interface{}{
+						"message_id":         msg.ID.String(),
+						"customer_org_id":    msg.CustomerOrgID.String(),
+						"sell_price":         msg.SellPrice.String(),
+						"estimated_buy_cost": msg.EstimatedBuyCost,
+						"hold_id":            msg.HoldID,
+						"note":               "Provider accepted message but never delivered DLR within TTL and unknown resolution window. Customer hold released; potential supplier liability exposure.",
+					})
+					_ = r.repo.RecordSettlementException(ctx, SettlementException{
+						MessageID:        msg.ID,
+						MessageCreatedAt: msg.CreatedAt,
+						CustomerOrgID:    &msg.CustomerOrgID,
+						HoldID:           msg.HoldID,
+						ExceptionType:    "no_dlr_expired_exposure",
+						Severity:         "warning",
+						Details:          details,
+					})
+				}
+			}
 		}
 
 		evtDetails, _ := json.Marshal(map[string]interface{}{"reason": reason})

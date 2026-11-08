@@ -230,7 +230,7 @@ func (r *pgRepository) CreateUser(ctx context.Context, tx pgx.Tx, u User, roleID
 		if err != nil {
 			return nil, err
 		}
-		defer newTx.Rollback(ctx)
+		defer func() { _ = newTx.Rollback(ctx) }()
 		created, err := r.CreateUser(ctx, newTx, u, roleIDs)
 		if err != nil {
 			return nil, err
@@ -274,7 +274,7 @@ func (r *pgRepository) UpdateUser(ctx context.Context, tx pgx.Tx, id uuid.UUID, 
 		if err != nil {
 			return err
 		}
-		defer newTx.Rollback(ctx)
+		defer func() { _ = newTx.Rollback(ctx) }()
 		if err := r.UpdateUser(ctx, newTx, id, status, roleIDs); err != nil {
 			return err
 		}

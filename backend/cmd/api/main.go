@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/billing"
 	"github.com/znero-international/znero/backend/internal/config"
 	"github.com/znero-international/znero/backend/internal/customer"
+	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/diagnostics"
 	"github.com/znero-international/znero/backend/internal/health"
 	"github.com/znero-international/znero/backend/internal/ledger"
@@ -38,7 +40,9 @@ import (
 	"github.com/znero-international/znero/backend/internal/senderid"
 	"github.com/znero-international/znero/backend/internal/smpp"
 	"github.com/znero-international/znero/backend/internal/smpp/pdu"
+	"github.com/znero-international/znero/backend/internal/smppserver"
 	"github.com/znero-international/znero/backend/internal/system"
+	"github.com/znero-international/znero/backend/internal/webhook"
 	"github.com/znero-international/znero/backend/pkg/database"
 	"github.com/znero-international/znero/backend/pkg/kafkaclient"
 	"github.com/znero-international/znero/backend/pkg/logx"
@@ -262,6 +266,49 @@ func run() error {
 	reaper := messaging.NewReaper(pool, msgRepo, ledgerSvc, dlrProc, messaging.ReaperConfig{}, logger)
 	reaper.Start(ctx)
 
+	// Phase 8B: Customer Edge, SMPP Server, Webhook Dispatcher & Inbound Pipeline
+	edgeAuth := customeredge.NewEdgeAuthenticator(pool, nil, logger)
+	edgeLimiter := customeredge.NewCustomerLimiter()
+	edgeHandler := customeredge.NewEdgeHandler(edgeAuth, edgeLimiter, msgSvc, msgRepo, ledgerSvc, ratingSvc, keyRing, pool)
+
+	// Customer SMPP Server
+	var wg sync.WaitGroup
+	smppAddr := os.Getenv("CUSTOMER_SMPP_ADDR")
+	if smppAddr == "" {
+		smppAddr = ":2776"
+	}
+	smppServer := smppserver.NewServer(smppserver.ServerConfig{
+		Addr:            smppAddr,
+		SystemID:        "ZNERO",
+		IdleTimeout:     60 * time.Second,
+		EnquireInterval: 30 * time.Second,
+		DefaultWindow:   16,
+	}, pool, msgSvc, msgRepo, edgeLimiter, logger)
+	messagingHandler.SetCustomerSessionProvider(smppServer)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := smppServer.Start(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Error("customer smpp server stopped with error", slog.String("error", err.Error()))
+		}
+	}()
+
+	// Customer DLR Dispatcher
+	customerDLRDispatcher := smppserver.NewDLRDispatcher(smppserver.DLRDispatcherConfig{
+		PollInterval: 1 * time.Second,
+		BatchSize:    50,
+	}, pool, msgRepo, smppServer.Tracker(), logger)
+	customerDLRDispatcher.Start(ctx)
+
+	// Inbound MO Handler & DLRProcessor Link
+	inboundHandler := messaging.NewInboundHandler(msgRepo, keyRing, smppServer, logger)
+	dlrProc.SetInboundHandler(inboundHandler)
+
+	// Customer Webhook Dispatcher
+	whDispatcher := webhook.NewDispatcher(msgRepo, keyRing, webhook.DefaultConfig(cfg.IsDevelopment()), logger)
+	whDispatcher.Start(ctx)
+
 	modules := app.Modules{
 		Health:         health.NewHandler(healthSvc),
 		System:         system.NewHandler(system.NewService(system.NewRepository(pool), app.Version, cfg.Env)),
@@ -283,6 +330,7 @@ func run() error {
 		Billing:        billingHandler,
 		Routing:        routingHandler,
 		Messaging:      messagingHandler,
+		CustomerEdge:   edgeHandler,
 		AuthMiddleware: authMiddleware,
 	}
 	diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
@@ -291,7 +339,6 @@ func run() error {
 	}
 
 	// Background Kafka work (topic creation + logging consumer).
-	var wg sync.WaitGroup
 	if cfg.IsDevelopment() {
 		wg.Add(1)
 		go func() {
@@ -349,6 +396,9 @@ func run() error {
 	if err := server.ShutdownWithTimeout(cfg.Server.ShutdownTimeout); err != nil {
 		logger.Error("http shutdown did not complete cleanly", slog.String("error", err.Error()))
 	}
+	customerDLRDispatcher.Stop()
+	whDispatcher.Stop()
+	smppServer.Stop()
 	if !waitTimeout(&wg, cfg.Server.ShutdownTimeout) {
 		logger.Warn("background workers did not stop in time")
 	}

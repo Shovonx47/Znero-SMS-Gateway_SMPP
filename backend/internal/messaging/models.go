@@ -85,6 +85,25 @@ var validTransitions = map[string]map[string]bool{
 	StatusRejected:    {},
 }
 
+// CanTransition checks whether a transition from status `from` to status `to` is allowed.
+func CanTransition(from, to string) bool {
+	targets, ok := validTransitions[from]
+	if !ok {
+		return false
+	}
+	return targets[to]
+}
+
+// IsTerminalStatus returns true if status cannot transition further.
+func IsTerminalStatus(status string) bool {
+	switch status {
+	case StatusDelivered, StatusUndelivered, StatusExpired, StatusFailed, StatusRejected:
+		return true
+	default:
+		return false
+	}
+}
+
 var (
 	ErrInvalidStateTransition = errors.New("invalid state transition")
 	ErrDuplicateClientRef     = errors.New("duplicate client reference")
@@ -138,6 +157,10 @@ type Message struct {
 	RoutePlanID          *uuid.UUID       `json:"route_plan_id,omitempty"`
 	ProviderConnectionID *uuid.UUID       `json:"provider_connection_id,omitempty"`
 	ProviderMessageID    *string          `json:"provider_message_id,omitempty"`
+	RequestFingerprint   *string          `json:"request_fingerprint,omitempty"`
+	IngressChannel       string           `json:"ingress_channel"`
+	IngressAccountID     *uuid.UUID       `json:"ingress_account_id,omitempty"`
+	DLRRequested         bool             `json:"dlr_requested"`
 	Attempts             int              `json:"attempts"`
 	MaxAttempts          int              `json:"max_attempts"`
 	ExpiresAt            time.Time        `json:"expires_at"`
@@ -223,12 +246,16 @@ type MessageDLR struct {
 
 // SubmitRequest is the client submission DTO.
 type SubmitRequest struct {
-	Destination     string  `json:"destination"`
-	SenderID        string  `json:"sender_id"`
-	Text            string  `json:"text"`
-	ClientReference *string `json:"client_reference,omitempty"`
-	TrafficProfile  string  `json:"traffic_profile,omitempty"` // otp|transactional|promotional
-	ValiditySeconds *int    `json:"validity_seconds,omitempty"`
+	Destination        string     `json:"destination"`
+	SenderID           string     `json:"sender_id"`
+	Text               string     `json:"text"`
+	ClientReference    *string    `json:"client_reference,omitempty"`
+	TrafficProfile     string     `json:"traffic_profile,omitempty"` // otp|transactional|promotional
+	ValiditySeconds    *int       `json:"validity_seconds,omitempty"`
+	IngressChannel     string     `json:"ingress_channel,omitempty"` // http|smpp|platform
+	IngressAccountID   *uuid.UUID `json:"ingress_account_id,omitempty"`
+	DLRRequested       bool       `json:"dlr_requested,omitempty"`
+	RequestFingerprint string     `json:"request_fingerprint,omitempty"`
 }
 
 // SubmitResponse is returned to the client upon durable ingestion.
@@ -287,6 +314,7 @@ type OutboxPayload struct {
 	SenderIDType           string          `json:"sender_id_type"`
 	Encoding               string          `json:"encoding"`
 	TotalParts             int             `json:"total_parts"`
+	PartsAccepted          int             `json:"parts_accepted"`
 	SellPrice              decimal.Decimal `json:"sell_price"`
 	SellCurrency           string          `json:"sell_currency"`
 	CandidateConnectionIDs []uuid.UUID     `json:"candidate_connection_ids"`
@@ -401,4 +429,131 @@ type TestSendRequest struct {
 	Text            string    `json:"text"`
 	Encoding        string    `json:"encoding,omitempty"`
 	ValiditySeconds *int      `json:"validity_seconds,omitempty"`
+}
+
+// MessageLocator stores unpartitioned locator entries for high-speed single-index lookups.
+type MessageLocator struct {
+	MessageID     uuid.UUID `json:"message_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	CustomerOrgID uuid.UUID `json:"customer_org_id"`
+}
+
+// SMPPDLRQueueItem represents an outbound deliver_sm receipt queued for a customer SMPP session.
+type SMPPDLRQueueItem struct {
+	ID              uuid.UUID  `json:"id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	MessageID       uuid.UUID  `json:"message_id"`
+	MessageRef      string     `json:"message_ref"`
+	ClientReference *string    `json:"client_reference,omitempty"`
+	Destination     string     `json:"destination"`
+	SenderID        string     `json:"sender_id"`
+	Status          string     `json:"status"`
+	ErrorCode       string     `json:"error_code"`
+	Payload         []byte     `json:"payload"`
+	Attempts        int        `json:"attempts"`
+	NextAttemptAt   time.Time  `json:"next_attempt_at"`
+	LeasedUntil     *time.Time `json:"leased_until,omitempty"`
+	LeasedBy        *string    `json:"leased_by,omitempty"`
+	QueueStatus     string     `json:"queue_status"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	DeliveredAt     *time.Time `json:"delivered_at,omitempty"`
+}
+
+// CustomerWebhook represents a customer's registered HTTP webhook endpoint.
+type CustomerWebhook struct {
+	ID                  uuid.UUID  `json:"id"`
+	CustomerOrgID       uuid.UUID  `json:"customer_org_id"`
+	URL                 string     `json:"url"`
+	SecretEncrypted     string     `json:"-"`
+	SecretKeyID         string     `json:"-"`
+	Events              []string   `json:"events"`
+	Status              string     `json:"status"` // active, disabled, disabled_auto
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	Version             int        `json:"version"`
+	CreatedBy           *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// CustomerWebhookDelivery represents an individual event queued for webhook delivery.
+type CustomerWebhookDelivery struct {
+	ID            uuid.UUID  `json:"id"`
+	WebhookID     uuid.UUID  `json:"webhook_id"`
+	CustomerOrgID uuid.UUID  `json:"customer_org_id"`
+	EventID       string     `json:"event_id"`
+	EventType     string     `json:"event_type"`
+	Payload       []byte     `json:"payload"`
+	Status        string     `json:"status"` // pending, success, failed
+	Attempts      int        `json:"attempts"`
+	MaxAttempts   int        `json:"max_attempts"`
+	NextAttemptAt time.Time  `json:"next_attempt_at"`
+	LeasedUntil   *time.Time `json:"leased_until,omitempty"`
+	LeasedBy      *string    `json:"leased_by,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
+}
+
+// CustomerWebhookAttempt logs each HTTP dispatch attempt for a webhook delivery.
+type CustomerWebhookAttempt struct {
+	ID              uuid.UUID `json:"id"`
+	DeliveryID      uuid.UUID `json:"delivery_id"`
+	AttemptNumber   int       `json:"attempt_number"`
+	ResponseCode    *int      `json:"response_code,omitempty"`
+	LatencyMs       int       `json:"latency_ms"`
+	ResponseSnippet *string   `json:"response_snippet,omitempty"`
+	ErrorClass      *string   `json:"error_class,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// InboundNumber represents a platform-managed virtual number or shortcode assigned to a customer.
+type InboundNumber struct {
+	ID                   uuid.UUID  `json:"id"`
+	NumberRaw            string     `json:"number_raw"`
+	NumberE164           string     `json:"number_e164"`
+	CountryID            *uuid.UUID `json:"country_id,omitempty"`
+	ProviderConnectionID *uuid.UUID `json:"provider_connection_id,omitempty"`
+	CustomerOrgID        *uuid.UUID `json:"customer_org_id,omitempty"`
+	Type                 string     `json:"type"`   // longcode, shortcode
+	Status               string     `json:"status"` // active, inactive
+	Capabilities         []string   `json:"capabilities"`
+	Version              int        `json:"version"`
+	CreatedBy            *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+// InboundMessage represents an incoming MO SMS received from an upstream carrier.
+type InboundMessage struct {
+	ID                   uuid.UUID  `json:"id"`
+	CreatedAt            time.Time  `json:"created_at"`
+	SourceRaw            string     `json:"source_raw"`
+	SourceE164           string     `json:"source_e164"`
+	DestinationRaw       string     `json:"destination_raw"`
+	DestinationE164      string     `json:"destination_e164"`
+	InboundNumberID      *uuid.UUID `json:"inbound_number_id,omitempty"`
+	CustomerOrgID        *uuid.UUID `json:"customer_org_id,omitempty"`
+	ProviderConnectionID *uuid.UUID `json:"provider_connection_id,omitempty"`
+	ProviderMessageID    *string    `json:"provider_message_id,omitempty"`
+	EncryptedBody        []byte     `json:"-"`
+	KeyID                string     `json:"key_id"`
+	Encoding             string     `json:"encoding"`
+	ConcatRef            *int       `json:"concat_ref,omitempty"`
+	ConcatPart           *int       `json:"concat_part,omitempty"`
+	ConcatTotal          *int       `json:"concat_total,omitempty"`
+	DedupeHash           string     `json:"dedupe_hash"`
+	Status               string     `json:"status"` // received, routed, unrouted, delivered
+}
+
+// FinalStateParams supplies parameters for the single atomic final state transition function.
+type FinalStateParams struct {
+	MessageID        uuid.UUID
+	MessageCreatedAt time.Time
+	FromStatus       string
+	ToStatus         string // StatusDelivered, StatusUndelivered, StatusFailed, StatusExpired, StatusRejected
+	Reason           string
+	ProviderMsgID    *string
+	ConnectionID     *uuid.UUID
+	BuyCost          *decimal.Decimal
+	Details          map[string]interface{}
 }

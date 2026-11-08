@@ -206,5 +206,27 @@
 
 ---
 
-## 3. Next Phase: Phase 3 (SMS Routing Engine & Rate Cards)
+## 3. Phase 8B: Customer Edge, SMPP Server, Webhooks & Inbound (MO)
+
+- **Status:** **COMPLETED**
+- **Core Components Delivered:**
+  - **Shared Customer Edge (`backend/internal/customeredge`):** Principal authenticators with <=10s in-memory cache, constant-time SHA-256 API key validation, client IP allowlists, brute-force lockout, token bucket rate limiter (`AllowN`), and RFC 7807 public error catalog.
+  - **Customer HTTP REST API (`/api/v1/customer`):** `POST /sms` (single), `POST /sms/bulk` (upfront token reserve, max 1000 items), `POST /sms/estimate`, `GET /sms/:id`, `GET /sms` (keyset pagination), `GET /balance`, `GET /rates`, `GET /account`, webhooks CRUD & test, and `GET /inbound`.
+  - **Customer SMPP Server (`backend/internal/smppserver`):** High-performance SMPP 3.4 server on port `:2776` (TCP) / `:3550` (TLS). Authenticates via Argon2id, IP allowlist, bind types (TX, RX, TRX). Enforces strict single PDU rule (rejects UDH and SAR fragmentation). Dispatches 32-hex message IDs after DB commit.
+  - **Customer DLR Dispatcher:** Worker claiming `smpp_dlr_queue` records and transmitting formatted delivery receipts (`id:... sub:... dlvrd:... stat:... err:...`) + TLVs (`receipted_message_id`, `message_state`) to active customer receiver/transceiver sessions.
+  - **Customer Webhook Dispatcher (`backend/internal/webhook`):** Worker claiming `customer_webhook_deliveries` (`FOR UPDATE SKIP LOCKED`), using dial-time SSRF-safe HTTP client (`smpp.SafeDialer`), 8s timeout, 4KB snippet cap, and HMAC-SHA256 signatures (`X-Znero-Signature: t=<ts>,v1=<sig>`). Auto-disables webhooks after 10 consecutive failures.
+  - **Inbound MO Pipeline (`backend/internal/messaging/inbound.go`):** Ingests incoming subscriber SMS from carrier `deliver_sm` (`esm_class & 0x04 == 0`), matches `inbound_numbers`, encrypts message body at rest via AES-256-GCM, enqueues `message.inbound` customer webhooks, and forwards `deliver_sm` to bound customer SMPP receiver sessions.
+  - **Frontend UI & Portal:**
+    - Customer "API & Integration" page (`/integration`) with REST API reference, SMPP settings, Webhook management & delivery drawer, and usage & TPS meters.
+    - Platform Operations pages: Customer SMPP Sessions (`/messaging/customer-sessions`), Webhook Logs (`/messaging/webhooks`), Inbound Numbers (`/messaging/inbound-numbers`), and Inbound Messages (`/messaging/inbound-messages`).
+  - **Developer Tools & Documentation:**
+    - `cmd/webhookecho`: Local webhook logger and signature validator.
+    - `cmd/smppdevclient`: SMPP 3.4 CLI client for testing binds, `submit_sm`, and `deliver_sm`.
+    - `cmd/devsend`: CLI client for testing single/bulk customer HTTP submissions.
+    - `scripts/seed-customer-edge-sample.ps1`: Dev sample seeder for API keys, SMPP credentials, webhooks, and virtual numbers.
+    - `docs/CUSTOMER_API.md`, `docs/CUSTOMER_SMPP.md`, and `docs/openapi-customer.yaml`.
+
+---
+
+## 4. Next Phase: Phase 9 (Reporting, Analytics & Settlement Invoicing)
 - Deferred until explicit user command.

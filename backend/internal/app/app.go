@@ -12,6 +12,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/billing"
 	"github.com/znero-international/znero/backend/internal/config"
 	"github.com/znero-international/znero/backend/internal/customer"
+	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/diagnostics"
 	"github.com/znero-international/znero/backend/internal/health"
 	"github.com/znero-international/znero/backend/internal/ledger"
@@ -68,6 +69,7 @@ type Modules struct {
 	Billing        *billing.Handler
 	Routing        *routing.Handler
 	Messaging      *messaging.Handler
+	CustomerEdge   *customeredge.EdgeHandler
 	AuthMiddleware fiber.Handler
 }
 
@@ -160,6 +162,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.Messaging != nil {
 		m.Messaging.RegisterRoutes(v1, m.AuthMiddleware)
+	}
+	if m.CustomerEdge != nil {
+		m.CustomerEdge.RegisterRoutes(v1)
 	}
 	return app
 }

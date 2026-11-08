@@ -152,10 +152,11 @@ func CandidateProviderMessageIDs(rawID string) []string {
 
 // DLRProcessor coordinates delivery receipt parsing, matching, settlement, and lifecycle events.
 type DLRProcessor struct {
-	repo        Repository
-	ledgerSvc   *ledger.Service
-	billingTrig string // "on_delivery" (default) or "on_provider_accept"
-	logger      *slog.Logger
+	repo           Repository
+	ledgerSvc      *ledger.Service
+	billingTrig    string // "on_delivery" (default) or "on_provider_accept"
+	logger         *slog.Logger
+	inboundHandler *InboundHandler
 }
 
 // NewDLRProcessor creates a new DLRProcessor.
@@ -174,8 +175,22 @@ func NewDLRProcessor(repo Repository, ledgerSvc *ledger.Service, billingTrig str
 	}
 }
 
+// SetInboundHandler registers the MO inbound SMS handler.
+func (p *DLRProcessor) SetInboundHandler(h *InboundHandler) {
+	p.inboundHandler = h
+}
+
 // ProcessDeliverSM handles an inbound deliver_sm PDU from an upstream SMPP connection.
 func (p *DLRProcessor) ProcessDeliverSM(ctx context.Context, connectionID uuid.UUID, deliver *pdu.DeliverSM) error {
+	// If bit 2 (0x04) of esm_class is NOT set, this is an Inbound (MO) SMS, not a DLR receipt!
+	if deliver.ESMClass&0x04 == 0 {
+		if p.inboundHandler != nil {
+			return p.inboundHandler.ProcessInboundSM(ctx, connectionID, deliver)
+		}
+		p.logger.Info("received MO deliver_sm with no inbound handler configured", "from", deliver.SourceAddr, "to", deliver.DestAddr)
+		return nil
+	}
+
 	receipt, err := ParseDLRReceipt(deliver.ShortMessage, deliver.TLVs)
 	rawText := string(deliver.ShortMessage)
 

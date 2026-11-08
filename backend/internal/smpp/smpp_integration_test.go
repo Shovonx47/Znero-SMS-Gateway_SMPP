@@ -133,7 +133,7 @@ func TestSMPP_Integration_EndToEnd_SubmitOutboxDispatchMock(t *testing.T) {
 
 	_, portStr, _ := net.SplitHostPort(mockServer.Addr().String())
 	var port int
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	// Clean outbox queue for isolated test
 	_, _ = e.Pool.Exec(ctx, "DELETE FROM message_outbox")

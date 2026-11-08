@@ -177,7 +177,6 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, item MessageOutbox) {
 	if failedConnIDs == nil {
 		failedConnIDs = make([]uuid.UUID, 0)
 	}
-	currentConnID := payload.CurrentConnectionID
 
 	resolveReq := routing.ResolveRequest{
 		CustomerOrgID:   payload.CustomerOrgID,
@@ -197,7 +196,7 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, item MessageOutbox) {
 		d.finalizeFailed(ctx, item.ID, payload, ReasonKilledAtDispatch)
 		return
 	}
-	currentConnID = cand.ConnectionID
+	currentConnID := cand.ConnectionID
 
 	// 2. Per-connection rate limiting
 	d.mu.Lock()
@@ -223,7 +222,11 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, item MessageOutbox) {
 		Timeout:        10 * time.Second,
 	}
 
-	result, err := d.sender.Send(ctx, attemptReq)
+	result, sendErr := d.sender.Send(ctx, attemptReq)
+	if sendErr != nil && result.Status == "" {
+		result.Status = SendStatusUnknown
+		result.ErrorMessage = sendErr.Error()
+	}
 	attemptFinish := time.Now().UTC()
 	latencyMs := int(attemptFinish.Sub(attemptStart).Milliseconds())
 
@@ -329,6 +332,18 @@ func (d *Dispatcher) handleRetryableReject(
 	res SendResult,
 	attempt MessageAttempt,
 ) {
+	// Step 0d Multi-part safety: a retryable reject after some parts were already accepted must NOT fail over
+	// to another route (duplicate-part risk). Transition to UNKNOWN so hold is retained and exposure audited.
+	if payload.TotalParts > 1 && payload.PartsAccepted > 0 {
+		d.logger.Error("multipart message had partial parts accepted; failover prohibited to prevent duplicate delivery",
+			"msg_id", payload.MessageID,
+			"parts_accepted", payload.PartsAccepted,
+			"total_parts", payload.TotalParts,
+		)
+		d.handleAmbiguousUnknown(ctx, outboxID, payload, connID, res, attempt)
+		return
+	}
+
 	d.logger.Warn("carrier returned retryable reject, attempting failover",
 		"msg_id", payload.MessageID,
 		"conn_id", connID,

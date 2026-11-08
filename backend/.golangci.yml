@@ -1,0 +1,24 @@
+run:
+  timeout: 5m
+  go: "1.23"
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - (*github.com/jackc/pgx/v5/pgxpool.Pool).Close
+      - (github.com/jackc/pgx/v5.Tx).Rollback
+      - (*github.com/jackc/pgx/v5.Tx).Rollback
+      - fmt.Sscanf
+      - fmt.Fprintln
+      - fmt.Fprintf
+      - fmt.Println
+      - fmt.Printf

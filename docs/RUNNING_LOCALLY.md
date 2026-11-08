@@ -13,6 +13,7 @@ Ensure the following tools are installed on your machine and reachable on `PATH`
 - **Apache Kafka**: 3.7+ in KRaft mode at `C:\kafka` (port 9092)
 - **golang-migrate**: (`migrate -version`)
 - **Git**: (`git --version`)
+- **golangci-lint**: pinned to `v1.61.0` (`go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0`)
 
 Configuration parameters live in `.env` at the repository root. A template is provided in `.env.example`.
 
@@ -201,4 +202,36 @@ To completely roll back and reapply database migrations from scratch:
 
 # Step 3: Re-bootstrap the Super Admin
 .\scripts\bootstrap-admin.ps1
+```
+
+---
+
+## 6. Phase 8B: Customer Edge Developer Tools
+
+### Seeding Sample Customer Edge Data
+Seeds an active customer tenant with API key (`zn_live_sample_key_1234567890`), SMPP credentials (`dev_client` / `secret123`), webhook, and inbound number (`+14155550199`):
+```powershell
+.\scripts\seed-customer-edge-sample.ps1
+```
+
+### Webhook Echo Server
+Receives and validates HMAC-SHA256 signatures for outgoing webhooks:
+```powershell
+cd backend
+go run ./cmd/webhookecho -addr :8085 -secret sample_signing_secret_9988776655
+```
+
+### Customer SMPP Dev Client
+Connects as an SMPP client (TX, RX, or TRX) to submit SMS or receive real-time DLRs:
+```powershell
+cd backend
+# Submit SMS and wait for DLR
+go run ./cmd/smppdevclient -addr localhost:2776 -system-id dev_client -password secret123 -bind-type trx -to +14155550199 -text "Hello SMPP" -listen
+```
+
+### Customer HTTP REST Dev Send Tool
+Submits test single or bulk SMS via the customer REST API:
+```powershell
+cd backend
+go run ./cmd/devsend -key zn_live_sample_key_1234567890 -to +14155550199 -text "Test message"
 ```

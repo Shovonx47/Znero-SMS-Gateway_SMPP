@@ -1524,5 +1524,100 @@ export interface TestSendRequest {
 	validity_seconds?: number;
 }
 
+// Phase 8B: Customer Edge, Webhooks, SMPP Server, Inbound MO Types
+export interface CustomerSessionInfo {
+	id: string;
+	account_id: string;
+	customer_org_id: string;
+	system_id: string;
+	bind_type: string;
+	remote_ip: string;
+	bound: boolean;
+	in_flight: number;
+	bound_at: string;
+}
+
+export interface InboundNumber {
+	id: string;
+	number_raw: string;
+	number_e164: string;
+	country_id?: string;
+	provider_connection_id?: string;
+	customer_org_id?: string;
+	type: string;
+	status: string;
+	capabilities: string[];
+	version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface InboundMessage {
+	id: string;
+	created_at: string;
+	source_raw: string;
+	source_e164: string;
+	destination_raw: string;
+	destination_e164: string;
+	inbound_number_id?: string;
+	customer_org_id?: string;
+	provider_connection_id?: string;
+	provider_message_id?: string;
+	encoding: string;
+	dedupe_hash: string;
+	status: string;
+}
+
+export interface CustomerWebhook {
+	id: string;
+	customer_org_id: string;
+	url: string;
+	events: string[];
+	status: string;
+	consecutive_failures: number;
+	version: number;
+	created_at: string;
+	updated_at: string;
+	secret?: string; // Only present on create
+}
+
+export interface CustomerWebhookDelivery {
+	id: string;
+	webhook_id: string;
+	customer_org_id: string;
+	event_id: string;
+	event_type: string;
+	payload: any;
+	status: string;
+	attempts: number;
+	max_attempts: number;
+	next_attempt_at: string;
+	created_at: string;
+	delivered_at?: string;
+}
+
+export interface CustomerWebhookAttempt {
+	id: string;
+	delivery_id: string;
+	attempt_number: number;
+	response_code?: number;
+	latency_ms: number;
+	response_snippet?: string;
+	error_class?: string;
+	created_at: string;
+}
+
+export interface CustomerUsage {
+	tps_limit: number;
+	daily_count: number;
+	daily_cap: number;
+	monthly_count: number;
+	monthly_cap: number;
+	balance: string;
+	available: string;
+	credit_limit: string;
+	currency: string;
+}
+
 
 

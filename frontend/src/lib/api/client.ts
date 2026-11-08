@@ -72,6 +72,13 @@ import type {
 	ReconciliationRun,
 	DLRMapping,
 	TestSendRequest,
+	CustomerSessionInfo,
+	InboundNumber,
+	InboundMessage,
+	CustomerWebhook,
+	CustomerWebhookDelivery,
+	CustomerWebhookAttempt,
+	CustomerUsage,
 	Invoice,
 	Payment,
 	CreateSMPPAccountResponse,
@@ -2278,6 +2285,119 @@ export class ApiClient {
 		return this.request<{ success: boolean }>(`/api/v1/messaging/dlr-mappings/${id}`, {
 			method: 'DELETE'
 		});
+	}
+
+	// Phase 8B: Platform Operational Methods
+	async getCustomerSMPPSessions(): Promise<{ data: { sessions: CustomerSessionInfo[] }; requestId: string }> {
+		return this.request<{ sessions: CustomerSessionInfo[] }>('/api/v1/messaging/customer/sessions');
+	}
+
+	async disconnectCustomerSMPPSession(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/messaging/customer/sessions/${id}/disconnect`, {
+			method: 'POST'
+		});
+	}
+
+	async listInboundNumbers(params?: {
+		page?: number;
+		per_page?: number;
+		status?: string;
+		customer_org_id?: string;
+	}): Promise<{ data: { items: InboundNumber[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', params.page.toString());
+		if (params?.per_page) q.set('per_page', params.per_page.toString());
+		if (params?.status) q.set('status', params.status);
+		if (params?.customer_org_id) q.set('customer_org_id', params.customer_org_id);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: InboundNumber[]; total: number; page: number; per_page: number }>(`/api/v1/messaging/inbound/numbers${qs}`);
+	}
+
+	async createInboundNumber(n: Partial<InboundNumber>): Promise<{ data: InboundNumber; requestId: string }> {
+		return this.request<InboundNumber>('/api/v1/messaging/inbound/numbers', {
+			method: 'POST',
+			body: JSON.stringify(n)
+		});
+	}
+
+	async updateInboundNumber(id: string, n: Partial<InboundNumber>): Promise<{ data: InboundNumber; requestId: string }> {
+		return this.request<InboundNumber>(`/api/v1/messaging/inbound/numbers/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(n)
+		});
+	}
+
+	async listInboundMessages(params?: {
+		page?: number;
+		per_page?: number;
+		customer_org_id?: string;
+	}): Promise<{ data: { items: InboundMessage[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', params.page.toString());
+		if (params?.per_page) q.set('per_page', params.per_page.toString());
+		if (params?.customer_org_id) q.set('customer_org_id', params.customer_org_id);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: InboundMessage[]; total: number; page: number; per_page: number }>(`/api/v1/messaging/inbound/messages${qs}`);
+	}
+
+	async listPlatformWebhookDeliveries(params?: {
+		page?: number;
+		per_page?: number;
+		status?: string;
+		customer_org_id?: string;
+	}): Promise<{ data: { items: CustomerWebhookDelivery[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', params.page.toString());
+		if (params?.per_page) q.set('per_page', params.per_page.toString());
+		if (params?.status) q.set('status', params.status);
+		if (params?.customer_org_id) q.set('customer_org_id', params.customer_org_id);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: CustomerWebhookDelivery[]; total: number; page: number; per_page: number }>(`/api/v1/messaging/webhooks/deliveries${qs}`);
+	}
+
+	// Phase 8B: Customer Integration Portal Methods
+	async listCustomerWebhooks(): Promise<{ data: CustomerWebhook[]; requestId: string }> {
+		return this.request<CustomerWebhook[]>('/api/v1/customer/webhooks');
+	}
+
+	async createCustomerWebhook(wh: { url: string; events: string[] }): Promise<{ data: CustomerWebhook; requestId: string }> {
+		return this.request<CustomerWebhook>('/api/v1/customer/webhooks', {
+			method: 'POST',
+			body: JSON.stringify(wh)
+		});
+	}
+
+	async deleteCustomerWebhook(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/customer/webhooks/${id}`, {
+			method: 'DELETE'
+		});
+	}
+
+	async testCustomerWebhook(id: string): Promise<{ data: { success: boolean; message: string }; requestId: string }> {
+		return this.request<{ success: boolean; message: string }>(`/api/v1/customer/webhooks/${id}/test`, {
+			method: 'POST'
+		});
+	}
+
+	async listCustomerWebhookDeliveries(id: string, params?: {
+		page?: number;
+		per_page?: number;
+		status?: string;
+	}): Promise<{ data: { items: CustomerWebhookDelivery[]; total: number; page: number; per_page: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.page) q.set('page', params.page.toString());
+		if (params?.per_page) q.set('per_page', params.per_page.toString());
+		if (params?.status) q.set('status', params.status);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ items: CustomerWebhookDelivery[]; total: number; page: number; per_page: number }>(`/api/v1/customer/webhooks/${id}/deliveries${qs}`);
+	}
+
+	async getCustomerAccount(): Promise<{ data: any; requestId: string }> {
+		return this.request<any>('/api/v1/customer/account');
+	}
+
+	async getCustomerBalance(): Promise<{ data: any; requestId: string }> {
+		return this.request<any>('/api/v1/customer/balance');
 	}
 }
 

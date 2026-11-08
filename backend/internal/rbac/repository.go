@@ -67,7 +67,6 @@ func (r *pgRepository) ListRoles(ctx context.Context, tc *tenant.Context, orgID 
 	if orgID != nil {
 		where = append(where, fmt.Sprintf("r.organization_id = $%d", argIdx))
 		args = append(args, *orgID)
-		argIdx++
 	}
 
 	whereClause := ""

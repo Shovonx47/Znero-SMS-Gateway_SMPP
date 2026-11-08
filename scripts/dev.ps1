@@ -8,7 +8,8 @@
 [CmdletBinding()]
 param(
     [switch]$Foreground,
-    [switch]$WithSmppMock
+    [switch]$WithSmppMock,
+    [switch]$WithWebhookEcho
 )
 
 . "$PSScriptRoot\_common.ps1"
@@ -50,6 +51,13 @@ if ($WithSmppMock) {
     Set-Content -LiteralPath (Join-Path $script:RunDir 'smppmock.pid') -Value $mockProc.Id
 }
 
+if ($WithWebhookEcho) {
+    Write-Host "Launching Customer Webhook Echo Server..." -ForegroundColor Gray
+    $echoCmd = "cd `"$repoRoot\backend`"; go run ./cmd/webhookecho"
+    $echoProc = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-Command', $echoCmd) -PassThru
+    Set-Content -LiteralPath (Join-Path $script:RunDir 'webhookecho.pid') -Value $echoProc.Id
+}
+
 # 4. Wait for Backend /readyz probe
 $apiPort = Get-Setting 'APP_PORT' '8080'
 $uiPort  = Get-Setting 'FRONTEND_PORT' '5173'
@@ -81,6 +89,11 @@ Write-Host "             ZNERO INTERNATIONAL LOCAL STACK IS READY               
 Write-Host "================================================================================" -ForegroundColor Green
 Write-Host "  Frontend Web UI   : http://127.0.0.1:$uiPort" -ForegroundColor Cyan
 Write-Host "  Backend REST API  : http://127.0.0.1:$apiPort/api/v1" -ForegroundColor Cyan
+Write-Host "  Customer REST API : http://127.0.0.1:$apiPort/api/v1/customer" -ForegroundColor Cyan
+Write-Host "  Customer SMPP     : 127.0.0.1:2776 (TCP/SMPP 3.4)" -ForegroundColor Cyan
+if ($WithWebhookEcho) {
+    Write-Host "  Webhook Echo      : http://127.0.0.1:8085" -ForegroundColor Cyan
+}
 Write-Host "  Health Status     : http://127.0.0.1:$apiPort/healthz" -ForegroundColor Cyan
 Write-Host "  Readiness Probe   : http://127.0.0.1:$apiPort/readyz" -ForegroundColor Cyan
 Write-Host "--------------------------------------------------------------------------------"

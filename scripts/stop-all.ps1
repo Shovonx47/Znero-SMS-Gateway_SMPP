@@ -42,6 +42,16 @@ if (Test-Path -LiteralPath $smppPidFile) {
     }
     Remove-Item -LiteralPath $smppPidFile -Force -ErrorAction SilentlyContinue
 }
+
+# 2c. Stop Webhook Echo Server
+$echoPidFile = Join-Path $script:RunDir 'webhookecho.pid'
+if (Test-Path -LiteralPath $echoPidFile) {
+    $ePid = Get-Content -LiteralPath $echoPidFile -ErrorAction SilentlyContinue
+    if ($ePid) {
+        Stop-Process -Id ([int]$ePid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $echoPidFile -Force -ErrorAction SilentlyContinue
+}
 # Kill any node processes listening on frontend port (5173)
 $uiPort = [int](Get-Setting 'FRONTEND_PORT' '5173')
 $netstat = netstat -ano | Select-String ":$uiPort\s+.*LISTENING\s+(\d+)"
