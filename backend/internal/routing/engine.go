@@ -5,19 +5,39 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyaruka/phonenumbers"
 	"github.com/shopspring/decimal"
 )
 
 type Engine struct {
-	pool     *pgxpool.Pool
-	rater    RaterInterface
-	numberer NumbererInterface
-	randSrc  rand.Source
+	pool            *pgxpool.Pool
+	rater           RaterInterface
+	numberer        NumbererInterface
+	randMu          sync.Mutex
+	randSrc         rand.Source
+	globalMinMargin decimal.Decimal
+}
+
+func isValidE164(s string) bool {
+	if len(s) < 8 || len(s) > 16 || s[0] != '+' {
+		return false
+	}
+	if s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func NewEngine(pool *pgxpool.Pool, rater RaterInterface, numberer NumbererInterface, randSrc rand.Source) *Engine {
@@ -25,11 +45,16 @@ func NewEngine(pool *pgxpool.Pool, rater RaterInterface, numberer NumbererInterf
 		randSrc = rand.NewSource(time.Now().UnixNano())
 	}
 	return &Engine{
-		pool:     pool,
-		rater:    rater,
-		numberer: numberer,
-		randSrc:  randSrc,
+		pool:            pool,
+		rater:           rater,
+		numberer:        numberer,
+		randSrc:         randSrc,
+		globalMinMargin: decimal.Zero,
 	}
+}
+
+func (e *Engine) SetGlobalMinMargin(m decimal.Decimal) {
+	e.globalMinMargin = m
 }
 
 // Resolve returns the ordered list of eligible candidates for a given request.
@@ -48,7 +73,23 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 		RulesApplied:    make([]string, 0),
 	}
 
-	// 0. Destination lookup (country and operator if numberer provided)
+	evalTime := time.Now().UTC()
+	if req.Timestamp != nil && !req.Timestamp.IsZero() {
+		evalTime = *req.Timestamp
+	}
+
+	// 0. Unconditional destination E.164 format check (never gated on e.numberer != nil)
+	if req.DestinationE164 != "" && !isValidE164(req.DestinationE164) {
+		result.Excluded = append(result.Excluded, ExclusionReason{
+			Reason:     ReasonInvalidNumber,
+			ReasonCode: ReasonInvalidNumber,
+			Detail:     "destination number is not valid international E.164",
+		})
+		result.Exclusions = result.Excluded
+		return result, nil
+	}
+
+	// 0b. Destination lookup (country and operator if numberer provided)
 	var destCountryID uuid.UUID
 	var destOperatorID *uuid.UUID
 	if req.CountryID != nil && *req.CountryID != uuid.Nil {
@@ -61,14 +102,6 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 		if numInfo, err := e.numberer.Lookup(req.DestinationE164); err == nil && numInfo != nil {
 			destCountryID = numInfo.CountryID
 			destOperatorID = numInfo.OperatorID
-		} else if req.DestinationE164 != "" && !strings.HasPrefix(req.DestinationE164, "+") {
-			result.Excluded = append(result.Excluded, ExclusionReason{
-				Reason:     ReasonInvalidNumber,
-				ReasonCode: ReasonInvalidNumber,
-				Detail:     "destination number is not valid international E.164",
-			})
-			result.Exclusions = result.Excluded
-			return result, nil
 		}
 	}
 
@@ -126,12 +159,18 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 	}
 
 	// 2. Find customer's route plan (country override > default assignment)
-	plan := e.selectPlan(snap, req.CustomerOrgID, destCountryID)
+	plan, planExclusionReason := e.selectPlanWithReason(snap, req.CustomerOrgID, destCountryID, evalTime)
 	if plan == nil {
+		reason := ReasonPlanInactive
+		detail := "no active route plan assigned to customer"
+		if planExclusionReason != "" {
+			reason = planExclusionReason
+			detail = "plan or assignment excluded by effective date window"
+		}
 		result.Excluded = append(result.Excluded, ExclusionReason{
-			Reason:     ReasonPlanInactive,
-			ReasonCode: ReasonPlanInactive,
-			Detail:     "no active route plan assigned to customer",
+			Reason:     reason,
+			ReasonCode: reason,
+			Detail:     detail,
 		})
 		result.Exclusions = result.Excluded
 		return result, nil
@@ -141,7 +180,7 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 	result.StrategyUsed = plan.Strategy
 
 	// 3. Apply routing rules (block → return early; force → pin; avoid/prefer → affect ordering)
-	ruleAction, rulesApplied, forcedConn, preferredConn, avoidedConn, blockedReason := e.applyRules(snap, req, plan, destCountryID, destOperatorID)
+	ruleAction, rulesApplied, forcedConn, preferredConn, avoidedConn, blockedReason := e.applyRules(snap, req, plan, destCountryID, destOperatorID, evalTime)
 	result.RulesApplied = rulesApplied
 
 	if ruleAction == "block" {
@@ -162,6 +201,24 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 				ConnectionID: entry.ConnectionID,
 				Reason:       ReasonEntryInactive,
 				ReasonCode:   ReasonEntryInactive,
+			})
+			continue
+		}
+		if entry.EffectiveFrom != nil && evalTime.Before(*entry.EffectiveFrom) {
+			result.Excluded = append(result.Excluded, ExclusionReason{
+				ConnectionID: entry.ConnectionID,
+				Reason:       ReasonEffectiveDateNotStarted,
+				ReasonCode:   ReasonEffectiveDateNotStarted,
+				Detail:       "entry effective_from is in the future",
+			})
+			continue
+		}
+		if entry.EffectiveTo != nil && evalTime.After(*entry.EffectiveTo) {
+			result.Excluded = append(result.Excluded, ExclusionReason{
+				ConnectionID: entry.ConnectionID,
+				Reason:       ReasonEffectiveDateExpired,
+				ReasonCode:   ReasonEffectiveDateExpired,
+				Detail:       "entry effective_to has expired",
 			})
 			continue
 		}
@@ -309,18 +366,20 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 		}
 
 		cand := Candidate{
-			ConnectionID:   entry.ConnectionID,
-			ConnectionName: entry.ConnectionName,
-			ProviderID:     conn.ProviderID,
-			Priority:       entry.Priority,
-			Weight:         entry.Weight,
-			Cost:           conn.Cost,
+			ConnectionID:            entry.ConnectionID,
+			ConnectionName:          entry.ConnectionName,
+			ProviderID:              conn.ProviderID,
+			Priority:                entry.Priority,
+			Weight:                  entry.Weight,
+			Cost:                    conn.Cost,
+			DestinationNumberFormat: entry.DestinationNumberFormat,
+			FormattedDestination:    formatDestinationNumber(req.DestinationE164, entry.DestinationNumberFormat),
 		}
 
-		// Rates and Margin validation via Phase 5 Rating Engine
+		// Rates and Margin validation via Phase 5 Rating Engine (with evalTime)
 		if e.rater != nil {
 			// 1. Lookup Sell Rate (MUST EXIST)
-			sellRate, err := e.rater.LookupSellRate(ctx, req.CustomerOrgID, destCountryID, destOperatorID)
+			sellRate, err := e.rater.LookupSellRate(ctx, req.CustomerOrgID, destCountryID, destOperatorID, evalTime)
 			if err != nil || sellRate == nil || !sellRate.Found {
 				result.Excluded = append(result.Excluded, ExclusionReason{
 					ConnectionID: entry.ConnectionID,
@@ -334,7 +393,7 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 			cand.CurrencyCode = sellRate.Currency
 
 			// 2. Lookup Buy Rate (MUST EXIST)
-			buyRate, err := e.rater.LookupBuyRate(ctx, entry.ConnectionID, destCountryID, destOperatorID)
+			buyRate, err := e.rater.LookupBuyRate(ctx, entry.ConnectionID, destCountryID, destOperatorID, evalTime)
 			if err != nil || buyRate == nil || !buyRate.Found {
 				result.Excluded = append(result.Excluded, ExclusionReason{
 					ConnectionID: entry.ConnectionID,
@@ -358,8 +417,8 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 				continue
 			}
 
-			// 4. Margin Check
-			minMargin := decimal.Zero
+			// 4. Margin Check (evaluating entry override vs global minimum margin)
+			minMargin := e.globalMinMargin
 			if entry.MinMarginOverride != nil {
 				minMargin = *entry.MinMarginOverride
 			}
@@ -437,6 +496,7 @@ func (e *Engine) Simulate(ctx context.Context, req SimulateRequest) (*SimulateRe
 		SenderIDType:    req.SenderIDType,
 		SenderID:        senderID,
 		SenderIDValue:   senderID,
+		Timestamp:       req.Timestamp,
 	}
 
 	snap := CurrentSnapshot()
@@ -482,22 +542,46 @@ func (e *Engine) Simulate(ctx context.Context, req SimulateRequest) (*SimulateRe
 	return simResult, nil
 }
 
-func (e *Engine) selectPlan(snap *RoutingSnapshot, customerOrgID uuid.UUID, countryID uuid.UUID) *RoutePlan {
-	now := time.Now().UTC()
+func (e *Engine) selectPlan(snap *RoutingSnapshot, customerOrgID uuid.UUID, countryID uuid.UUID, evalTime time.Time) *RoutePlan {
+	p, _ := e.selectPlanWithReason(snap, customerOrgID, countryID, evalTime)
+	return p
+}
+
+func (e *Engine) selectPlanWithReason(snap *RoutingSnapshot, customerOrgID uuid.UUID, countryID uuid.UUID, evalTime time.Time) (*RoutePlan, string) {
+	if evalTime.IsZero() {
+		evalTime = time.Now().UTC()
+	}
+
+	var dateReason string
+	checkPlanDates := func(p *RoutePlan) bool {
+		if p.EffectiveFrom != nil && evalTime.Before(*p.EffectiveFrom) {
+			dateReason = ReasonEffectiveDateNotStarted
+			return false
+		}
+		if p.EffectiveTo != nil && evalTime.After(*p.EffectiveTo) {
+			dateReason = ReasonEffectiveDateExpired
+			return false
+		}
+		return true
+	}
 
 	// 1. Look for country-specific assignment first
 	if countryID != uuid.Nil {
 		for _, a := range snap.Assignments {
 			if a.CustomerOrgID == customerOrgID && a.CountryID != nil && *a.CountryID == countryID && a.Status == "active" {
-				if a.EffectiveFrom != nil && now.Before(*a.EffectiveFrom) {
+				if a.EffectiveFrom != nil && evalTime.Before(*a.EffectiveFrom) {
+					dateReason = ReasonEffectiveDateNotStarted
 					continue
 				}
-				if a.EffectiveTo != nil && now.After(*a.EffectiveTo) {
+				if a.EffectiveTo != nil && evalTime.After(*a.EffectiveTo) {
+					dateReason = ReasonEffectiveDateExpired
 					continue
 				}
 				for i := range snap.Plans {
 					if snap.Plans[i].ID == a.PlanID && snap.Plans[i].Status == PlanActive {
-						return &snap.Plans[i]
+						if checkPlanDates(&snap.Plans[i]) {
+							return &snap.Plans[i], ""
+						}
 					}
 				}
 			}
@@ -507,21 +591,25 @@ func (e *Engine) selectPlan(snap *RoutingSnapshot, customerOrgID uuid.UUID, coun
 	// 2. Look for default assignment (country_id IS NULL)
 	for _, a := range snap.Assignments {
 		if a.CustomerOrgID == customerOrgID && a.CountryID == nil && a.Status == "active" {
-			if a.EffectiveFrom != nil && now.Before(*a.EffectiveFrom) {
+			if a.EffectiveFrom != nil && evalTime.Before(*a.EffectiveFrom) {
+				dateReason = ReasonEffectiveDateNotStarted
 				continue
 			}
-			if a.EffectiveTo != nil && now.After(*a.EffectiveTo) {
+			if a.EffectiveTo != nil && evalTime.After(*a.EffectiveTo) {
+				dateReason = ReasonEffectiveDateExpired
 				continue
 			}
 			for i := range snap.Plans {
 				if snap.Plans[i].ID == a.PlanID && snap.Plans[i].Status == PlanActive {
-					return &snap.Plans[i]
+					if checkPlanDates(&snap.Plans[i]) {
+						return &snap.Plans[i], ""
+					}
 				}
 			}
 		}
 	}
 
-	return nil
+	return nil, dateReason
 }
 
 func (e *Engine) applyRules(
@@ -530,17 +618,20 @@ func (e *Engine) applyRules(
 	plan *RoutePlan,
 	countryID uuid.UUID,
 	operatorID *uuid.UUID,
+	evalTime time.Time,
 ) (actionType string, rulesApplied []string, forcedConn *uuid.UUID, preferredConn *uuid.UUID, avoidedConn *uuid.UUID, blockedReason string) {
-	now := time.Now().UTC()
+	if evalTime.IsZero() {
+		evalTime = time.Now().UTC()
+	}
 
 	for _, rule := range snap.Rules {
 		if rule.Status != "active" {
 			continue
 		}
-		if rule.EffectiveFrom != nil && now.Before(*rule.EffectiveFrom) {
+		if rule.EffectiveFrom != nil && evalTime.Before(*rule.EffectiveFrom) {
 			continue
 		}
-		if rule.EffectiveTo != nil && now.After(*rule.EffectiveTo) {
+		if rule.EffectiveTo != nil && evalTime.After(*rule.EffectiveTo) {
 			continue
 		}
 
@@ -710,6 +801,9 @@ func (e *Engine) weightedShuffle(candidates []Candidate) []Candidate {
 		return candidates
 	}
 
+	e.randMu.Lock()
+	defer e.randMu.Unlock()
+
 	rng := rand.New(e.randSrc)
 	remaining := make([]Candidate, len(candidates))
 	copy(remaining, candidates)
@@ -746,4 +840,27 @@ func (e *Engine) weightedShuffle(candidates []Candidate) []Candidate {
 	}
 
 	return result
+}
+
+func formatDestinationNumber(e164 string, format string) string {
+	if e164 == "" {
+		return ""
+	}
+	cleanE164 := e164
+	if !strings.HasPrefix(cleanE164, "+") {
+		cleanE164 = "+" + cleanE164
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "e164_digits", "international_no_plus":
+		return strings.TrimPrefix(cleanE164, "+")
+	case "national":
+		if num, err := phonenumbers.Parse(cleanE164, ""); err == nil && num != nil && num.NationalNumber != nil {
+			return strconv.FormatUint(*num.NationalNumber, 10)
+		}
+		return strings.TrimPrefix(cleanE164, "+")
+	case "e164_plus", "e164":
+		fallthrough
+	default:
+		return cleanE164
+	}
 }

@@ -3,10 +3,13 @@ package ledger_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"github.com/znero-international/znero/backend/internal/ledger"
 	"github.com/znero-international/znero/backend/internal/org"
@@ -1187,4 +1190,265 @@ func TestAmountBounds_Ledger(t *testing.T) {
 		t.Fatalf("expected ErrAmountExceedsMaximum for adjustment > 1M, got: %v", err)
 	}
 	t.Logf("Single transaction upper bound $1,000,000 enforced cleanly")
+}
+
+// 18. TestPlaceHoldTxAndPostChargeTx_ExternalTransaction verifies atomic sharing of an external pgx.Tx
+func TestPlaceHoldTxAndPostChargeTx_ExternalTransaction(t *testing.T) {
+	h := setupHarness(t)
+	ctx := context.Background()
+
+	resellerOrg, resellerPath := h.e.ChildOrg(h.e.PlatformOrgID, h.e.PlatformOrgPath, "txshare-reseller", "reseller")
+	custOrg, _ := h.e.ChildOrg(resellerOrg, resellerPath, "txshare-cust", "customer")
+
+	w, _ := h.ledgerSvc.EnsureWallet(ctx, h.e.Override, custOrg, "USD", "prepaid")
+	_, _, err := h.ledgerSvc.Topup(ctx, h.e.Override, w.ID, ledger.WalletTopupRequest{
+		Amount: decimal.NewFromInt(500), Reason: "Initial fund for tx share test",
+	}, "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+
+	// 1. External transaction rollback aborts PlaceHoldTx
+	tx1, err := h.e.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idemp1 := "idemp-hold-rb"
+	hold1, err := h.ledgerSvc.PlaceHoldTx(ctx, tx1, w.ID, decimal.NewFromInt(100), "USD", nil, nil, &idemp1, time.Now().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("place hold in tx: %v", err)
+	}
+	if err := tx1.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Verify hold does not exist after rollback
+	wAfterRb, err := h.ledgerSvc.GetWallet(ctx, h.e.Override, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wAfterRb.ActiveHolds.Equal(decimal.Zero) {
+		t.Fatalf("expected 0 active holds after rollback, got %s", wAfterRb.ActiveHolds.String())
+	}
+	_, err = h.ledgerRepo.GetHoldByID(ctx, hold1.ID)
+	if !errors.Is(err, ledger.ErrHoldNotFound) {
+		t.Fatalf("expected ErrHoldNotFound for rolled-back hold, got: %v", err)
+	}
+
+	// 2. External transaction commit persists PlaceHoldTx and PostChargeTx
+	tx2, err := h.e.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idemp2 := "idemp-hold-commit"
+	hold2, err := h.ledgerSvc.PlaceHoldTx(ctx, tx2, w.ID, decimal.NewFromInt(150), "USD", nil, nil, &idemp2, time.Now().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("place hold in tx2: %v", err)
+	}
+	idempCharge := "idemp-charge-commit"
+	chargeTx, err := h.ledgerSvc.PostChargeTx(ctx, tx2, w.ID, decimal.NewFromInt(50), "USD", "Shared tx charge", nil, nil, &idempCharge)
+	if err != nil {
+		t.Fatalf("post charge in tx2: %v", err)
+	}
+	if chargeTx == nil {
+		t.Fatal("expected charge transaction")
+	}
+	if err := tx2.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	wAfterCommit, err := h.ledgerSvc.GetWallet(ctx, h.e.Override, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CachedBalance: 500 - 50 = 450; ActiveHolds: 150; AvailableBalance: 450 - 150 = 300
+	if !wAfterCommit.CachedBalance.Equal(decimal.NewFromInt(450)) {
+		t.Fatalf("expected cached balance 450, got %s", wAfterCommit.CachedBalance.String())
+	}
+	if !wAfterCommit.ActiveHolds.Equal(decimal.NewFromInt(150)) {
+		t.Fatalf("expected active holds 150, got %s", wAfterCommit.ActiveHolds.String())
+	}
+	if !wAfterCommit.AvailableBalance.Equal(decimal.NewFromInt(300)) {
+		t.Fatalf("expected available balance 300, got %s", wAfterCommit.AvailableBalance.String())
+	}
+
+	// 3. CaptureTx within an external transaction
+	tx3, err := h.e.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idempCap := "idemp-cap-tx"
+	capTx, err := h.ledgerSvc.CaptureTx(ctx, tx3, hold2.ID, decimal.NewFromInt(100), &idempCap)
+	if err != nil {
+		t.Fatalf("capture tx in tx3: %v", err)
+	}
+	if capTx == nil {
+		t.Fatal("expected capture transaction")
+	}
+	if err := tx3.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	wAfterCap, err := h.ledgerSvc.GetWallet(ctx, h.e.Override, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CachedBalance: 450 - 100 = 350; ActiveHolds: 0 (hold resolved); Available: 350
+	if !wAfterCap.CachedBalance.Equal(decimal.NewFromInt(350)) {
+		t.Fatalf("expected cached balance 350, got %s", wAfterCap.CachedBalance.String())
+	}
+	if !wAfterCap.ActiveHolds.Equal(decimal.Zero) {
+		t.Fatalf("expected active holds 0, got %s", wAfterCap.ActiveHolds.String())
+	}
+}
+
+// 19. TestCapture_IdempotencyReplaySameAmountAndDifferentAmountRejected verifies idempotency rules
+func TestCapture_IdempotencyReplaySameAmountAndDifferentAmountRejected(t *testing.T) {
+	h := setupHarness(t)
+	ctx := context.Background()
+
+	resellerOrg, resellerPath := h.e.ChildOrg(h.e.PlatformOrgID, h.e.PlatformOrgPath, "capidemp-reseller", "reseller")
+	custOrg, _ := h.e.ChildOrg(resellerOrg, resellerPath, "capidemp-cust", "customer")
+
+	w, _ := h.ledgerSvc.EnsureWallet(ctx, h.e.Override, custOrg, "USD", "prepaid")
+	_, _, _ = h.ledgerSvc.Topup(ctx, h.e.Override, w.ID, ledger.WalletTopupRequest{
+		Amount: decimal.NewFromInt(500), Reason: "Topup for capture replay test",
+	}, "127.0.0.1", "test")
+
+	hold, err := h.ledgerSvc.PlaceHold(ctx, w.ID, decimal.NewFromInt(200), "USD", nil, nil, nil, time.Now().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("place hold: %v", err)
+	}
+
+	capIdemp := "cap-replay-unique-key-1"
+	origCapTx, err := h.ledgerSvc.Capture(ctx, hold.ID, decimal.NewFromInt(120), &capIdemp)
+	if err != nil {
+		t.Fatalf("original capture: %v", err)
+	}
+	if origCapTx == nil {
+		t.Fatal("expected original capture transaction")
+	}
+
+	// 1. Replay with identical key and identical amount -> returns original transaction
+	replayCapTx, err := h.ledgerSvc.Capture(ctx, hold.ID, decimal.NewFromInt(120), &capIdemp)
+	if err != nil {
+		t.Fatalf("replay with same amount failed: %v", err)
+	}
+	if replayCapTx.ID != origCapTx.ID {
+		t.Fatalf("expected identical transaction ID %s, got %s", origCapTx.ID, replayCapTx.ID)
+	}
+
+	// 2. Replay with identical key and DIFFERENT amount -> rejected with ErrIdempotencyConflict
+	_, err = h.ledgerSvc.Capture(ctx, hold.ID, decimal.NewFromInt(150), &capIdemp)
+	if !errors.Is(err, ledger.ErrIdempotencyConflict) {
+		t.Fatalf("expected ErrIdempotencyConflict for differing capture amount, got: %v", err)
+	}
+
+	// 3. Attempting another capture without matching idempotency key on now-captured hold -> ErrHoldNotActive
+	diffKey := "cap-replay-diff-key-2"
+	_, err = h.ledgerSvc.Capture(ctx, hold.ID, decimal.NewFromInt(50), &diffKey)
+	if !errors.Is(err, ledger.ErrHoldNotActive) {
+		t.Fatalf("expected ErrHoldNotActive on already-captured hold, got: %v", err)
+	}
+}
+
+// 20. TestRelease_IdempotentOnAlreadyReleased verifies release idempotency and ReleaseTx
+func TestRelease_IdempotentOnAlreadyReleased(t *testing.T) {
+	h := setupHarness(t)
+	ctx := context.Background()
+
+	resellerOrg, resellerPath := h.e.ChildOrg(h.e.PlatformOrgID, h.e.PlatformOrgPath, "rel-reseller", "reseller")
+	custOrg, _ := h.e.ChildOrg(resellerOrg, resellerPath, "rel-cust", "customer")
+
+	w, _ := h.ledgerSvc.EnsureWallet(ctx, h.e.Override, custOrg, "USD", "prepaid")
+	_, _, _ = h.ledgerSvc.Topup(ctx, h.e.Override, w.ID, ledger.WalletTopupRequest{
+		Amount: decimal.NewFromInt(300), Reason: "Topup for release test",
+	}, "127.0.0.1", "test")
+
+	hold, err := h.ledgerSvc.PlaceHold(ctx, w.ID, decimal.NewFromInt(100), "USD", nil, nil, nil, time.Now().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("place hold: %v", err)
+	}
+
+	// First release -> success
+	if err := h.ledgerSvc.Release(ctx, hold.ID); err != nil {
+		t.Fatalf("first release failed: %v", err)
+	}
+
+	// Second release -> idempotent nil
+	if err := h.ledgerSvc.Release(ctx, hold.ID); err != nil {
+		t.Fatalf("second release must return nil, got: %v", err)
+	}
+
+	// Third release via ReleaseTx with caller transaction -> returns nil
+	dbTx, err := h.e.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbTx.Rollback(ctx)
+	if err := h.ledgerSvc.ReleaseTx(ctx, dbTx, hold.ID); err != nil {
+		t.Fatalf("ReleaseTx on already-released hold must return nil, got: %v", err)
+	}
+}
+
+// 21. TestCapture_ConcurrentReplaysUnderRace verifies parallel replays return same transaction with zero races
+func TestCapture_ConcurrentReplaysUnderRace(t *testing.T) {
+	h := setupHarness(t)
+	ctx := context.Background()
+
+	resellerOrg, resellerPath := h.e.ChildOrg(h.e.PlatformOrgID, h.e.PlatformOrgPath, "racecap-reseller", "reseller")
+	custOrg, _ := h.e.ChildOrg(resellerOrg, resellerPath, "racecap-cust", "customer")
+
+	w, _ := h.ledgerSvc.EnsureWallet(ctx, h.e.Override, custOrg, "USD", "prepaid")
+	_, _, _ = h.ledgerSvc.Topup(ctx, h.e.Override, w.ID, ledger.WalletTopupRequest{
+		Amount: decimal.NewFromInt(500), Reason: "Topup for concurrent capture race",
+	}, "127.0.0.1", "test")
+
+	hold, err := h.ledgerSvc.PlaceHold(ctx, w.ID, decimal.NewFromInt(200), "USD", nil, nil, nil, time.Now().Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("place hold: %v", err)
+	}
+
+	const concurrency = 10
+	idempKey := fmt.Sprintf("race-capture-%s", uuid.New().String())
+	captureAmount := decimal.NewFromInt(80)
+
+	var wg sync.WaitGroup
+	txResults := make([]*ledger.LedgerTransaction, concurrency)
+	errResults := make([]error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			lt, err := h.ledgerSvc.Capture(ctx, hold.ID, captureAmount, &idempKey)
+			txResults[idx] = lt
+			errResults[idx] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var firstTxID uuid.UUID
+	for i := 0; i < concurrency; i++ {
+		if errResults[i] != nil {
+			t.Fatalf("concurrent capture worker %d failed: %v", i, errResults[i])
+		}
+		if txResults[i] == nil {
+			t.Fatalf("worker %d returned nil transaction", i)
+		}
+		if i == 0 {
+			firstTxID = txResults[i].ID
+		} else if txResults[i].ID != firstTxID {
+			t.Fatalf("worker %d returned different transaction ID %s, expected %s", i, txResults[i].ID, firstTxID)
+		}
+	}
+
+	// Verify balance was debited exactly ONCE
+	wFinal, err := h.ledgerSvc.GetWallet(ctx, h.e.Override, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 500 - 80 = 420
+	if !wFinal.CachedBalance.Equal(decimal.NewFromInt(420)) {
+		t.Fatalf("expected final cached balance 420, got %s", wFinal.CachedBalance.String())
+	}
 }

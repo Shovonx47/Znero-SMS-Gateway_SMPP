@@ -304,3 +304,73 @@ func TestInvalidCountryCodesRejected(t *testing.T) {
 		t.Errorf("expected ErrInvalidCountryCodes, got %v", err)
 	}
 }
+
+func TestCountry_DuplicateISO2OrISO3_Rejected(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+	c := mustCountry(t, mustDirect(t, e), nil)
+
+	// Attempt to create another country with identical ISO2
+	dupReq := e.CountryRequest()
+	dupReq.ISO2 = c.ISO2
+	if _, err := e.Country.Create(ctx, e.Override, dupReq); err == nil {
+		t.Fatal("expected error creating country with duplicate ISO2, got nil")
+	}
+
+	// Attempt to create another country with identical ISO3
+	dupReq3 := e.CountryRequest()
+	dupReq3.ISO3 = c.ISO3
+	if _, err := e.Country.Create(ctx, e.Override, dupReq3); err == nil {
+		t.Fatal("expected error creating country with duplicate ISO3, got nil")
+	}
+}
+
+func TestCountry_SearchAndFilter(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+	c := mustCountry(t, mustDirect(t, e), nil)
+
+	// Search by ISO2
+	res, err := e.Country.List(ctx, e.Maker, country.Filter{Search: c.ISO2, Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("search country: %v", err)
+	}
+	var found bool
+	for _, it := range res.Items {
+		if it.ID == c.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected country %s to be found in search by ISO2", c.ISO2)
+	}
+}
+
+func TestCountry_MakerCancelPendingChange(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+	req := e.CountryRequest()
+
+	cr := crOf(t)(e.Country.Create(ctx, e.Maker, req))
+	if cr.Status != "pending" {
+		t.Fatalf("expected pending change request, got %s", cr.Status)
+	}
+
+	// Maker cancels own pending change request
+	if err := e.Approval.Cancel(ctx, e.Maker, cr.ID); err != nil {
+		t.Fatalf("cancel change request: %v", err)
+	}
+
+	got, err := e.Approval.Get(ctx, cr.ID)
+	if err != nil {
+		t.Fatalf("get cancelled cr: %v", err)
+	}
+	if got.Status != "cancelled" {
+		t.Fatalf("expected status cancelled, got %s", got.Status)
+	}
+	// Country was never created
+	if existing, _ := e.CountryRepo.GetByISO2(ctx, req.ISO2); existing != nil {
+		t.Fatal("cancelled change request must not create country")
+	}
+}

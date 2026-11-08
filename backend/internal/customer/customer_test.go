@@ -326,3 +326,54 @@ func TestCustomerProfilesAndCredentialsIntegration(t *testing.T) {
 		t.Fatalf("expected ResellerB ResetSMPPPassword(CustA) to fail with ErrCrossTenantAccess, got %v", err)
 	}
 }
+
+func TestCustomer_StrictCrossTenantIsolationAndMakerChecker(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+	svc := customer.NewService(customer.NewRepository(e.Pool), e.Audit, e.Approval)
+
+	resellerAOrg, resellerAPath := e.ChildOrg(e.PlatformOrgID, e.PlatformOrgPath, "iso-reseller-a", "reseller")
+	resellerBOrg, resellerBPath := e.ChildOrg(e.PlatformOrgID, e.PlatformOrgPath, "iso-reseller-b", "reseller")
+
+	custAOrg, custAPath := e.ChildOrg(resellerAOrg, resellerAPath, "iso-cust-a", "customer")
+	custBOrg, custBPath := e.ChildOrg(resellerBOrg, resellerBPath, "iso-cust-b", "customer")
+
+	resellerA := e.Actor("iso-reseller-a", resellerAOrg, resellerAPath, "reseller", false, "customer.profile.view", "customer.profile.edit")
+	resellerB := e.Actor("iso-reseller-b", resellerBOrg, resellerBPath, "reseller", false, "customer.profile.view", "customer.profile.edit")
+	custA := e.Actor("iso-cust-a", custAOrg, custAPath, "customer", false, "customer.profile.view")
+	custB := e.Actor("iso-cust-b", custBOrg, custBPath, "customer", false, "customer.profile.view")
+
+	// 1. Reseller A creates a profile for Cust A via override
+	profRes, err := svc.CreateProfile(ctx, e.Override, customer.CreateProfileRequest{
+		OrganizationID:  custAOrg,
+		AccountType:     "prepaid",
+		BillingCurrency: "USD",
+	}, "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("create profile custA: %v", err)
+	}
+
+	// 2. Reseller B cannot view Cust A's profile
+	_, err = svc.GetProfile(ctx, resellerB, profRes.Profile.ID)
+	if !errors.Is(err, customer.ErrCrossTenantAccess) {
+		t.Fatalf("expected ErrCrossTenantAccess when Reseller B views Cust A profile, got %v", err)
+	}
+
+	// 3. Cust B cannot view Cust A's profile
+	_, err = svc.GetProfile(ctx, custB, profRes.Profile.ID)
+	if !errors.Is(err, customer.ErrCrossTenantAccess) {
+		t.Fatalf("expected ErrCrossTenantAccess when Cust B views Cust A profile, got %v", err)
+	}
+
+	// 4. Cust A can view own profile
+	prof, err := svc.GetProfile(ctx, custA, profRes.Profile.ID)
+	if err != nil || prof == nil {
+		t.Fatalf("custA should view own profile, got %v", err)
+	}
+
+	// 5. Reseller A can view Cust A's profile
+	profReseller, err := svc.GetProfile(ctx, resellerA, profRes.Profile.ID)
+	if err != nil || profReseller == nil {
+		t.Fatalf("resellerA should view child customer profile, got %v", err)
+	}
+}

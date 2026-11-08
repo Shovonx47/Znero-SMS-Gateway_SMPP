@@ -101,7 +101,7 @@ func BuildSnapshot(ctx context.Context, pool *pgxpool.Pool) (*RoutingSnapshot, e
 		JOIN route_plans rp ON rp.id = e.plan_id
 		JOIN provider_connections c ON c.id = e.connection_id
 		JOIN providers p ON p.id = c.provider_id
-		WHERE rp.status = 'active' AND e.status = 'active'
+		WHERE rp.status = 'active' AND e.status != 'archived'
 		ORDER BY e.priority ASC, e.id ASC
 	`)
 	if err != nil {

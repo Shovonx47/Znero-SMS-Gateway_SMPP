@@ -2,7 +2,9 @@ package routing
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -33,56 +35,61 @@ func requirePlatformOrg(c *fiber.Ctx) error {
 
 func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	routing := router.Group("/routing", authMiddleware, requirePlatformOrg)
+	mutateLimiter := httpx.RateLimiter(60, time.Minute, "Routing mutation rate limit exceeded. Please retry later.")
 
 	// Route Plans
 	plans := routing.Group("/plans")
 	plans.Get("/export", rbac.RequirePermission("routing.plan.view"), h.ExportPlans)
 	plans.Get("/", rbac.RequirePermission("routing.plan.view"), h.ListPlans)
-	plans.Post("/", rbac.RequirePermission("routing.plan.create"), h.CreatePlan)
+	plans.Post("/", mutateLimiter, rbac.RequirePermission("routing.plan.create"), h.CreatePlan)
 	plans.Get("/:id", rbac.RequirePermission("routing.plan.view"), h.GetPlan)
-	plans.Put("/:id", rbac.RequirePermission("routing.plan.edit"), h.UpdatePlan)
-	plans.Post("/:id/activate", rbac.RequirePermission("routing.plan.activate"), h.ActivatePlan)
-	plans.Post("/:id/deactivate", rbac.RequirePermission("routing.plan.deactivate"), h.DeactivatePlan)
-	plans.Post("/:id/archive", rbac.RequirePermission("routing.plan.archive"), h.ArchivePlan)
+	plans.Put("/:id", mutateLimiter, rbac.RequirePermission("routing.plan.edit"), h.UpdatePlan)
+	plans.Post("/:id/activate", mutateLimiter, rbac.RequirePermission("routing.plan.activate"), h.ActivatePlan)
+	plans.Post("/:id/deactivate", mutateLimiter, rbac.RequirePermission("routing.plan.deactivate"), h.DeactivatePlan)
+	plans.Post("/:id/archive", mutateLimiter, rbac.RequirePermission("routing.plan.archive"), h.ArchivePlan)
 	plans.Get("/:id/history", rbac.RequirePermission("routing.plan.view"), h.GetPlanHistory)
-	plans.Post("/:id/rollback", rbac.RequirePermission("routing.plan.edit"), h.RollbackPlan)
+	plans.Post("/:id/rollback", mutateLimiter, rbac.RequirePermission("routing.plan.edit"), h.RollbackPlan)
 
 	// Route Plan Entries
+	plans.Get("/:id/entries/export", rbac.RequirePermission("routing.entry.view"), h.ExportEntries)
 	plans.Get("/:id/entries", rbac.RequirePermission("routing.entry.view"), h.ListEntries)
-	plans.Post("/:id/entries", rbac.RequirePermission("routing.entry.create"), h.CreateEntry)
-	plans.Put("/:id/entries/:eid", rbac.RequirePermission("routing.entry.edit"), h.UpdateEntry)
-	plans.Delete("/:id/entries/:eid", rbac.RequirePermission("routing.entry.edit"), h.DeleteEntry)
-	plans.Post("/:id/entries/:eid/rollback", rbac.RequirePermission("routing.entry.edit"), h.RollbackEntry)
+	plans.Post("/:id/entries", mutateLimiter, rbac.RequirePermission("routing.entry.create"), h.CreateEntry)
+	plans.Put("/:id/entries/:eid", mutateLimiter, rbac.RequirePermission("routing.entry.edit"), h.UpdateEntry)
+	plans.Delete("/:id/entries/:eid", mutateLimiter, rbac.RequirePermission("routing.entry.edit"), h.DeleteEntry)
+	plans.Get("/:id/entries/:eid/history", rbac.RequirePermission("routing.entry.view"), h.GetEntryHistory)
+	plans.Post("/:id/entries/:eid/rollback", mutateLimiter, rbac.RequirePermission("routing.entry.edit"), h.RollbackEntry)
 
 	// Customer Route Assignments
 	assignments := routing.Group("/assignments")
 	assignments.Get("/export", rbac.RequirePermission("routing.assignment.view"), h.ExportAssignments)
 	assignments.Get("/", rbac.RequirePermission("routing.assignment.view"), h.ListAssignments)
-	assignments.Post("/", rbac.RequirePermission("routing.assignment.create"), h.CreateAssignment)
+	assignments.Post("/", mutateLimiter, rbac.RequirePermission("routing.assignment.create"), h.CreateAssignment)
 	assignments.Get("/:id/history", rbac.RequirePermission("routing.assignment.view"), h.GetAssignmentHistory)
-	assignments.Post("/:id/rollback", rbac.RequirePermission("routing.assignment.edit"), h.RollbackAssignment)
-	assignments.Put("/:id", rbac.RequirePermission("routing.assignment.edit"), h.UpdateAssignment)
-	assignments.Delete("/:id", rbac.RequirePermission("routing.assignment.edit"), h.DeleteAssignment)
+	assignments.Post("/:id/rollback", mutateLimiter, rbac.RequirePermission("routing.assignment.edit"), h.RollbackAssignment)
+	assignments.Put("/:id", mutateLimiter, rbac.RequirePermission("routing.assignment.edit"), h.UpdateAssignment)
+	assignments.Delete("/:id", mutateLimiter, rbac.RequirePermission("routing.assignment.edit"), h.DeleteAssignment)
 
 	// Routing Rules
 	rules := routing.Group("/rules")
 	rules.Get("/export", rbac.RequirePermission("routing.rule.view"), h.ExportRules)
 	rules.Get("/", rbac.RequirePermission("routing.rule.view"), h.ListRules)
-	rules.Post("/", rbac.RequirePermission("routing.rule.create"), h.CreateRule)
+	rules.Post("/", mutateLimiter, rbac.RequirePermission("routing.rule.create"), h.CreateRule)
 	rules.Get("/:id/history", rbac.RequirePermission("routing.rule.view"), h.GetRuleHistory)
-	rules.Post("/:id/rollback", rbac.RequirePermission("routing.rule.edit"), h.RollbackRule)
-	rules.Put("/:id", rbac.RequirePermission("routing.rule.edit"), h.UpdateRule)
-	rules.Delete("/:id", rbac.RequirePermission("routing.rule.edit"), h.DeleteRule)
+	rules.Post("/:id/rollback", mutateLimiter, rbac.RequirePermission("routing.rule.edit"), h.RollbackRule)
+	rules.Put("/:id", mutateLimiter, rbac.RequirePermission("routing.rule.edit"), h.UpdateRule)
+	rules.Delete("/:id", mutateLimiter, rbac.RequirePermission("routing.rule.edit"), h.DeleteRule)
 
 	// Simulator & Kill Switch & Status
-	routing.Post("/simulate", rbac.RequirePermission("routing.simulate"), h.Simulate)
+	routing.Post("/simulate", mutateLimiter, rbac.RequirePermission("routing.simulate"), h.Simulate)
 	routing.Get("/connections/overrides", rbac.RequirePermission("routing.killswitch"), h.ListOverrides)
-	routing.Post("/connections/:id/disable", rbac.RequirePermission("routing.killswitch"), h.DisableConnection)
-	routing.Post("/connections/:id/enable", rbac.RequirePermission("routing.killswitch"), h.EnableConnection)
+	routing.Post("/connections/:id/disable", mutateLimiter, rbac.RequirePermission("routing.killswitch"), h.DisableConnection)
+	routing.Post("/connections/:id/enable", mutateLimiter, rbac.RequirePermission("routing.killswitch"), h.EnableConnection)
+	routing.Post("/kill-switch/disable", mutateLimiter, rbac.RequirePermission("routing.killswitch"), h.DisableConnection)
+	routing.Post("/kill-switch/reenable", mutateLimiter, rbac.RequirePermission("routing.killswitch"), h.EnableConnection)
 
 	routing.Get("/snapshot-status", rbac.RequirePermission("routing.snapshot.view"), h.SnapshotStatus)
 	routing.Get("/snapshot/status", rbac.RequirePermission("routing.snapshot.view"), h.SnapshotStatus)
-	routing.Post("/snapshot/reload", rbac.RequirePermission("routing.plan.edit"), h.ReloadSnapshot)
+	routing.Post("/snapshot/reload", mutateLimiter, rbac.RequirePermission("routing.plan.edit"), h.ReloadSnapshot)
 	routing.Get("/coverage-report", rbac.RequirePermission("routing.snapshot.view"), h.CoverageReport)
 	routing.Get("/coverage-report/export", rbac.RequirePermission("routing.snapshot.view"), h.ExportCoverageReport)
 }
@@ -420,6 +427,24 @@ func (h *Handler) DeleteEntry(c *fiber.Ctx) error {
 	return httpx.OK(c, fiber.Map{"deleted": true})
 }
 
+func (h *Handler) GetEntryHistory(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("authentication required")
+	}
+
+	eid, err := uuid.Parse(c.Params("eid"))
+	if err != nil {
+		return httpx.BadRequest("invalid entry ID")
+	}
+
+	history, err := h.svc.GetEntryHistory(c.UserContext(), tc, eid)
+	if err != nil {
+		return h.mapError(err)
+	}
+	return httpx.OK(c, history)
+}
+
 func (h *Handler) RollbackEntry(c *fiber.Ctx) error {
 	tc, err := tenant.FromContext(c.UserContext())
 	if err != nil {
@@ -701,16 +726,24 @@ func (h *Handler) DisableConnection(c *fiber.Ctx) error {
 		return httpx.Unauthorized("authentication required")
 	}
 
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return httpx.BadRequest("invalid connection ID")
-	}
-
 	var req struct {
-		Reason string `json:"reason"`
+		ConnectionID uuid.UUID `json:"connection_id"`
+		Reason       string    `json:"reason"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return httpx.BadRequest("invalid payload")
+	}
+
+	id := req.ConnectionID
+	if idParam := c.Params("id"); idParam != "" {
+		parsed, err := uuid.Parse(idParam)
+		if err != nil {
+			return httpx.BadRequest("invalid connection ID")
+		}
+		id = parsed
+	}
+	if id == uuid.Nil {
+		return httpx.BadRequest("connection ID is required")
 	}
 
 	override, err := h.svc.DisableConnection(c.UserContext(), tc, id, req.Reason)
@@ -726,15 +759,23 @@ func (h *Handler) EnableConnection(c *fiber.Ctx) error {
 		return httpx.Unauthorized("authentication required")
 	}
 
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return httpx.BadRequest("invalid connection ID")
-	}
-
 	var req struct {
-		Reason string `json:"reason"`
+		ConnectionID uuid.UUID `json:"connection_id"`
+		Reason       string    `json:"reason"`
 	}
 	_ = c.BodyParser(&req)
+
+	id := req.ConnectionID
+	if idParam := c.Params("id"); idParam != "" {
+		parsed, err := uuid.Parse(idParam)
+		if err != nil {
+			return httpx.BadRequest("invalid connection ID")
+		}
+		id = parsed
+	}
+	if id == uuid.Nil {
+		return httpx.BadRequest("connection ID is required")
+	}
 
 	cr, err := h.svc.EnableConnection(c.UserContext(), tc, id, req.Reason)
 	if err != nil {
@@ -793,6 +834,35 @@ func (h *Handler) ExportPlans(c *fiber.Ctx) error {
 	}
 	c.Set("Content-Type", "text/csv")
 	c.Set("Content-Disposition", "attachment; filename=\"route-plans.csv\"")
+	return c.Send(data)
+}
+
+func (h *Handler) ExportEntries(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("authentication required")
+	}
+
+	planID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return httpx.BadRequest("invalid plan ID")
+	}
+
+	format := c.Query("format", "csv")
+	if format == "json" {
+		entries, err := h.svc.ListEntries(c.UserContext(), tc, planID)
+		if err != nil {
+			return h.mapError(err)
+		}
+		return httpx.OK(c, entries)
+	}
+
+	data, err := h.svc.ExportEntriesCSV(c.UserContext(), tc, planID)
+	if err != nil {
+		return h.mapError(err)
+	}
+	c.Set("Content-Type", "text/csv")
+	c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"plan-%s-entries.csv\"", planID))
 	return c.Send(data)
 }
 

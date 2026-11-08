@@ -183,10 +183,12 @@ INSERT INTO permissions (code, module, resource, action, description) VALUES
   ('routing.rule.approve', 'routing', 'rule', 'approve', 'Approve routing rule changes'),
   ('routing.simulate', 'routing', 'simulate', 'execute', 'Run routing simulator'),
   ('routing.killswitch', 'routing', 'connection', 'killswitch', 'Manage provider connection kill switch overrides'),
-  ('routing.snapshot.view', 'routing', 'snapshot', 'view', 'View routing snapshot status and coverage report')
+  ('routing.snapshot.view', 'routing', 'snapshot', 'view', 'View routing snapshot status and coverage report'),
+  ('routing.override', 'routing', 'routing', 'override', 'Bypass maker-checker approval across all routing entities (Platform Super Admin only)'),
+  ('routing.entry.override', 'routing', 'entry', 'override', 'Bypass maker-checker approval for route plan entry changes on active plans only')
 ON CONFLICT (code) DO NOTHING;
 
--- Assign ALL routing permissions to platform_admin role only. No reseller or customer roles get any routing permissions.
+-- Assign ALL routing permissions to platform Super Admin / Platform Admin roles only. No reseller or customer roles get any routing permissions.
 INSERT INTO role_permissions (role_id, permission_code)
 SELECT r.id, p.code
 FROM roles r
@@ -196,30 +198,50 @@ WHERE r.name IN ('Super Admin', 'Platform Admin')
   AND p.module = 'routing'
 ON CONFLICT DO NOTHING;
 
--- Grant maker permissions (without override or approve) to Platform Master Data Editor
+-- Create dedicated Routing Maker and Routing Checker system role templates for the platform organization
+INSERT INTO roles (organization_id, name, description, is_system)
+SELECT o.id, v.name, v.descr, true
+FROM organizations o
+CROSS JOIN (VALUES
+    ('Routing Maker',   'Maker: creates and edits route plans, entries, customer assignments, and routing rules; changes require approval'),
+    ('Routing Checker', 'Checker: reviews and approves or rejects routing change requests and manages emergency kill switch')
+) AS v(name, descr)
+WHERE o.type = 'platform'
+ON CONFLICT (organization_id, name) DO NOTHING;
+
+-- Ensure Master Data Editor and Master Data Approver do NOT hold routing.* permissions
+DELETE FROM role_permissions rp
+USING roles r
+WHERE rp.role_id = r.id
+  AND r.name IN ('Master Data Editor', 'Master Data Approver')
+  AND rp.permission_code LIKE 'routing.%';
+
+-- Grant maker permissions (strictly WITHOUT routing.override, routing.entry.override, or *.approve) to Routing Maker
 INSERT INTO role_permissions (role_id, permission_code)
 SELECT r.id, p.code
 FROM roles r
 JOIN organizations o ON o.id = r.organization_id AND o.type = 'platform'
 CROSS JOIN permissions p
-WHERE r.name = 'Master Data Editor'
+WHERE r.name = 'Routing Maker'
   AND p.code IN (
       'routing.plan.view', 'routing.plan.create', 'routing.plan.edit', 'routing.plan.activate', 'routing.plan.deactivate', 'routing.plan.archive',
       'routing.entry.view', 'routing.entry.create', 'routing.entry.edit',
       'routing.assignment.view', 'routing.assignment.create', 'routing.assignment.edit',
       'routing.rule.view', 'routing.rule.create', 'routing.rule.edit', 'routing.rule.activate',
       'routing.simulate',
-      'routing.snapshot.view'
+      'routing.snapshot.view',
+      'provider.provider.view', 'provider.connection.view', 'customer.profile.view',
+      'country.country.view', 'operator.operator.view'
   )
 ON CONFLICT DO NOTHING;
 
--- Grant checker permissions to Platform Master Data Approver
+-- Grant checker permissions (strictly WITHOUT routing.override or routing.entry.override) to Routing Checker
 INSERT INTO role_permissions (role_id, permission_code)
 SELECT r.id, p.code
 FROM roles r
 JOIN organizations o ON o.id = r.organization_id AND o.type = 'platform'
 CROSS JOIN permissions p
-WHERE r.name = 'Master Data Approver'
+WHERE r.name = 'Routing Checker'
   AND p.code IN (
       'routing.plan.view', 'routing.plan.approve',
       'routing.entry.view', 'routing.entry.approve',
@@ -227,7 +249,9 @@ WHERE r.name = 'Master Data Approver'
       'routing.rule.view', 'routing.rule.approve', 'routing.rule.activate',
       'routing.simulate',
       'routing.snapshot.view',
-      'routing.killswitch'
+      'routing.killswitch',
+      'provider.provider.view', 'provider.connection.view', 'customer.profile.view',
+      'country.country.view', 'operator.operator.view'
   )
 ON CONFLICT DO NOTHING;
 

@@ -1184,16 +1184,36 @@ func (s *Service) PlaceHold(
 	idempKey *string,
 	expiry time.Time,
 ) (*Hold, error) {
+	return s.PlaceHoldTx(ctx, nil, walletID, amount, currency, refType, refID, idempKey, expiry)
+}
+
+// PlaceHoldTx places a balance hold using an optional caller-provided pgx.Tx.
+// If dbTx is nil, a new transaction is begun and committed internally.
+func (s *Service) PlaceHoldTx(
+	ctx context.Context,
+	dbTx pgx.Tx,
+	walletID uuid.UUID,
+	amount decimal.Decimal,
+	currency string,
+	refType *string,
+	refID *uuid.UUID,
+	idempKey *string,
+	expiry time.Time,
+) (*Hold, error) {
 	amount = amount.Truncate(MoneyScale)
 	if amount.LessThanOrEqual(decimal.Zero) {
 		return nil, ErrNegativeAmount
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, walletID)
 	if err != nil {
@@ -1243,8 +1263,10 @@ func (s *Service) PlaceHold(
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit hold: %w", err)
+	if dbTx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit hold: %w", err)
+		}
 	}
 	return hold, nil
 }
@@ -1255,21 +1277,65 @@ func (s *Service) Capture(
 	captureAmount decimal.Decimal,
 	idempKey *string,
 ) (*LedgerTransaction, error) {
+	return s.CaptureTx(ctx, nil, holdID, captureAmount, idempKey)
+}
+
+// CaptureTx captures an active hold (full or partial) using an optional caller-provided pgx.Tx.
+// If dbTx is nil, a new transaction is begun and committed internally.
+// A capture replay with the same idempotency key returns the original LedgerTransaction.
+// A replay with a different amount is rejected with ErrIdempotencyConflict.
+func (s *Service) CaptureTx(
+	ctx context.Context,
+	dbTx pgx.Tx,
+	holdID uuid.UUID,
+	captureAmount decimal.Decimal,
+	idempKey *string,
+) (*LedgerTransaction, error) {
 	captureAmount = captureAmount.Truncate(MoneyScale)
 	if captureAmount.LessThanOrEqual(decimal.Zero) {
 		return nil, ErrNegativeAmount
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	hold, err := s.repo.GetHoldByIDForUpdate(ctx, tx, holdID)
 	if err != nil {
 		return nil, err
 	}
+
+	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, hold.WalletID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Idempotency check before status validation: replay with same key returns original tx, differing amount rejected
+	if idempKey != nil && *idempKey != "" {
+		existing, err := s.repo.GetTransactionByIdempotency(ctx, tx, &w.OrganizationID, "hold_capture", *idempKey)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			var origAmount decimal.Decimal
+			if len(existing.Entries) > 0 {
+				origAmount = existing.Entries[0].Amount
+			} else {
+				origAmount = hold.CapturedAmount
+			}
+			if !origAmount.Equal(captureAmount) {
+				return nil, fmt.Errorf("%w: original capture amount %s, replayed with %s", ErrIdempotencyConflict, origAmount.StringFixed(MoneyScale), captureAmount.StringFixed(MoneyScale))
+			}
+			return existing, nil
+		}
+	}
+
 	if hold.Status != "active" {
 		return nil, fmt.Errorf("%w: current status %s", ErrHoldNotActive, hold.Status)
 	}
@@ -1279,11 +1345,6 @@ func (s *Service) Capture(
 	}
 	if captureAmount.GreaterThan(hold.Amount) {
 		return nil, ErrHoldCaptureExceeded
-	}
-
-	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, hold.WalletID)
-	if err != nil {
-		return nil, err
 	}
 
 	// Post charge
@@ -1344,8 +1405,10 @@ func (s *Service) Capture(
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit capture: %w", err)
+	if dbTx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit capture: %w", err)
+		}
 	}
 
 	lt.Entries = entries
@@ -1353,15 +1416,29 @@ func (s *Service) Capture(
 }
 
 func (s *Service) Release(ctx context.Context, holdID uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
+	return s.ReleaseTx(ctx, nil, holdID)
+}
+
+// ReleaseTx releases an active hold using an optional caller-provided pgx.Tx.
+// If dbTx is nil, a new transaction is begun and committed internally.
+// Calling ReleaseTx on an already-released hold returns nil (idempotent release).
+func (s *Service) ReleaseTx(ctx context.Context, dbTx pgx.Tx, holdID uuid.UUID) error {
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	hold, err := s.repo.GetHoldByIDForUpdate(ctx, tx, holdID)
 	if err != nil {
 		return err
+	}
+	if hold.Status == "released" {
+		return nil
 	}
 	if hold.Status != "active" {
 		return fmt.Errorf("%w: status is %s", ErrHoldNotActive, hold.Status)
@@ -1371,7 +1448,10 @@ func (s *Service) Release(ctx context.Context, holdID uuid.UUID) error {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	if dbTx == nil {
+		return tx.Commit(ctx)
+	}
+	return nil
 }
 
 func (s *Service) ExpireOldHolds(ctx context.Context) (int64, error) {
@@ -1395,16 +1475,35 @@ func (s *Service) PostCharge(
 	refID *uuid.UUID,
 	idempKey *string,
 ) (*LedgerTransaction, error) {
+	return s.PostChargeTx(ctx, nil, walletID, amount, currency, description, refType, refID, idempKey)
+}
+
+// PostChargeTx posts a direct usage charge using an optional caller-provided pgx.Tx.
+// If dbTx is nil, a new transaction is begun and committed internally.
+func (s *Service) PostChargeTx(
+	ctx context.Context,
+	dbTx pgx.Tx,
+	walletID uuid.UUID,
+	amount decimal.Decimal,
+	currency, description string,
+	refType *string,
+	refID *uuid.UUID,
+	idempKey *string,
+) (*LedgerTransaction, error) {
 	amount = amount.Truncate(MoneyScale)
 	if amount.LessThanOrEqual(decimal.Zero) {
 		return nil, ErrNegativeAmount
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, walletID)
 	if err != nil {
@@ -1489,8 +1588,10 @@ func (s *Service) PostCharge(
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit charge: %w", err)
+	if dbTx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit charge: %w", err)
+		}
 	}
 
 	lt.Entries = entries

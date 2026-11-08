@@ -18,7 +18,7 @@ func NewRatingEngineAdapter(eng rating.Engine) *RatingEngineAdapter {
 	return &RatingEngineAdapter{engine: eng}
 }
 
-func (a *RatingEngineAdapter) LookupBuyRate(ctx context.Context, connectionID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID) (*RateLookupResult, error) {
+func (a *RatingEngineAdapter) LookupBuyRate(ctx context.Context, connectionID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID, at time.Time) (*RateLookupResult, error) {
 	if a.engine == nil {
 		return &RateLookupResult{Found: false}, nil
 	}
@@ -31,7 +31,11 @@ func (a *RatingEngineAdapter) LookupBuyRate(ctx context.Context, connectionID uu
 		return &RateLookupResult{Found: false}, nil
 	}
 
-	match, err := a.engine.LookupBuyRate(ctx, *conn.BuyCardID, countryID, operatorID, "default", time.Now().UTC())
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+
+	match, err := a.engine.LookupBuyRate(ctx, *conn.BuyCardID, countryID, operatorID, "default", at)
 	if err != nil {
 		return nil, err
 	}
@@ -45,11 +49,16 @@ func (a *RatingEngineAdapter) LookupBuyRate(ctx context.Context, connectionID uu
 	}, nil
 }
 
-func (a *RatingEngineAdapter) LookupSellRate(ctx context.Context, customerOrgID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID) (*RateLookupResult, error) {
+func (a *RatingEngineAdapter) LookupSellRate(ctx context.Context, customerOrgID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID, at time.Time) (*RateLookupResult, error) {
 	if a.engine == nil {
 		return &RateLookupResult{Found: false}, nil
 	}
-	match, err := a.engine.LookupSellRate(ctx, customerOrgID, countryID, operatorID, "default", time.Now().UTC())
+
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+
+	match, err := a.engine.LookupSellRate(ctx, customerOrgID, countryID, operatorID, "default", at)
 	if err != nil {
 		return nil, err
 	}

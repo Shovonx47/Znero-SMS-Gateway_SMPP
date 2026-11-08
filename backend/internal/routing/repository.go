@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("resource not found")
-	ErrConflict       = errors.New("resource conflict")
+	ErrNotFound        = errors.New("resource not found")
+	ErrConflict        = errors.New("resource conflict")
 	ErrVersionMismatch = errors.New("version mismatch")
 )
 
@@ -198,8 +198,10 @@ func (r *pgRepository) ListPlans(ctx context.Context, status string, page, pageS
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 100 {
+	if pageSize < 1 {
 		pageSize = 20
+	} else if pageSize > 5000 {
+		pageSize = 5000
 	}
 	offset := (page - 1) * pageSize
 
@@ -638,8 +640,10 @@ func (r *pgRepository) ListAssignments(ctx context.Context, customerOrgID *uuid.
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 100 {
+	if pageSize < 1 {
 		pageSize = 20
+	} else if pageSize > 5000 {
+		pageSize = 5000
 	}
 	offset := (page - 1) * pageSize
 
@@ -878,8 +882,10 @@ func (r *pgRepository) ListRules(ctx context.Context, status string, page, pageS
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 100 {
+	if pageSize < 1 {
 		pageSize = 20
+	} else if pageSize > 5000 {
+		pageSize = 5000
 	}
 	offset := (page - 1) * pageSize
 

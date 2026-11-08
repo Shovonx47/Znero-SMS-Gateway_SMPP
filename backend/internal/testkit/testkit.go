@@ -208,6 +208,7 @@ func OverridePermissions() map[string]bool {
 		"rate.margin.override",
 		"wallet.override", "wallet.approve",
 		"billing.invoice.issue", "billing.invoice.void", "billing.invoice.creditnote",
+		"routing.override", "routing.entry.override",
 		"routing.plan.approve", "routing.entry.approve", "routing.assignment.approve", "routing.rule.approve",
 	} {
 		m[c] = true

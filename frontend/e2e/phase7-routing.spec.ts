@@ -2,8 +2,8 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Phase 7: Routing Engine, Route Plans, Simulator & Kill Switch E2E', () => {
 	const adminEmail = process.env.TEST_ADMIN_EMAIL || 'dev-superadmin@dev.znero.test';
-	const makerEmail = process.env.TEST_MAKER_EMAIL || 'dev-maker@dev.znero.test';
-	const checkerEmail = process.env.TEST_CHECKER_EMAIL || 'dev-checker@dev.znero.test';
+	const makerEmail = process.env.TEST_ROUTING_MAKER_EMAIL || 'dev-routing-maker@dev.znero.test';
+	const checkerEmail = process.env.TEST_ROUTING_CHECKER_EMAIL || 'dev-routing-checker@dev.znero.test';
 	const resellerEmail = process.env.TEST_RESELLER_EMAIL || 'dev-reseller-admin@dev.znero.test';
 	const customerEmail = process.env.TEST_CUSTOMER_EMAIL || 'dev-customer-admin@dev.znero.test';
 	const password = process.env.TEST_ADMIN_PASSWORD || 'DevSeed1234!#';

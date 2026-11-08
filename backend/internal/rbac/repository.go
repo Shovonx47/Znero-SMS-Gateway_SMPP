@@ -289,7 +289,7 @@ func (r *pgRepository) SeedSystemRoles(ctx context.Context, tx pgx.Tx, orgID uui
 		}
 	}
 
-	// Platform maker/checker templates for master data (no override permission on purpose).
+	// Platform maker/checker templates for master data and routing (no override permission on purpose).
 	if orgType == "platform" {
 		for _, t := range []struct {
 			name, desc string
@@ -297,6 +297,8 @@ func (r *pgRepository) SeedSystemRoles(ctx context.Context, tx pgx.Tx, orgID uui
 		}{
 			{"Master Data Editor", "Maker: edits master data; every change is routed to a pending change request", platformMasterDataEditorCodes},
 			{"Master Data Approver", "Checker: reviews and approves or rejects master data change requests", platformMasterDataApproverCodes},
+			{"Routing Maker", "Maker: creates and edits route plans, entries, customer assignments, and routing rules; changes require approval", platformRoutingMakerCodes},
+			{"Routing Checker", "Checker: reviews and approves or rejects routing change requests and manages emergency kill switch", platformRoutingCheckerCodes},
 		} {
 			var codes []string
 			for _, code := range t.codes {

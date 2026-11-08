@@ -221,3 +221,42 @@ func TestSenderIDRegistryIntegration(t *testing.T) {
 		t.Fatalf("expected 3 history rows, got %d", len(hist))
 	}
 }
+
+func TestSenderID_CrossTenantIsolation(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+	senderRepo := senderid.NewRepository(e.Pool)
+	senderSvc := senderid.NewService(senderRepo, e.Audit, e.Approval)
+
+	resellerAOrg, resellerAPath := e.ChildOrg(e.PlatformOrgID, e.PlatformOrgPath, "sid-iso-res-a", "reseller")
+	resellerBOrg, resellerBPath := e.ChildOrg(e.PlatformOrgID, e.PlatformOrgPath, "sid-iso-res-b", "reseller")
+	custAOrg, custAPath := e.ChildOrg(resellerAOrg, resellerAPath, "sid-iso-cust-a", "customer")
+	custBOrg, custBPath := e.ChildOrg(resellerBOrg, resellerBPath, "sid-iso-cust-b", "customer")
+
+	custA := e.Actor("sid-iso-cust-a", custAOrg, custAPath, "customer", false, "customer.senderid.view", "customer.senderid.create")
+	custB := e.Actor("sid-iso-cust-b", custBOrg, custBPath, "customer", false, "customer.senderid.view", "customer.senderid.create")
+
+	sidA, err := senderSvc.Create(ctx, custA, senderid.CreateSenderIDRequest{
+		OrganizationID: custAOrg,
+		SenderID:       "ALPHAA",
+		SenderType:     "alphanumeric",
+		Reason:         "Cust A sender ID",
+	}, "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("create sender ID for Cust A: %v", err)
+	}
+
+	// Cust B cannot view Cust A's sender ID
+	_, err = senderSvc.Get(ctx, custB, sidA.ID)
+	if !errors.Is(err, senderid.ErrCrossTenantAccess) {
+		t.Fatalf("expected ErrCrossTenantAccess when Cust B views Cust A sender ID, got %v", err)
+	}
+
+	// Cust B cannot list Cust A's sender IDs
+	_, _, err = senderSvc.List(ctx, custB, senderid.ListFilter{
+		OrganizationID: &custAOrg,
+	})
+	if !errors.Is(err, senderid.ErrCrossTenantAccess) {
+		t.Fatalf("expected ErrCrossTenantAccess when Cust B lists Cust A sender IDs, got %v", err)
+	}
+}

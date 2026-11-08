@@ -127,3 +127,40 @@ func TestOrgHierarchyRules(t *testing.T) {
 		}
 	})
 }
+
+func TestOrg_TenantBoundaryCrossResellerIsolation(t *testing.T) {
+	rootID := uuid.New()
+	reseller1ID := uuid.New()
+	reseller2ID := uuid.New()
+	cust1ID := uuid.New()
+
+	rootPath := "/" + rootID.String() + "/"
+	res1Path := rootPath + reseller1ID.String() + "/"
+	res2Path := rootPath + reseller2ID.String() + "/"
+	cust1Path := res1Path + cust1ID.String() + "/"
+
+	reseller2TC := &tenant.Context{
+		ActorUserID:     uuid.New(),
+		ActorOrgID:      reseller2ID,
+		ActorOrgType:    "reseller",
+		ActorOrgPath:    res2Path,
+		IsPlatformAdmin: false,
+	}
+
+	// Reseller 2 cannot access Reseller 1's child customer
+	if reseller2TC.CanAccessOrg(cust1Path) {
+		t.Errorf("Reseller 2 must not have access to Reseller 1's customer path")
+	}
+
+	// Customer 1 cannot access Reseller 1 (parent)
+	cust1TC := &tenant.Context{
+		ActorUserID:     uuid.New(),
+		ActorOrgID:      cust1ID,
+		ActorOrgType:    "customer",
+		ActorOrgPath:    cust1Path,
+		IsPlatformAdmin: false,
+	}
+	if cust1TC.CanAccessOrg(res1Path) {
+		t.Errorf("Customer 1 must not have access to parent Reseller 1 path")
+	}
+}

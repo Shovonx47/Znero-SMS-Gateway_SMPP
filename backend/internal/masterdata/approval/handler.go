@@ -21,11 +21,25 @@ func NewHandler(svc *Service) *Handler {
 }
 
 func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
+	viewPerms := []string{
+		"country.country.view", "operator.operator.view", "number.prefix.view",
+		"provider.provider.view", "customer.profile.view", "wallet.wallet.view",
+		"routing.plan.view", "routing.entry.view", "routing.assignment.view", "routing.rule.view",
+	}
+	approvePerms := []string{
+		"country.country.approve", "operator.operator.approve", "number.prefix.approve", "number.rule.approve",
+		"import.job.approve",
+		"provider.provider.approve", "provider.connection.approve", "provider.coverage.approve",
+		"customer.profile.approve", "customer.senderid.approve",
+		"rate.buycard.approve", "rate.buyrate.approve", "rate.sellcard.approve", "rate.sellrate.approve", "rate.assignment.approve",
+		"wallet.approve", "billing.invoice.void",
+		"routing.plan.approve", "routing.entry.approve", "routing.assignment.approve", "routing.rule.approve", "routing.killswitch",
+	}
 	group := router.Group("/change-requests", authMiddleware)
-	group.Get("", rbac.RequireAnyPermission("country.country.view", "operator.operator.view", "number.prefix.view"), h.list)
-	group.Get("/:id", rbac.RequireAnyPermission("country.country.view", "operator.operator.view", "number.prefix.view"), h.get)
-	group.Post("/:id/approve", rbac.RequireAnyPermission("country.country.approve", "operator.operator.approve", "number.prefix.approve", "number.rule.approve"), h.approve)
-	group.Post("/:id/reject", rbac.RequireAnyPermission("country.country.approve", "operator.operator.approve", "number.prefix.approve", "number.rule.approve"), h.reject)
+	group.Get("", rbac.RequireAnyPermission(viewPerms...), h.list)
+	group.Get("/:id", rbac.RequireAnyPermission(viewPerms...), h.get)
+	group.Post("/:id/approve", rbac.RequireAnyPermission(approvePerms...), h.approve)
+	group.Post("/:id/reject", rbac.RequireAnyPermission(approvePerms...), h.reject)
 	group.Post("/:id/cancel", h.cancel)
 }
 

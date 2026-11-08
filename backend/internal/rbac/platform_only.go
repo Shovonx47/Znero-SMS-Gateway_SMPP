@@ -41,6 +41,11 @@ var platformOnlyExact = map[string]bool{
 	"rate.assignment.update":     true,
 	"rate.assignment.approve":    true,
 	"rate.assignment.override":   true,
+	"wallet.override":            true,
+	"wallet.approve":             true,
+	"billing.invoice.void":       true,
+	"billing.invoice.creditnote": true,
+	"ledger.reconcile":           true,
 }
 
 // customerForbiddenCodes lists permissions that a customer organization (orgType == "customer")
@@ -68,6 +73,12 @@ var customerForbiddenCodes = map[string]bool{
 	"rate.assignment.read":        true,
 	"rate.import.upload":          true,
 	"rate.import.confirm":         true,
+	"wallet.topup.create":         true,
+	"wallet.adjustment.create":    true,
+	"wallet.freeze":               true,
+	"billing.invoice.create":      true,
+	"billing.invoice.issue":       true,
+	"billing.payment.create":      true,
 }
 
 // IsPlatformOnlyPermission reports whether code may be held only by platform-organization roles.
@@ -117,11 +128,8 @@ var platformMasterDataEditorCodes = []string{
 	"rate.sellrate.create", "rate.sellrate.read", "rate.sellrate.update",
 	"rate.assignment.create", "rate.assignment.read", "rate.assignment.update",
 	"rate.margin.view", "rate.import.upload", "rate.import.confirm",
-	"routing.plan.view", "routing.plan.create", "routing.plan.edit", "routing.plan.activate", "routing.plan.deactivate", "routing.plan.archive",
-	"routing.entry.view", "routing.entry.create", "routing.entry.edit",
-	"routing.assignment.view", "routing.assignment.create", "routing.assignment.edit",
-	"routing.rule.view", "routing.rule.create", "routing.rule.edit", "routing.rule.activate",
-	"routing.simulate", "routing.snapshot.view",
+	"wallet.wallet.view", "wallet.topup.create", "wallet.adjustment.create",
+	"billing.invoice.create", "billing.invoice.view", "billing.payment.create", "ledger.view",
 }
 
 // platformMasterDataApproverCodes is the checker template: review change requests, read-only otherwise.
@@ -143,9 +151,31 @@ var platformMasterDataApproverCodes = []string{
 	"rate.sellrate.read", "rate.sellrate.approve",
 	"rate.assignment.read", "rate.assignment.approve",
 	"rate.margin.view",
+	"wallet.wallet.view", "wallet.approve", "billing.invoice.view", "billing.payment.view", "ledger.view",
+}
+
+// platformRoutingMakerCodes is the dedicated Routing Maker template: drafts and edits route plans,
+// entries, customer assignments, and routing rules. Strictly holds neither *.approve nor
+// routing.override / routing.entry.override.
+var platformRoutingMakerCodes = []string{
+	"routing.plan.view", "routing.plan.create", "routing.plan.edit", "routing.plan.activate", "routing.plan.deactivate", "routing.plan.archive",
+	"routing.entry.view", "routing.entry.create", "routing.entry.edit",
+	"routing.assignment.view", "routing.assignment.create", "routing.assignment.edit",
+	"routing.rule.view", "routing.rule.create", "routing.rule.edit", "routing.rule.activate",
+	"routing.simulate", "routing.snapshot.view",
+	"provider.provider.view", "provider.connection.view", "customer.profile.view",
+	"country.country.view", "operator.operator.view",
+}
+
+// platformRoutingCheckerCodes is the dedicated Routing Checker template: approves or rejects routing
+// change requests and manages kill-switch overrides. Strictly holds neither routing.override nor
+// routing.entry.override.
+var platformRoutingCheckerCodes = []string{
 	"routing.plan.view", "routing.plan.approve",
 	"routing.entry.view", "routing.entry.approve",
 	"routing.assignment.view", "routing.assignment.approve",
-	"routing.rule.view", "routing.rule.approve",
+	"routing.rule.view", "routing.rule.approve", "routing.rule.activate",
 	"routing.simulate", "routing.snapshot.view", "routing.killswitch",
+	"provider.provider.view", "provider.connection.view", "customer.profile.view",
+	"country.country.view", "operator.operator.view",
 }

@@ -27,18 +27,20 @@ const (
 )
 
 type RoutePlan struct {
-	ID          uuid.UUID        `json:"id"`
-	Name        string           `json:"name"`
-	Code        string           `json:"code"`
-	Description string           `json:"description"`
-	Strategy    Strategy         `json:"strategy"`
-	Status      PlanStatus       `json:"status"`
-	Notes       string           `json:"notes"`
-	CreatedBy   uuid.UUID        `json:"created_by"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
-	Version     int              `json:"version"`
-	Entries     []RoutePlanEntry `json:"entries,omitempty"`
+	ID            uuid.UUID        `json:"id"`
+	Name          string           `json:"name"`
+	Code          string           `json:"code"`
+	Description   string           `json:"description"`
+	Strategy      Strategy         `json:"strategy"`
+	Status        PlanStatus       `json:"status"`
+	EffectiveFrom *time.Time       `json:"effective_from,omitempty"`
+	EffectiveTo   *time.Time       `json:"effective_to,omitempty"`
+	Notes         string           `json:"notes"`
+	CreatedBy     uuid.UUID        `json:"created_by"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+	Version       int              `json:"version"`
+	Entries       []RoutePlanEntry `json:"entries,omitempty"`
 }
 
 type RoutePlanHistory struct {
@@ -66,6 +68,8 @@ type RoutePlanEntry struct {
 	AllowedSenderIDTypes    []string         `json:"allowed_sender_id_types"`
 	DestinationNumberFormat string           `json:"destination_number_format"`
 	AllowTestedCoverage     bool             `json:"allow_tested_coverage"`
+	EffectiveFrom           *time.Time       `json:"effective_from,omitempty"`
+	EffectiveTo             *time.Time       `json:"effective_to,omitempty"`
 	Status                  string           `json:"status"` // active|disabled
 	Version                 int              `json:"version"`
 	CreatedAt               time.Time        `json:"created_at"`
@@ -231,6 +235,7 @@ type ResolveRequest struct {
 	SenderID        string      `json:"sender_id,omitempty"`
 	ExcludeIDs      []uuid.UUID `json:"exclude_ids,omitempty"`     // for Next() / failover
 	Exclusions      []uuid.UUID `json:"exclusions,omitempty"`     // alias for ExcludeIDs
+	Timestamp       *time.Time  `json:"timestamp,omitempty"`      // evaluation timestamp for dynamic rate freshness
 }
 
 type ExclusionReason struct {
@@ -241,17 +246,19 @@ type ExclusionReason struct {
 }
 
 type Candidate struct {
-	ConnectionID      uuid.UUID       `json:"connection_id"`
-	ConnectionName    string          `json:"connection_name,omitempty"`
-	ProviderID        uuid.UUID       `json:"provider_id,omitempty"`
-	Priority          int             `json:"priority"`
-	Weight            int             `json:"weight"`
-	Cost              decimal.Decimal `json:"cost,omitempty"`
-	Rank              int             `json:"rank,omitempty"`
-	Reason            string          `json:"reason,omitempty"`
-	EstimatedBuyRate  decimal.Decimal `json:"estimated_buy_rate"`
-	EstimatedSellRate decimal.Decimal `json:"estimated_sell_rate"`
-	CurrencyCode      string          `json:"currency_code"`
+	ConnectionID            uuid.UUID       `json:"connection_id"`
+	ConnectionName          string          `json:"connection_name,omitempty"`
+	ProviderID              uuid.UUID       `json:"provider_id,omitempty"`
+	Priority                int             `json:"priority"`
+	Weight                  int             `json:"weight"`
+	Cost                    decimal.Decimal `json:"cost,omitempty"`
+	Rank                    int             `json:"rank,omitempty"`
+	Reason                  string          `json:"reason,omitempty"`
+	EstimatedBuyRate        decimal.Decimal `json:"estimated_buy_rate"`
+	EstimatedSellRate       decimal.Decimal `json:"estimated_sell_rate"`
+	CurrencyCode            string          `json:"currency_code"`
+	DestinationNumberFormat string          `json:"destination_number_format,omitempty"`
+	FormattedDestination    string          `json:"formatted_destination,omitempty"`
 }
 
 type ResolveResult struct {
@@ -279,6 +286,7 @@ type SimulateRequest struct {
 	SenderIDType      string     `json:"sender_id_type"`
 	SenderIDValue     string     `json:"sender_id_value,omitempty"`
 	SenderID          string     `json:"sender_id,omitempty"`
+	Timestamp         *time.Time `json:"timestamp,omitempty"`
 }
 
 type SimulateResult struct {
@@ -304,6 +312,6 @@ type RateLookupResult struct {
 }
 
 type RaterInterface interface {
-	LookupBuyRate(ctx context.Context, connectionID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID) (*RateLookupResult, error)
-	LookupSellRate(ctx context.Context, customerOrgID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID) (*RateLookupResult, error)
+	LookupBuyRate(ctx context.Context, connectionID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID, at time.Time) (*RateLookupResult, error)
+	LookupSellRate(ctx context.Context, customerOrgID uuid.UUID, countryID uuid.UUID, operatorID *uuid.UUID, at time.Time) (*RateLookupResult, error)
 }

@@ -60,3 +60,33 @@ func TestTenantContextScoping(t *testing.T) {
 		t.Fatalf("Context roundtrip failed: %v", err)
 	}
 }
+
+func TestTenantContext_PermissionChecksAndCustomerIsolation(t *testing.T) {
+	custID := uuid.New()
+	custCtx := &tenant.Context{
+		ActorUserID:  uuid.New(),
+		ActorOrgID:   custID,
+		ActorOrgType: "customer",
+		Permissions: map[string]bool{
+			"customer.apikey.view": true,
+			"wallet.wallet.view":   true,
+		},
+	}
+
+	// Permission checks
+	if !custCtx.HasPermission("customer.apikey.view") {
+		t.Error("expected HasPermission to return true for customer.apikey.view")
+	}
+	if custCtx.HasPermission("provider.provider.view") {
+		t.Error("expected HasPermission to return false for unheld permission")
+	}
+	if custCtx.IsPlatformOrg() {
+		t.Error("customer must not be platform org")
+	}
+
+	// Missing context error
+	_, err := tenant.FromContext(context.Background())
+	if err == nil {
+		t.Error("expected error when context lacks tenant")
+	}
+}

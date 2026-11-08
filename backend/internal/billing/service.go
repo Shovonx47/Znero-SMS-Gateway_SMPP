@@ -444,18 +444,18 @@ func (s *Service) executeVoid(
 			return err
 		}
 
-		var actorOrgIDPtr *uuid.UUID
+		var actorOrg *uuid.UUID
 		if actorOrgID != uuid.Nil {
-			actorOrgIDPtr = &actorOrgID
+			actorOrg = &actorOrgID
 		}
-		var actorUserIDPtr *uuid.UUID
+		var actorUser *uuid.UUID
 		if actorUserID != uuid.Nil {
-			actorUserIDPtr = &actorUserID
+			actorUser = &actorUserID
 		}
 
-		_ = s.auditSvc.Record(ctx, tx, audit.Entry{
-			ActorUserID: actorUserIDPtr,
-			ActorOrgID:  actorOrgIDPtr,
+		if err := s.auditSvc.Record(ctx, tx, audit.Entry{
+			ActorUserID: actorUser,
+			ActorOrgID:  actorOrg,
 			TargetOrgID: &inv.CustomerOrgID,
 			Action:      "billing.invoice.void",
 			Module:      "billing",
@@ -464,7 +464,9 @@ func (s *Service) executeVoid(
 			Reason:      reason,
 			IPAddress:   ip,
 			UserAgent:   userAgent,
-		})
+		}); err != nil {
+			return fmt.Errorf("record void audit: %w", err)
+		}
 		return nil
 	}
 
@@ -1012,5 +1014,12 @@ func (a *voidInvoiceApplier) ApplyChange(ctx context.Context, tx pgx.Tx, cr *app
 		return fmt.Errorf("unmarshal void request: %w", err)
 	}
 
-	return a.s.executeVoid(ctx, tx, cr.MakerUserID, uuid.Nil, payload.InvoiceID, payload.Reason, payload.IPAddress, payload.UserAgent)
+	var checkerID uuid.UUID
+	if cr.CheckerUserID != nil {
+		checkerID = *cr.CheckerUserID
+	} else {
+		checkerID = cr.MakerUserID
+	}
+
+	return a.s.executeVoid(ctx, tx, checkerID, uuid.Nil, payload.InvoiceID, payload.Reason, payload.IPAddress, payload.UserAgent)
 }

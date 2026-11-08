@@ -58,6 +58,22 @@ var devAccounts = []DevSeedUser{
 		Description: "[DEV FAKE] Platform Checker account for dual-control approval testing",
 	},
 	{
+		Email:       "dev-routing-maker" + devSeedDomain,
+		Password:    "DevSeed1234!#",
+		OrgName:     "Znero International Platform",
+		OrgType:     "platform",
+		RoleName:    "Routing Maker",
+		Description: "[DEV FAKE] Platform Routing Maker account (no override or approve) for routing dual-control testing",
+	},
+	{
+		Email:       "dev-routing-checker" + devSeedDomain,
+		Password:    "DevSeed1234!#",
+		OrgName:     "Znero International Platform",
+		OrgType:     "platform",
+		RoleName:    "Routing Checker",
+		Description: "[DEV FAKE] Platform Routing Checker account for routing approval and kill-switch testing",
+	},
+	{
 		Email:       "dev-reseller-admin" + devSeedDomain,
 		Password:    "DevSeed1234!#",
 		OrgName:     "Apex Wholesale Telecom (Dev)",
@@ -395,18 +411,26 @@ func syncOrgSystemRoles(ctx context.Context, tx pgx.Tx, rbacRepo rbac.Repository
 
 func ensureMakerCheckerRoles(ctx context.Context, tx pgx.Tx, platformOrgID uuid.UUID) error {
 	makerPerms := []string{
-		"country.country.view", "country.country.create", "country.country.edit", "country.country.deactivate",
-		"operator.operator.view", "operator.operator.create", "operator.operator.edit", "operator.operator.deactivate",
-		"number.prefix.view", "number.prefix.create", "number.prefix.edit", "number.prefix.deactivate",
+		"country.country.view", "country.country.create", "country.country.edit", "country.country.deactivate", "country.country.archive", "country.country.import",
+		"operator.operator.view", "operator.operator.create", "operator.operator.edit", "operator.operator.deactivate", "operator.operator.archive", "operator.operator.import",
+		"number.prefix.view", "number.prefix.create", "number.prefix.edit", "number.prefix.deactivate", "number.prefix.archive", "number.prefix.import",
 		"number.lookup.use", "number.rule.view", "number.rule.create", "number.rule.edit", "number.rule.delete",
-		"import.job.view", "import.job.create", "import.job.confirm", "import.job.rollback",
-		"provider.provider.view", "provider.provider.create", "provider.provider.edit",
-		"provider.connection.view", "provider.connection.create", "provider.connection.edit", "provider.connection.secret.update", "provider.connection.status",
-		"provider.coverage.view", "provider.coverage.create", "provider.coverage.edit",
+		"import.job.view", "import.job.manage", "import.job.create", "import.job.confirm", "import.job.rollback",
+		"provider.provider.view", "provider.provider.create", "provider.provider.edit", "provider.provider.status", "provider.provider.archive",
+		"provider.connection.view", "provider.connection.create", "provider.connection.edit", "provider.connection.secret.update", "provider.connection.status", "provider.connection.archive",
+		"provider.coverage.view", "provider.coverage.create", "provider.coverage.edit", "provider.coverage.status", "provider.coverage.archive", "provider.coverage.import",
 		"customer.profile.view", "customer.profile.create", "customer.profile.edit",
 		"customer.apikey.view", "customer.apikey.create", "customer.apikey.revoke", "customer.apikey.rotate",
 		"customer.smppaccount.view", "customer.smppaccount.create", "customer.smppaccount.edit", "customer.smppaccount.revoke",
-		"customer.senderid.view", "customer.senderid.create", "customer.senderid.edit",
+		"customer.senderid.view", "customer.senderid.create", "customer.senderid.edit", "customer.senderid.import",
+		"rate.buycard.create", "rate.buycard.read", "rate.buycard.update", "rate.buycard.archive",
+		"rate.buyrate.create", "rate.buyrate.read", "rate.buyrate.update",
+		"rate.sellcard.create", "rate.sellcard.read", "rate.sellcard.update", "rate.sellcard.archive",
+		"rate.sellrate.create", "rate.sellrate.read", "rate.sellrate.update",
+		"rate.assignment.create", "rate.assignment.read", "rate.assignment.update",
+		"rate.margin.view", "rate.import.upload", "rate.import.confirm",
+		"wallet.wallet.view", "wallet.topup.create", "wallet.adjustment.create",
+		"billing.invoice.create", "billing.invoice.view", "billing.payment.create", "ledger.view",
 	}
 	checkerPerms := []string{
 		"country.country.view", "country.country.approve",
@@ -420,12 +444,44 @@ func ensureMakerCheckerRoles(ctx context.Context, tx pgx.Tx, platformOrgID uuid.
 		"customer.profile.view", "customer.profile.approve",
 		"customer.apikey.view", "customer.smppaccount.view",
 		"customer.senderid.view", "customer.senderid.approve",
+		"rate.buycard.read", "rate.buycard.approve",
+		"rate.buyrate.read", "rate.buyrate.approve",
+		"rate.sellcard.read", "rate.sellcard.approve",
+		"rate.sellrate.read", "rate.sellrate.approve",
+		"rate.assignment.read", "rate.assignment.approve",
+		"rate.margin.view",
+		"wallet.wallet.view", "wallet.approve", "billing.invoice.view", "billing.payment.view", "ledger.view",
 	}
 
 	if err := upsertSystemRole(ctx, tx, platformOrgID, "Master Data Editor", "Maker role without override or approve permissions", makerPerms); err != nil {
 		return err
 	}
 	if err := upsertSystemRole(ctx, tx, platformOrgID, "Master Data Approver", "Checker role with approve permissions", checkerPerms); err != nil {
+		return err
+	}
+
+	routingMakerPerms := []string{
+		"routing.plan.view", "routing.plan.create", "routing.plan.edit", "routing.plan.activate", "routing.plan.deactivate", "routing.plan.archive",
+		"routing.entry.view", "routing.entry.create", "routing.entry.edit",
+		"routing.assignment.view", "routing.assignment.create", "routing.assignment.edit",
+		"routing.rule.view", "routing.rule.create", "routing.rule.edit", "routing.rule.activate",
+		"routing.simulate", "routing.snapshot.view",
+		"provider.provider.view", "provider.connection.view", "customer.profile.view",
+		"country.country.view", "operator.operator.view",
+	}
+	routingCheckerPerms := []string{
+		"routing.plan.view", "routing.plan.approve",
+		"routing.entry.view", "routing.entry.approve",
+		"routing.assignment.view", "routing.assignment.approve",
+		"routing.rule.view", "routing.rule.approve", "routing.rule.activate",
+		"routing.simulate", "routing.snapshot.view", "routing.killswitch",
+		"provider.provider.view", "provider.connection.view", "customer.profile.view",
+		"country.country.view", "operator.operator.view",
+	}
+	if err := upsertSystemRole(ctx, tx, platformOrgID, "Routing Maker", "Maker: creates and edits route plans, entries, customer assignments, and routing rules; changes require approval", routingMakerPerms); err != nil {
+		return err
+	}
+	if err := upsertSystemRole(ctx, tx, platformOrgID, "Routing Checker", "Checker: reviews and approves or rejects routing change requests and manages emergency kill switch", routingCheckerPerms); err != nil {
 		return err
 	}
 	return nil

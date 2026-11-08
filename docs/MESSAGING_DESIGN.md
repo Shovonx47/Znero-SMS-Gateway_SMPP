@@ -1,0 +1,446 @@
+# Znero International — Messaging Engine Architecture & Design Specification (Phase 8A)
+
+---
+
+## 1. Executive Summary & Purpose
+
+Phase 8 implements the high-throughput, carrier-grade SMS messaging pipeline for Znero International. Phase 8A focuses on the **submission pipeline, transactional outbox, asynchronous dispatching, state machine, failover controls, SMPP protocol interfacing, and financial double-entry settlement**.
+
+This document defines the authoritative architecture, end-to-end processing pipeline, state machine transitions, error handling policies, settlement workflows, database models, and operational runbooks for the messaging engine.
+
+---
+
+## 2. Core Architectural Principles
+
+1. **Atomic Ingestion & Funds Reservation**:
+   Every message submission executes within a single PostgreSQL transaction that simultaneously inserts the canonical message record, writes the transactional outbox entry, and reserves customer funds via double-entry balance hold (`ledger.Service.PlaceHoldTx`). A failure in any component rolls back the entire submission, ensuring zero unreserved message dispatches and zero ghost holds.
+2. **Deterministic & Explainable Routing**:
+   Routing decisions are produced by the Phase 7 in-memory routing engine (`routing.Engine.Resolve`), evaluating hard eligibility filters, kill-switch status, provider coverage, dynamic rate sheets, and margin thresholds in ~12 µs without per-message database I/O.
+3. **Ambiguous Outcomes (`unknown`) & The Never-Auto-Resend Rule**:
+   Telecommunications network splits, downstream TCP socket drops, and upstream provider drops without a definitive `submit_sm_resp` produce an `unknown` state. **The engine strictly prohibits automatic failover or resending on ambiguous outcomes** to prevent catastrophic duplicate message delivery and duplicate customer billing.
+4. **Separation of Reaper Duties**:
+   Hold duration must exceed message validity TTL plus the unknown-resolution window. The general ledger `ExpireOldHolds` job is prohibited from releasing holds linked to non-final messages (`reference_type = 'message'`); the **Messaging Reaper** is the sole authority permitted to resolve non-final message holds.
+5. **Decoupled Asynchronous Dispatch**:
+   Client ingestion (`HTTP POST /api/v1/messages` and SMPP server `submit_sm`) is decoupled from upstream carrier dispatch via a transactional outbox and Apache Kafka partitions, ensuring sustained client throughput regardless of carrier latency or transient provider throttles.
+
+---
+
+## 3. High-Level Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph Ingestion["Ingestion Layer"]
+        HTTP[HTTP Client / API] --> Auth[API Key & Context Auth]
+        SMPP_In[Customer SMPP Bind] --> Auth
+    end
+
+    subgraph Pipeline["Ingestion & Validation Pipeline"]
+        Auth --> Norm[Normalize Destination to E.164]
+        Norm --> RateLimit[Velocity & Rate Limit Check]
+        RateLimit --> SID[Sender ID Verification]
+        SID --> Rating[Resolve Customer Sell Rate]
+        Rating --> Routing[Route Engine Resolve & Filter]
+    end
+
+    subgraph DB_Tx["Single Atomic PostgreSQL Transaction"]
+        Routing --> Hold[ledger.PlaceHoldTx: Reserve Funds]
+        Hold --> MsgInsert[Insert messages Row: 'accepted']
+        MsgInsert --> Outbox[Insert message_outbox Row]
+    end
+
+    DB_Tx --> ClientResp[Return 202 Accepted + message_id]
+
+    subgraph Dispatch["Asynchronous Dispatch & Outbox"]
+        Outbox --> OutboxPoller[Transactional Outbox Publisher]
+        OutboxPoller --> Kafka[Kafka Topic: sms.outbound]
+        Kafka --> WorkerPool[Carrier Dispatch Workers]
+    end
+
+    subgraph Upstream["Carrier Egress"]
+        WorkerPool --> SMPP_Client[SMPP Transceiver Session]
+        SMPP_Client --> Carrier[Upstream Mobile Operator / Aggregator]
+    end
+
+    subgraph Feedback["Feedback & Settlement"]
+        Carrier --> DLR[SMPP deliver_sm: DLR Receipt]
+        DLR --> DLRProcessor[DLR Ingestion & Matching]
+        DLRProcessor --> StateMachine[Message State Transition]
+        StateMachine --> Settlement[ledger.CaptureTx / ReleaseTx]
+    end
+```
+
+---
+
+## 4. End-to-End Submission Pipeline (Phase 8A)
+
+Every outbound message traverses the following sequential stages:
+
+```
+[1. Auth & Context] 
+       │
+[2. Velocity & Rate Limits] 
+       │
+[3. Number Normalization & E.164 Intelligence] 
+       │
+[4. Sender ID Policy & Commercial Profile Gating] 
+       │
+[5. Rating Engine: Sell Rate Resolution] 
+       │
+[6. Routing Engine: Plan, Strategy & Egress Resolution] 
+       │
+[7. Atomic DB Tx: PlaceHoldTx + Message Insert + Outbox] 
+       │
+[8. Synchronous 202 Accepted Response to Client]
+```
+
+### Detailed Pipeline Stages
+
+1. **Authentication & Tenant Scoping**:
+   - HTTP requests authenticate via `Authorization: Bearer <api_key>` (checked via `customer.Service.AuthenticateAPIKey`).
+   - Customer SMPP accounts authenticate via `system_id` and Argon2id password hash (`customer.Service.AuthenticateSMPPAccount`).
+   - Tenant context (`tenant.Context`) is resolved, enforcing leaf organization boundary and active commercial profile status.
+2. **Velocity & Throttling Enforcement**:
+   - In-memory token bucket verifies per-customer submission rate limits (e.g. 50 msg/sec default) and system-wide IP velocity rules.
+   - Breaches immediately return `429 Too Many Requests` without touching PostgreSQL.
+3. **Destination Number Normalization & Intelligence**:
+   - `number.NormalizeToE164(dest, defaultCallingCode)` validates E.164 compliance (7–15 digits, international dialing format).
+   - In-memory prefix trie resolves country ISO2, operator ID, and national destination code. Non-E.164 numbers are unconditionally rejected with `400 Bad Request` (`invalid_number`).
+4. **Sender ID Verification & Commercial Policy**:
+   - Validates that the requested `sender_id` is registered and approved for this customer organization (`senderid.Service.ValidateSenderIDForCustomer`).
+   - Matches sender ID type (`alphanumeric`, `numeric`, `shortcode`) against destination country regulatory policy and customer profile allowed countries.
+5. **Rating Engine (Customer Sell Rate)**:
+   - Evaluates customer sell rate sheet via Phase 5 Rating Engine (`rating.Engine.ResolveCustomerSellRate`).
+   - Verifies effective date window (`effective_from <= now < effective_to`).
+   - Determines exact decimal message unit price (`shopspring/decimal`, `NUMERIC(18,6)`). If no sell rate exists, message is rejected with `422 Unprocessable Entity` (`missing_sell_rate`).
+6. **Routing Engine Decision (Primary & Fallback Candidate Selection)**:
+   - Invokes `routing.Engine.Resolve` using the immutable in-memory snapshot.
+   - Evaluates hard filters: provider active status, egress connection active status, emergency kill-switch override, provider country/operator coverage (tested coverage gating), and sender ID type compliance.
+   - Compares customer sell rate against provider buy rate to verify minimum margin (`margin_percent >= min_margin`).
+   - Sorts eligible candidates according to route plan strategy (`priority`, `least_cost` with exact decimal tie-breaking, or `weighted` split).
+   - Returns ordered fallback list of connections (`Candidates[0]` = primary, `Candidates[1..N]` = fallback routes).
+7. **Atomic PostgreSQL Transaction (`PlaceHoldTx` + Message + Outbox)**:
+   - A single PostgreSQL transaction (`tx, _ := pool.Begin(ctx)`) executes:
+     1. `ledger.Service.PlaceHoldTx`: Pre-funds the message by placing an active balance hold for `customer_sell_rate` on the customer's wallet. (Prepaid wallets check `AvailableBalance >= amount`; postpaid wallets enforce `CachedBalance + CreditLimit - ActiveHolds >= amount`).
+     2. `messages` row insert: Stores message metadata, normalized destination, assigned routes, sell price, estimated buy cost, and initial status `accepted`.
+     3. `message_outbox` row insert: Enqueues message payload for asynchronous dispatcher.
+   - On commit, the transaction guarantees strict atomicity.
+8. **Client Response**:
+   - HTTP API responds with `202 Accepted`:
+     ```json
+     {
+       "message_id": "7f8b9c2a-3d4e-4f5a-8b6c-1d2e3f4a5b6c",
+       "status": "accepted",
+       "destination": "+12025550199",
+       "parts": 1,
+       "currency": "USD",
+       "price": "0.0050",
+       "created_at": "2026-11-08T02:00:00Z"
+     }
+     ```
+
+---
+
+## 5. Message Lifecycle & State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> accepted: Ingested & Hold Placed (Atomic Tx)
+    accepted --> queued: Outbox Picked Up / Kafka Produced
+    queued --> submitting: Worker Sends submit_sm to Carrier
+    
+    submitting --> submitted: submit_sm_resp OK (Carrier Accepted)
+    submitting --> unknown: Socket Timeout / Network Drop (Ambiguous)
+    submitting --> failed: Hard Upstream Reject / All Routes Exhausted
+    
+    submitted --> delivered: DLR stat=DELIVRD (Capture Money)
+    submitted --> failed: DLR stat=UNDELIV/REJECTD (Release Money)
+    submitted --> expired: DLR stat=EXPIRED / Validity Expired
+    
+    unknown --> failed: Reconciled or Reaper Timeout (Release Money)
+    
+    delivered --> [*]
+    failed --> [*]
+    expired --> [*]
+```
+
+### State Machine Transition Rules & Invariants
+
+| From State | To State | Trigger Event | Financial Action | Allowed Next Actions |
+| :--- | :--- | :--- | :--- | :--- |
+| `[*]` | `accepted` | Ingestion pipeline commits atomic transaction | Hold placed on customer wallet (`PlaceHoldTx`) | Enqueue to dispatcher |
+| `accepted` | `queued` | Outbox publisher pushes to dispatch topic | None | Worker pickup |
+| `queued` | `submitting` | Carrier worker claims message and initiates TCP submit | None | Upstream dispatch |
+| `submitting` | `submitted` | Upstream carrier returns `submit_sm_resp` with `command_status == 0` | If trigger is `on_provider_accept`, capture hold (`CaptureTx`); otherwise hold remains | Await DLR receipt |
+| `submitting` | `submitting` (failover) | Primary carrier returns retryable reject (`ESME_RSYSERR`, `ESME_RTHROTTLED`) | None | Call `routing.Next`, attempt fallback route |
+| `submitting` | `failed` | All eligible fallback routes rejected, or non-retryable fatal error | Release hold on customer wallet (`ReleaseTx`) | Terminal state |
+| `submitting` | `unknown` | Socket read timeout, TCP reset, or provider disconnect before response | **HOLD RETAINED**. NEVER auto-resend | Await reconciliation or reaper |
+| `submitted` | `delivered` | Carrier DLR received with `stat:DELIVRD` | Capture hold on customer wallet (`CaptureTx`) | Terminal state |
+| `submitted` | `failed` | Carrier DLR received with `stat:UNDELIV`, `stat:REJECTD` | Release hold on customer wallet (`ReleaseTx`) | Terminal state |
+| `submitted` | `expired` | Carrier DLR received with `stat:EXPIRED` or validity period elapsed | Release hold on customer wallet (`ReleaseTx`) | Terminal state |
+| `unknown` | `delivered` | Out-of-band query / late DLR confirms delivery | Capture hold on customer wallet (`CaptureTx`) | Terminal state |
+| `unknown` | `failed` | Out-of-band query or Messaging Reaper confirms non-delivery | Release hold on customer wallet (`ReleaseTx`) | Terminal state |
+
+---
+
+## 6. The "Never Auto-Resend" Rule & Ambiguous Outcomes
+
+### The Ambiguity Problem
+When an SMPP client transmits a `submit_sm` PDU over TCP, the transport layer sends packets downstream to the carrier SMSC. If the TCP connection terminates, resets, or times out before receiving the `submit_sm_resp` packet:
+- The SMSC **may have accepted** the message and submitted it to the mobile operator network.
+- The SMSC **may have failed** before queuing the message.
+- The client cannot know which outcome occurred from the socket state alone.
+
+### Invariant & Safety Controls
+1. **Never Auto-Resend**:
+   Under no circumstances may the messaging dispatcher automatically failover to a secondary carrier or retransmit the PDU on the same connection when encountering a socket timeout or disconnect during `submitting`. Retransmission risks **duplicate SMS delivery to the handset and duplicate carrier charges**.
+2. **Immediate Transition to `unknown`**:
+   The message state transitions immediately to `unknown` with `failure_reason = "carrier socket timeout during submit_sm; delivery unconfirmed"`.
+3. **Hold Retention**:
+   The customer's balance hold remains reserved and active throughout the unknown-resolution window. Funds are neither captured nor released until authoritative confirmation is obtained.
+4. **Resolution Paths**:
+   - **Late DLR**: The carrier subsequently delivers the message and emits a `deliver_sm` DLR matching the destination and timestamp, transitioning the message to `delivered` and triggering `CaptureTx`.
+   - **Messaging Reaper**: After the unknown-resolution window expires (e.g. 60 minutes) without a DLR, the Messaging Reaper marks the message `failed` and safely releases the hold via `ReleaseTx`.
+
+---
+
+## 7. Failover Policies (Route Switching)
+
+Failover is executed exclusively via Phase 7's deterministic engine:
+`routing.Engine.Next(ctx, req, failedConnectionIDs []uuid.UUID) (*Candidate, error)`
+
+### Strict Failover Principle & Preconditions
+> [!IMPORTANT]
+> **Failover happens ONLY after a DEFINITIVE provider response classified as retryable on another route** (for example throttled, queue full, system error).
+> - **Permanent failures** (invalid destination, invalid source, unallocated number, barred account) do NOT fail over. They terminate immediately as `failed`.
+> - **Ambiguous outcomes** (socket timeout, dropped connection, network partition, crash after sending, no response) are classified as `unknown` and are **NEVER resent or failed over**.
+> - Prior wording referencing "pre-submission rejections" is explicitly superseded: failover occurs post-submission only when the provider returns a definitive, retryable negative acknowledgment.
+
+### Failover Eligibility Rules
+
+| Scenario | Failover Permitted? | Engine Behavior |
+| :--- | :---: | :--- |
+| Upstream connection offline or bind down | **YES** | Add primary connection ID to `failedConnectionIDs`, call `Next()`, dispatch to fallback candidate. |
+| Carrier returns definitive retryable error (`ESME_RTHROTTLED`, `ESME_RMSGQFUL`, `ESME_RSYSERR`) | **YES** | Record upstream error code, add connection to `failedConnectionIDs`, call `Next()`, retry on fallback up to max attempts. |
+| Carrier returns definitive permanent error (`ESME_RINVPASWD`, `ESME_RINVDSTADR`, `ESME_RINVSYSID`) | **NO** | Mark message `failed`, release hold. Retrying on another carrier for bad destination number is disallowed. |
+| Ambiguous network timeout / socket drop (`unknown`) | **STRICTLY PROHIBITED** | Retaining hold, status set to `unknown`. Zero failover attempts; never auto-resend. |
+| Carrier returns `submit_sm_resp OK`, followed later by DLR `UNDELIV` | **NO** | Handset-level failure cannot be automatically rerouted after successful submission. Message is marked `failed`. |
+
+---
+
+## 8. Financial Settlement Matrix & Billing Triggers
+
+Financial settlement is strictly coupled to double-entry bookkeeping in `backend/internal/ledger`.
+
+### Customer Billing Trigger Decision Matrix
+
+| Model | Description | Pre-Funding | On Provider Accept (`submit_sm_resp OK`) | On Terminal Delivery (`DELIVRD` DLR) | On Terminal Failure (`UNDELIV` / `REJECTD`) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`on_delivery`** *(Default)* | Customer pays only for confirmed handset delivery. | Hold placed for sell rate (`PlaceHoldTx`) | Hold remains active; buy cost ledger transaction logged | Hold captured (`CaptureTx`) -> `CUSTOMER_FUNDS` debited, `PLATFORM_REVENUE` credited | Hold released (`ReleaseTx`) -> available balance restored |
+| **`on_provider_accept`** | Customer pays once carrier accepts responsibility for submission. | Hold placed for sell rate (`PlaceHoldTx`) | Hold captured (`CaptureTx`) -> customer billed immediately | No financial change; customer already billed | If customer contract permits refund on DLR fail, discretionary credit issued |
+
+### Upstream Carrier Cost Settlement (Buy Cost)
+- Upstream carrier buy cost is settled based on provider contracts (typically charged upon carrier acceptance, regardless of handset delivery).
+- Upon `submit_sm_resp OK`, the dispatcher logs an estimated buy cost liability in the internal operational ledger:
+  - Debit: `COST_OF_GOODS_SOLD`
+  - Credit: `ACCOUNTS_PAYABLE_CARRIER_<PROVIDER_ID>`
+
+---
+
+## 9. Hold Expiry vs Message Validity & Reaper Governance
+
+### The Expiry Inequality Invariant & Configurable Settings
+To prevent premature hold release while a message is in flight or awaiting carrier DLR, the system enforces the following mathematical hierarchy:
+
+$$\text{hold\_expiry} > \text{message\_ttl} + \text{unknown\_resolution\_window}$$
+
+All three parameters are configurable platform settings stored in `system_settings`:
+- **`messaging.message_ttl`** (default: `24h` / `86400s`): Maximum lifetime of an uncompleted message before expiration.
+- **`messaging.unknown_resolution_window`** (default: `24h` / `86400s`): Duration an ambiguous message remains in `unknown` awaiting late carrier resolution before reaper intervention.
+- **`messaging.hold_expiry`** (default: `72h` / `259200s`): Lifetime of a customer balance reservation before ledger expiry.
+
+### Startup Validation (Refuse Invalid Settings)
+At engine initialization and service boot time, configuration validation strictly tests the inequality:
+```go
+if holdExpiry <= messageTTL + unknownResolutionWindow {
+    return fmt.Errorf("invalid hold configuration: hold_expiry (%v) must exceed message_ttl (%v) + unknown_resolution_window (%v)", holdExpiry, messageTTL, unknownResolutionWindow)
+}
+```
+If an administrator or configuration misconfigures these values (e.g. `hold_expiry = 24h` while `ttl = 24h`), the application **refuses to start**, preventing any risk of unbacked message dispatches or prematurely released customer holds.
+
+### Separation of Duties Between Reapers
+
+```mermaid
+flowchart LR
+    subgraph GeneralLedger["Ledger Expiry Engine (backend/cmd/expireholds)"]
+        H1[Holds with reference_type != 'message'] --> CheckExp{Expired?}
+        CheckExp -- Yes --> ExpireHold[Expire Hold & Restore Balance]
+        H2[Holds with reference_type == 'message'] --> SkipHold[SKIPPED / PROHIBITED]
+    end
+
+    subgraph MessagingReaper["Messaging Engine Reaper (Phase 8A)"]
+        H2 --> MsgReaper[Messaging Reaper Evaluation]
+        MsgReaper --> MsgState{Message Final?}
+        MsgState -- Non-Final & TTL Elapsed --> MarkExpired[Update Message to 'expired']
+        MarkExpired --> ReleaseHold[ledger.ReleaseTx: Safe Hold Release]
+        MsgState -- Still Pending Within TTL --> RetainHold[Retain Hold Active]
+    end
+```
+
+1. **`backend/cmd/expireholds` (Ledger Reaper)**:
+   - Queries `holds WHERE status = 'active' AND expires_at < now() AND (reference_type IS NULL OR reference_type != 'message')`.
+   - **Strictly excluded** from modifying holds linked to active messages.
+2. **Messaging Reaper (`backend/cmd/messagereaper`)**:
+   - Queries `messages WHERE status IN ('accepted', 'queued', 'submitting', 'submitted', 'unknown') AND created_at < now() - INTERVAL '6 hours'`.
+   - Evaluates whether carrier reported any terminal status.
+   - Marks message `expired` or `failed`.
+   - Explicitly calls `ledger.Service.ReleaseTx(ctx, tx, message.HoldID)` in the same transaction that finalizes message status.
+
+---
+
+## 10. DLR Matching & Multipart Concatenation
+
+### DLR PDU Format & Parsing
+When an SMSC delivers an SMS status report, it issues an SMPP `deliver_sm` PDU. The DLR receipt is parsed from `short_message` or optional TLV parameters:
+```text
+id:0123456789 sub:001 dlvrd:001 submit date:2611080200 done date:2611080205 stat:DELIVRD err:000 text:Hello
+```
+1. **Extraction**:
+   - `provider_message_id`: Extracted from `id:` field (e.g. `0123456789`).
+   - `delivery_status`: Extracted from `stat:` field (`DELIVRD`, `UNDELIV`, `EXPIRED`, `DELETED`, `UNKNOWN`, `REJECTD`).
+   - `error_code`: Extracted from `err:` field (e.g. `000` = success, `001` = handset absent, `004` = call barred).
+2. **Matching Strategy**:
+   - Database lookup on indexed table:
+     `SELECT id, hold_id, customer_org_id, status FROM messages WHERE provider_connection_id = $1 AND provider_message_id = $2 FOR UPDATE`
+   - If found, executes state machine transition and calls `ledger.CaptureTx` or `ledger.ReleaseTx`.
+3. **Multipart Concatenation (CSMS)**:
+   - Long messages (>160 GSM-7 or >70 UCS-2 characters) are fragmented into parts using GSM 03.40 UDH (User Data Header).
+   - Each part carries: Reference Number (8-bit or 16-bit), Total Parts ($N$), and Sequence Number ($k$).
+   - Ingestion calculates total billable parts ($N$) and places a hold for $N \times \text{unit\_price}$.
+   - DLRs arrive per segment. The parent message transitions to `delivered` when segment 1 (or all segments) report delivery, and `CaptureTx` captures the full multi-part reservation.
+
+---
+
+## 11. Kafka Topic & Partitioning Strategy
+
+To guarantee message ordering per customer while maintaining horizontal scalability across multi-core workers, dispatch topics are partitioned by customer organization:
+
+```mermaid
+flowchart TD
+    subgraph Publisher["Transactional Outbox Publisher"]
+        P[Outbox Reader] --> KeyGen["Partition Key = customer_org_id"]
+    end
+
+    subgraph KafkaCluster["Kafka: sms.outbound Topic (12 Partitions)"]
+        KeyGen --> Part0["Partition 0 (Customer A)"]
+        KeyGen --> Part1["Partition 1 (Customer B)"]
+        KeyGen --> Part2["Partition 2 (Customer C)"]
+        KeyGen --> PartN["Partition N (...)"]
+    end
+
+    subgraph Workers["Consumer Worker Group (sms-dispatcher-group)"]
+        Part0 --> W1[Worker 1]
+        Part1 --> W2[Worker 2]
+        PartN --> WN[Worker N]
+    end
+```
+
+- **Topic Name**: `sms.outbound`
+- **Partition Count**: 12 partitions (scalable to 32).
+- **Partitioning Key**: `customer_org_id.String()`:
+  - Guarantees strict FIFO dispatching for any single customer organization.
+  - Prevents Head-of-Line blocking: a high-volume batch from Customer A cannot starve or delay interactive OTP messages from Customer B on another partition.
+
+### 11.1 PostgreSQL Database Partitioning & Uniqueness Strategy
+
+PostgreSQL requires any unique index on a partitioned table to include all columns of the partition key. Because `messages` and `message_parts` are partitioned by `RANGE (created_at)`, a direct unique index on `(customer_org_id, client_reference)` would only enforce uniqueness within a single monthly partition, failing to prevent duplicates across month boundaries. The same limitation applies to provider message deduplication `(connection_id, provider_message_id)`.
+
+#### Unpartitioned Lookup Tables
+To guarantee global uniqueness and instantaneous lookups without cross-partition index scans, the engine introduces two dedicated **unpartitioned** lookup tables written within the same database transaction as the message:
+
+1. **`message_idempotency_lookups`**:
+   - `customer_org_id` (UUID) NOT NULL
+   - `client_reference` (VARCHAR(128)) NOT NULL
+   - `message_id` (UUID) NOT NULL
+   - `message_created_at` (TIMESTAMPTZ) NOT NULL
+   - `created_at` (TIMESTAMPTZ) NOT NULL DEFAULT now()
+   - **Primary / Unique Key**: `(customer_org_id, client_reference)`
+   - **Foreign Key**: `FOREIGN KEY (message_id, message_created_at) REFERENCES messages (id, created_at) ON DELETE CASCADE`
+2. **`message_provider_lookups`**:
+   - `connection_id` (UUID) NOT NULL
+   - `provider_message_id` (VARCHAR(128)) NOT NULL
+   - `message_id` (UUID) NOT NULL
+   - `message_created_at` (TIMESTAMPTZ) NOT NULL
+   - `created_at` (TIMESTAMPTZ) NOT NULL DEFAULT now()
+   - **Primary / Unique Key**: `(connection_id, provider_message_id)`
+   - **Foreign Key**: `FOREIGN KEY (message_id, message_created_at) REFERENCES messages (id, created_at) ON DELETE CASCADE`
+
+**Guarantees**:
+- Concurrent duplicate client submissions—even crossing a month boundary—are immediately rejected with `409 Conflict` (`ErrDuplicateClientReference`) via the unpartitioned primary key index.
+- Inbound DLR lookups from carriers locate the message in $O(1)$ time by querying `message_provider_lookups` by `(connection_id, provider_message_id)` and retrieving `(message_id, message_created_at)`, directly targeting the exact partition of `messages`.
+
+### 11.2 Partition Maintenance, Default Partition & Retention Plan
+
+1. **Proactive Partition Pre-Creation**:
+   - A partition management service runs daily to ensure that monthly partitions for the next $N$ months ($N \ge 3$, configurable via `messaging.partition_precreate_months`) are created ahead of time (e.g. `messages_2026_11`, `messages_2026_12`, `messages_2027_01`).
+2. **Safety Net: Default Partitions**:
+   - The tables include `messages_default` and `message_parts_default` attached as `DEFAULT` partitions.
+   - Any message whose `created_at` falls outside pre-created date boundaries is safely routed to the default partition, guaranteeing that inserts **never fail** on the first day of a new month or under clock skew.
+3. **Retention & Concurrent Detach**:
+   - Messages older than the data retention threshold (e.g. 12 months) are detached using non-blocking DDL:
+     ```sql
+     ALTER TABLE messages DETACH PARTITION messages_2025_11 CONCURRENTLY;
+     ALTER TABLE message_parts DETACH PARTITION message_parts_2025_11 CONCURRENTLY;
+     ```
+   - Detached tables are exported to cold analytical storage (e.g. Parquet / S3) and dropped without holding locks on active partitions.
+
+---
+
+## 12. SMPP Client Library Decision
+
+### Selected Library: `github.com/linxGnu/gosmpp`
+After architectural evaluation against alternative Go libraries (`fiorix/go-smpp`, `vovazolot/smpp`), **`gosmpp`** is selected for Phase 8 carrier connectivity:
+
+1. **Protocol Compliance & Version Support**:
+   Full SMPP v3.4 and v5.0 compliance with native support for Transceiver (`TRX`), Transmitter (`TX`), and Receiver (`RX`) binds.
+2. **Non-Blocking Windowing & Throttling**:
+   Built-in PDU windowing (`EnquireLink`, rate pacing, window sliding) supporting up to 500 unacknowledged PDUs in flight without thread starvation.
+3. **High-Performance Memory Allocations**:
+   Zero-copy byte buffers for PDU serialization and deserialization, matching Znero's 12 µs microbenchmark target.
+4. **Resilient Session Management**:
+   Automatic TCP reconnection with exponential backoff, connection keep-alive (`EnquireLink` heartbeats every 30s), and automatic re-bind handling.
+
+---
+
+## 13. Open Business Decisions
+
+The following business rule is formally documented as open:
+
+### Open Decision: Customer Billing Trigger (`on_delivery` vs `on_provider_accept`)
+1. **Current System Default**: `on_delivery`.
+   - Customer wallet balance is debited (`CaptureTx`) only upon receiving a definitive `DELIVRD` DLR receipt from the operator.
+   - If an SMS fails upstream (`UNDELIV`), the customer is refunded via hold release (`ReleaseTx`).
+2. **Alternative Model**: `on_provider_accept`.
+   - Common in wholesale Tier-1 transit where the customer purchases network attempts rather than handset delivery guarantees.
+   - Customer wallet balance is captured immediately upon `submit_sm_resp OK`.
+3. **Architecture Implementation**:
+   - Stored in `system_settings` table under key `billing.sms.customer_trigger` (allowed values: `'on_delivery'`, `'on_provider_accept'`).
+   - Governed by **Platform Super Admin with Maker-Checker dual control**.
+   - Can be overridden at the customer profile level via `customer_profiles.billing_trigger_override` (`'default'`, `'on_delivery'`, `'on_provider_accept'`) if explicitly permitted by wholesale contract.
+
+---
+
+## 14. Phase 8A Delivery Chunk Plan
+
+Phase 8A is partitioned into three gated milestones:
+
+| Chunk | Scope & Steps | Gate / Stop Condition |
+| :--- | :--- | :--- |
+| **Chunk 1** | **Part A**: Ledger Tx methods (`PlaceHoldTx`, `CaptureTx`, `ReleaseTx`, `PostChargeTx`, idempotency replays).<br>**Part B (Step 1)**: Authoritative Design Document (`docs/MESSAGING_DESIGN.md`).<br>**Step 2**: Data model & Migration 10 (`messages`, `message_outbox`, `message_events`).<br>**Step 3**: Ingestion pipeline (`POST /api/v1/messages`) with atomic `PlaceHoldTx` & outbox write.<br>**Step 4**: Transactional outbox reader & Kafka producer tested with FAKE sender. | **STOP and wait for approval after Part B, and again after Chunk 1 verification.** |
+| **Chunk 2** | **Step 6**: Mock carrier SMSC simulator (listening on port 2775, configurable DLR latency, reject codes, and disconnects).<br>**Step 5**: Production SMPP client worker (`gosmpp`) dispatching messages from Kafka to carrier SMSC simulator with windowing and failover. | **STOP and wait for approval after Chunk 2 verification.** |
+| **Chunk 3** | **Steps 7–13**: DLR ingestion & matching, financial settlement worker (`CaptureTx`/`ReleaseTx`), Messaging Reaper, REST APIs, Frontend UI, DEV sample seed, E2E test suite, load benchmarks, and final documentation. | **STOP and deliver handover zip.** |
+
+---
+
+> **End of Step 1 (`docs/MESSAGING_DESIGN.md`)**.
+> All pipeline specifications, state machines, failover rules, settlement invariants, and open decisions are documented. Awaiting user review and go-ahead before proceeding to Step 2.
+

@@ -22,7 +22,8 @@ func (n *noopApplier) ApplyChange(_ context.Context, _ pgx.Tx, _ *approval.Chang
 	return nil
 }
 
-func TestApprovalLifecycleAndDualControl(t *testing.T) {
+// 1. TestApprovalLifecycle_SubmitPending verifies submitting a change request creates it in pending status
+func TestApprovalLifecycle_SubmitPending(t *testing.T) {
 	e := testkit.New(t)
 	ctx := context.Background()
 
@@ -41,36 +42,170 @@ func TestApprovalLifecycleAndDualControl(t *testing.T) {
 	if cr.Status != "pending" {
 		t.Fatalf("expected pending status, got %q", cr.Status)
 	}
+}
 
-	// Maker cannot approve own change even if holding approve permission
+// 2. TestApproval_MakerSelfApprovalRefused verifies makers cannot approve their own changes (Dual-Control)
+func TestApproval_MakerSelfApprovalRefused(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	req := e.CountryRequest()
+	raw, _ := json.Marshal(req)
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: raw,
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit change request: %v", err)
+	}
+
+	// Maker cannot approve own change even if granted approve permission
 	makerChecker := testkit.WithPermissions(e.Maker, "country.country.approve")
 	if err := e.Approval.Approve(ctx, makerChecker, cr.ID, "self-approve"); !errors.Is(err, approval.ErrMakerCannotApproveOwnChange) {
 		t.Fatalf("expected ErrMakerCannotApproveOwnChange, got %v", err)
 	}
+}
 
-	// Reject requires a non-empty reason
+// 3. TestApproval_RejectRequiresReason verifies rejecting without a non-empty explanation is refused
+func TestApproval_RejectRequiresReason(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	req := e.CountryRequest()
+	raw, _ := json.Marshal(req)
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: raw,
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
 	if err := e.Approval.Reject(ctx, e.Checker, cr.ID, "   "); !errors.Is(err, approval.ErrEmptyRejectReason) {
 		t.Fatalf("expected ErrEmptyRejectReason, got %v", err)
 	}
+}
 
-	// Reject with reason
-	if err := e.Approval.Reject(ctx, e.Checker, cr.ID, "missing regulatory verification notes"); err != nil {
+// 4. TestApproval_RejectStoresReason verifies checker can reject with a reason and stores it
+func TestApproval_RejectStoresReason(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	req := e.CountryRequest()
+	raw, _ := json.Marshal(req)
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: raw,
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	reason := "missing regulatory verification notes"
+	if err := e.Approval.Reject(ctx, e.Checker, cr.ID, reason); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	got, err := e.Approval.Get(ctx, cr.ID)
 	if err != nil {
 		t.Fatalf("get rejected cr: %v", err)
 	}
-	if got.Status != "rejected" || got.RejectReason != "missing regulatory verification notes" {
+	if got.Status != "rejected" || got.RejectReason != reason {
 		t.Fatalf("unexpected rejected cr state: %+v", got)
 	}
+}
 
-	// Cannot approve a rejected request
+// 5. TestApproval_CannotApproveRejected verifies terminal state immutability
+func TestApproval_CannotApproveRejected(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	req := e.CountryRequest()
+	raw, _ := json.Marshal(req)
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: raw,
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	_ = e.Approval.Reject(ctx, e.Checker, cr.ID, "rejected reason")
 	if err := e.Approval.Approve(ctx, e.Checker, cr.ID, "retry"); !errors.Is(err, approval.ErrInvalidStatus) {
 		t.Fatalf("expected ErrInvalidStatus on rejected request, got %v", err)
 	}
 }
 
+// 6. TestApproval_CancelPendingChangeRequest verifies the maker can cancel their own pending request
+func TestApproval_CancelPendingChangeRequest(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	req := e.CountryRequest()
+	raw, _ := json.Marshal(req)
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: raw,
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	if err := e.Approval.Cancel(ctx, e.Maker, cr.ID); err != nil {
+		t.Fatalf("cancel change request: %v", err)
+	}
+
+	got, err := e.Approval.Get(ctx, cr.ID)
+	if err != nil {
+		t.Fatalf("get cancelled cr: %v", err)
+	}
+	if got.Status != "cancelled" {
+		t.Fatalf("expected status cancelled, got %s", got.Status)
+	}
+}
+
+// 7. TestApproval_CheckerApproveAppliesChange verifies approval triggers the registered applier
+func TestApproval_CheckerApproveAppliesChange(t *testing.T) {
+	e := testkit.New(t)
+	ctx := context.Background()
+
+	ap := &noopApplier{}
+	e.Approval.RegisterApplier("country", ap)
+	e.Approval.RegisterApprovePermission("country", "country.country.approve")
+
+	cr, err := e.Approval.SubmitChangeRequest(ctx, nil, approval.ChangeRequest{
+		EntityType:   "country",
+		Operation:    "create",
+		ProposedData: []byte(`{"test":true}`),
+		MakerUserID:  e.Maker.ActorUserID,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	if err := e.Approval.Approve(ctx, e.Checker, cr.ID, "approved test"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if ap.applied != 1 {
+		t.Fatalf("expected applier to be called 1 time, got %d", ap.applied)
+	}
+}
+
+// 8. TestUnregisteredEntityTypeDeniedByDefault verifies default-deny on unregistered entity types
 func TestUnregisteredEntityTypeDeniedByDefault(t *testing.T) {
 	svc := approval.NewService(nil, nil, nil)
 	ap := &noopApplier{}

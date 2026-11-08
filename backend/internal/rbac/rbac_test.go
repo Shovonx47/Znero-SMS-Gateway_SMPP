@@ -153,3 +153,51 @@ func TestPrivilegeEscalationGuard(t *testing.T) {
 		t.Fatalf("expected privilege escalation error, got nil")
 	}
 }
+
+func TestPlatformOnlyPermissions_StrictlyFiltered(t *testing.T) {
+	// Master data writes, providers, imports, buy rates, and routing are platform-only
+	platformOnlyCases := []string{
+		"provider.provider.create",
+		"provider.connection.edit",
+		"routing.plan.create",
+		"routing.simulate",
+		"rate.buycard.create",
+		"rate.margin.view",
+		"import.job.manage",
+		"country.country.create",
+	}
+	for _, code := range platformOnlyCases {
+		if !IsPlatformOnlyPermission(code) {
+			t.Errorf("expected %s to be flagged as platform only", code)
+		}
+	}
+
+	// Read-only master data view permissions are allowed for non-platform orgs
+	allowedNonPlatform := []string{
+		"country.country.view",
+		"operator.operator.view",
+		"number.prefix.view",
+	}
+	for _, code := range allowedNonPlatform {
+		if IsPlatformOnlyPermission(code) {
+			t.Errorf("expected %s to be allowed for non-platform orgs (read-only view)", code)
+		}
+	}
+}
+
+func TestCustomerForbiddenPermissions(t *testing.T) {
+	forbidden := []string{
+		"customer.profile.create",
+		"customer.profile.edit",
+		"wallet.topup.create",
+		"wallet.adjustment.create",
+		"wallet.freeze",
+		"billing.invoice.create",
+		"billing.invoice.issue",
+	}
+	for _, code := range forbidden {
+		if !IsForbiddenForCustomerOrg(code) {
+			t.Errorf("expected %s to be forbidden for customer orgs", code)
+		}
+	}
+}

@@ -278,7 +278,7 @@ func (s *Service) RequestPlanActivation(ctx context.Context, tc *tenant.Context,
 	}
 
 	// Maker-checker check: if user has override or approve permission, apply directly
-	if tc.HasPermission("routing.plan.approve") || tc.HasPermission("routing.plan.override") {
+	if tc.HasPermission("routing.plan.approve") || tc.HasPermission("routing.plan.override") || tc.HasPermission("routing.override") {
 		activated, err := s.applyPlanStatusChange(ctx, tc.ActorUserID, tc.ActorOrgID, planID, PlanActive, plan.Version, "direct activation")
 		return activated, nil, err
 	}
@@ -330,7 +330,7 @@ func (s *Service) RequestPlanDeactivation(ctx context.Context, tc *tenant.Contex
 	}
 
 	// Maker-checker check
-	if tc.HasPermission("routing.plan.approve") || tc.HasPermission("routing.plan.override") {
+	if tc.HasPermission("routing.plan.approve") || tc.HasPermission("routing.plan.override") || tc.HasPermission("routing.override") {
 		deactivated, err := s.applyPlanStatusChange(ctx, tc.ActorUserID, tc.ActorOrgID, planID, PlanDeactivated, plan.Version, "direct deactivation")
 		return deactivated, nil, err
 	}
@@ -568,7 +568,7 @@ func (s *Service) CreateEntry(ctx context.Context, tc *tenant.Context, entry *Ro
 	}
 
 	// If plan is active and user lacks override, submit change request
-	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") {
+	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -647,7 +647,7 @@ func (s *Service) UpdateEntry(ctx context.Context, tc *tenant.Context, entry *Ro
 		return nil, nil, fmt.Errorf("%w: weight must be between 1 and 100", ErrValidation)
 	}
 
-	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") {
+	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -725,7 +725,7 @@ func (s *Service) DeleteEntry(ctx context.Context, tc *tenant.Context, entryID u
 		return nil, fmt.Errorf("%w: plan is archived", ErrInvalidStatus)
 	}
 
-	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") {
+	if plan.Status == PlanActive && !tc.HasPermission("routing.entry.approve") && !tc.HasPermission("routing.entry.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, err
@@ -736,7 +736,7 @@ func (s *Service) DeleteEntry(ctx context.Context, tc *tenant.Context, entryID u
 		cr, err := s.approval.SubmitChangeRequest(ctx, tx, approval.ChangeRequest{
 			EntityType:    "route_plan_entry_change",
 			EntityID:      &existing.ID,
-			Operation:     "delete",
+			Operation:     "archive",
 			ProposedData:  []byte("{}"),
 			CurrentData:   currentData,
 			MakerUserID:   tc.ActorUserID,
@@ -788,6 +788,13 @@ func (s *Service) ListEntries(ctx context.Context, tc *tenant.Context, planID uu
 		return nil, err
 	}
 	return s.repo.ListEntriesByPlanID(ctx, planID)
+}
+
+func (s *Service) GetEntryHistory(ctx context.Context, tc *tenant.Context, entryID uuid.UUID) ([]RoutePlanEntryHistory, error) {
+	if err := s.enforcePlatform(tc, "routing.entry.view"); err != nil {
+		return nil, err
+	}
+	return s.repo.GetEntryHistory(ctx, entryID)
 }
 
 func (s *Service) RollbackEntry(ctx context.Context, tc *tenant.Context, entryID uuid.UUID, historyID uuid.UUID) (*RoutePlanEntry, error) {
@@ -879,7 +886,7 @@ func (s *Service) CreateAssignment(ctx context.Context, tc *tenant.Context, a *C
 	a.CreatedBy = tc.ActorUserID
 
 	// Maker-checker check
-	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") {
+	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -944,7 +951,7 @@ func (s *Service) UpdateAssignment(ctx context.Context, tc *tenant.Context, a *C
 		return nil, nil, err
 	}
 
-	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") {
+	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -1014,7 +1021,7 @@ func (s *Service) DeleteAssignment(ctx context.Context, tc *tenant.Context, id u
 		return nil, err
 	}
 
-	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") {
+	if !tc.HasPermission("routing.assignment.approve") && !tc.HasPermission("routing.assignment.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, err
@@ -1025,7 +1032,7 @@ func (s *Service) DeleteAssignment(ctx context.Context, tc *tenant.Context, id u
 		cr, err := s.approval.SubmitChangeRequest(ctx, tx, approval.ChangeRequest{
 			EntityType:    "route_assignment_change",
 			EntityID:      &existing.ID,
-			Operation:     "delete",
+			Operation:     "archive",
 			ProposedData:  []byte("{}"),
 			CurrentData:   currentData,
 			MakerUserID:   tc.ActorUserID,
@@ -1083,15 +1090,15 @@ func (s *Service) ListAssignments(ctx context.Context, tc *tenant.Context, custo
 // Routing Rules
 // -----------------------------------------------------------------------------
 
-func (s *Service) CreateRule(ctx context.Context, tc *tenant.Context, r *RoutingRule) (*RoutingRule, *approval.ChangeRequest, error) {
-	if err := s.enforcePlatform(tc, "routing.rule.create"); err != nil {
-		return nil, nil, err
-	}
+func (s *Service) validateRule(ctx context.Context, r *RoutingRule) error {
 	if strings.TrimSpace(r.Name) == "" {
-		return nil, nil, fmt.Errorf("%w: rule name is required", ErrValidation)
+		return fmt.Errorf("%w: rule name is required", ErrValidation)
 	}
 	if r.ActionType != "block" && r.ActionType != "force" && r.ActionType != "avoid" && r.ActionType != "prefer" {
-		return nil, nil, fmt.Errorf("%w: invalid action type %s", ErrValidation, r.ActionType)
+		return fmt.Errorf("%w: invalid action type %s", ErrValidation, r.ActionType)
+	}
+	if (r.ActionType == "force" || r.ActionType == "avoid" || r.ActionType == "prefer") && (r.ActionConnectionID == nil || *r.ActionConnectionID == uuid.Nil) {
+		return fmt.Errorf("%w: action_connection_id is required for %s action", ErrValidation, r.ActionType)
 	}
 	if r.Priority < 1 {
 		r.Priority = 1
@@ -1099,9 +1106,45 @@ func (s *Service) CreateRule(ctx context.Context, tc *tenant.Context, r *Routing
 	if r.Status == "" {
 		r.Status = "active"
 	}
+	if r.ActionType == "block" && strings.TrimSpace(r.ActionBlockReason) == "" {
+		r.ActionBlockReason = fmt.Sprintf("blocked by rule: %s", r.Name)
+	}
+
+	// Save-time conflict detection against existing active rules
+	rules, _, err := s.repo.ListRules(ctx, "active", 1, 1000)
+	if err == nil {
+		rCondJSON, _ := json.Marshal(r.Conditions)
+		for _, other := range rules {
+			if other.ID == r.ID {
+				continue
+			}
+			if other.Priority == r.Priority {
+				otherCondJSON, _ := json.Marshal(other.Conditions)
+				if string(rCondJSON) == string(otherCondJSON) {
+					// Conflicting actions at same priority with identical conditions
+					if r.ActionType != other.ActionType ||
+						(r.ActionType == "force" && other.ActionType == "force" &&
+							r.ActionConnectionID != nil && other.ActionConnectionID != nil &&
+							*r.ActionConnectionID != *other.ActionConnectionID) {
+						return fmt.Errorf("%w: conflicting rule detected: rule '%s' has identical conditions and priority with conflicting action", ErrValidation, other.Name)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) CreateRule(ctx context.Context, tc *tenant.Context, r *RoutingRule) (*RoutingRule, *approval.ChangeRequest, error) {
+	if err := s.enforcePlatform(tc, "routing.rule.create"); err != nil {
+		return nil, nil, err
+	}
+	if err := s.validateRule(ctx, r); err != nil {
+		return nil, nil, err
+	}
 	r.CreatedBy = tc.ActorUserID
 
-	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") {
+	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -1166,7 +1209,36 @@ func (s *Service) UpdateRule(ctx context.Context, tc *tenant.Context, r *Routing
 		return nil, nil, err
 	}
 
-	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") {
+	if r.Version == 0 {
+		r.Version = existing.Version
+	}
+	if r.Name == "" {
+		r.Name = existing.Name
+	}
+	if r.ActionType == "" {
+		r.ActionType = existing.ActionType
+	}
+	if r.Priority == 0 {
+		r.Priority = existing.Priority
+	}
+	if r.Status == "" {
+		r.Status = existing.Status
+	}
+	if r.ActionConnectionID == nil {
+		r.ActionConnectionID = existing.ActionConnectionID
+	}
+	if r.ActionBlockReason == "" {
+		r.ActionBlockReason = existing.ActionBlockReason
+	}
+	if r.Conditions == nil {
+		r.Conditions = existing.Conditions
+	}
+
+	if err := s.validateRule(ctx, r); err != nil {
+		return nil, nil, err
+	}
+
+	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -1236,7 +1308,7 @@ func (s *Service) DeleteRule(ctx context.Context, tc *tenant.Context, id uuid.UU
 		return nil, err
 	}
 
-	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") {
+	if !tc.HasPermission("routing.rule.approve") && !tc.HasPermission("routing.rule.override") && !tc.HasPermission("routing.override") {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return nil, err
@@ -1247,7 +1319,7 @@ func (s *Service) DeleteRule(ctx context.Context, tc *tenant.Context, id uuid.UU
 		cr, err := s.approval.SubmitChangeRequest(ctx, tx, approval.ChangeRequest{
 			EntityType:    "routing_rule_change",
 			EntityID:      &existing.ID,
-			Operation:     "delete",
+			Operation:     "archive",
 			ProposedData:  []byte("{}"),
 			CurrentData:   currentData,
 			MakerUserID:   tc.ActorUserID,
@@ -1735,7 +1807,7 @@ func (a *routePlanEntryApplier) ApplyChange(ctx context.Context, tx pgx.Tx, cr *
 			return err
 		}
 
-	case "delete":
+	case "delete", "archive":
 		if cr.EntityID == nil {
 			return errors.New("missing entity id for entry delete")
 		}
@@ -1791,7 +1863,7 @@ func (a *routeAssignmentApplier) ApplyChange(ctx context.Context, tx pgx.Tx, cr 
 			return err
 		}
 
-	case "delete":
+	case "delete", "archive":
 		if cr.EntityID == nil {
 			return errors.New("missing entity id for assignment delete")
 		}
@@ -1847,7 +1919,7 @@ func (a *routingRuleApplier) ApplyChange(ctx context.Context, tx pgx.Tx, cr *app
 			return err
 		}
 
-	case "delete":
+	case "delete", "archive":
 		if cr.EntityID == nil {
 			return errors.New("missing entity id for rule delete")
 		}
@@ -2085,6 +2157,45 @@ func (s *Service) ExportPlansCSV(ctx context.Context, tc *tenant.Context) ([]byt
 			string(p.Status),
 			strconv.Itoa(p.Version),
 			p.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	w.Flush()
+	return buf.Bytes(), nil
+}
+
+func (s *Service) ExportEntriesCSV(ctx context.Context, tc *tenant.Context, planID uuid.UUID) ([]byte, error) {
+	if err := s.enforcePlatform(tc, "routing.entry.view"); err != nil {
+		return nil, err
+	}
+	entries, err := s.repo.ListEntriesByPlanID(ctx, planID)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{
+		"ID", "Plan ID", "Connection ID", "Connection Name", "Scope Type",
+		"Priority", "Weight", "Min Margin Override", "Dest Format", "Allow Tested", "Status", "Version",
+	})
+	for _, e := range entries {
+		minMargin := ""
+		if e.MinMarginOverride != nil {
+			minMargin = e.MinMarginOverride.StringFixed(6)
+		}
+		_ = w.Write([]string{
+			e.ID.String(),
+			e.PlanID.String(),
+			e.ConnectionID.String(),
+			sanitizeCSVCell(e.ConnectionName),
+			e.ScopeType,
+			strconv.Itoa(e.Priority),
+			strconv.Itoa(e.Weight),
+			minMargin,
+			e.DestinationNumberFormat,
+			strconv.FormatBool(e.AllowTestedCoverage),
+			e.Status,
+			strconv.Itoa(e.Version),
 		})
 	}
 	w.Flush()

@@ -130,3 +130,26 @@ func MoneyRateLimiter(max int, window time.Duration) fiber.Handler {
 		},
 	})
 }
+
+// RateLimiter returns a generic configurable rate-limiting Fiber middleware.
+func RateLimiter(max int, window time.Duration, msg string) fiber.Handler {
+	if max <= 0 {
+		max = 60
+	}
+	if window <= 0 {
+		window = time.Minute
+	}
+	if msg == "" {
+		msg = "Rate limit exceeded. Please retry later."
+	}
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: window,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP() + ":" + c.Method() + ":" + c.Path()
+		},
+		LimitReached: func(c *fiber.Ctx) error {
+			return NewError(fiber.StatusTooManyRequests, CodeRateLimited, msg)
+		},
+	})
+}

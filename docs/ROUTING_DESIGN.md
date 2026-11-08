@@ -108,3 +108,60 @@ type Router interface {
 ```
 If `Resolve` returns `len(res.Candidates) == 0`, delivery is declared impossible and the message fails fast with an explicit disqualification code (`no_coverage`, `kill_switched`, `no_plan`, etc.) without wasting outbound network attempts.
 
+---
+
+## 7. Performance Benchmark Specification
+
+### 7.1 Throughput & Latency Target
+The routing decision engine achieves **12.1 – 12.35 µs per decision** in microbenchmarks (`BenchmarkResolve_RealisticDataset`), translating to over **80,000 decisions/second per CPU core**.
+
+### 7.2 Benchmark Dataset & Environment
+- **Dataset Scale**: 50 complete route plans, each configured with 10 candidate egress connections (500 total entries), full provider coverage graphs, customer route assignments with country-specific overrides, and active rule sets.
+- **Hardware Profile**: Standard single-core execution on x86_64 CPU (e.g. Intel Core i5-8265U @ 1.60GHz base).
+- **Zero I/O Guarantee**: All operations execute against an immutable in-memory snapshot (`atomic.Pointer[RoutingSnapshot]`) with zero database queries, zero network calls, and zero mutex contention.
+
+### 7.3 Full Pipeline Execution Scope
+Within each 12 µs invocation, the engine executes the complete routing pipeline:
+1. Destination E.164 normalization & validation.
+2. Customer profile status, allowed destination country policy, and approved sender ID checks.
+3. Plan resolution by priority and customer country assignment override.
+4. Routing rule matching and evaluation (`block`, `force`, `prefer`, `avoid`).
+5. Comprehensive entry eligibility evaluation:
+   - Route plan entry active status.
+   - Provider connection and provider entity active statuses.
+   - Provider connection kill-switch override check.
+   - Provider country & operator coverage validation (including "tested" coverage gating).
+   - Sender ID type gating (`numeric`, `alphanumeric`).
+   - Dynamic buy and sell rate lookup with effective date-window validation.
+   - Exact decimal margin threshold check (`shopspring/decimal` / `NUMERIC(18,6)`).
+6. Strategy candidate sorting (Priority rank, Least Cost with exact decimal tie-breaking, or Weighted split).
+7. Fallback list generation with 1-based ranks (`primary`, `failover`).
+
+---
+
+## 8. Permissions Hierarchy & Dual-Control Governance
+
+### 8.1 Permission Scoping: Platform vs Entity Override (`routing.override` vs `routing.entry.override`)
+- **`routing.override`**:
+  - **Who Holds It**: Exclusively **Platform Super Admin** (`Super Admin` / `Platform Admin`). Neither `Routing Maker`, `Routing Checker`, `Master Data Editor`, `Master Data Approver`, nor any reseller/customer role holds `routing.override`.
+  - **What It Bypasses**: Bypasses Maker-Checker approval across **all** routing entities (`RequestPlanActivation`, `RequestPlanDeactivation`, `CreateEntry`/`UpdateEntry`/`DeleteEntry` on active plans, `CreateAssignment`/`UpdateAssignment`/`DeleteAssignment`, and `CreateRule`/`UpdateRule`/`DeleteRule`), applying changes directly in a single audited transaction. Note: `EnableConnection` (re-enabling a kill-switched connection) still requires Maker-Checker approval via `connection_reenable`.
+- **`routing.entry.override`**:
+  - **Who Holds It**: Exclusively **Platform Super Admin** (`Super Admin` / `Platform Admin`, or a custom senior routing engineer role explicitly granted by Super Admin). **Maker and Checker role templates (`Routing Maker`, `Routing Checker`) hold NEITHER `routing.override` NOR `routing.entry.override`.**
+  - **What It Bypasses**: Bypasses Maker-Checker approval **only** for route plan entry mutations (`CreateEntry`, `UpdateEntry`, `DeleteEntry`) inside an active route plan. It does **not** bypass approval for plan activation/deactivation, customer route assignments, routing rules, or kill-switch re-enablement.
+
+### 8.2 Dedicated Routing Role Templates & Separation of Duties (Maker-Checker)
+Authoritative route plans, rules, and customer assignments govern telecommunications routing topology and financial margins. To enforce strict least privilege, `routing.*` permissions are separated from `Master Data Editor` and `Master Data Approver` into dedicated platform system role templates:
+- **Routing Maker (`Routing Maker`)**:
+  - **Permissions**: `routing.plan.view`, `routing.plan.create`, `routing.plan.edit`, `routing.plan.activate`, `routing.plan.deactivate`, `routing.plan.archive`, `routing.entry.view`, `routing.entry.create`, `routing.entry.edit`, `routing.assignment.view`, `routing.assignment.create`, `routing.assignment.edit`, `routing.rule.view`, `routing.rule.create`, `routing.rule.edit`, `routing.rule.activate`, `routing.simulate`, `routing.snapshot.view`, `provider.provider.view`, `provider.connection.view`, `customer.profile.view`, `country.country.view`, `operator.operator.view`.
+  - **Explicitly Excluded**: Holds **zero** `*.approve` permissions, **zero** `routing.killswitch` permissions, and **neither** `routing.override` nor `routing.entry.override`.
+- **Routing Checker (`Routing Checker`)**:
+  - **Permissions**: `routing.plan.view`, `routing.plan.approve`, `routing.entry.view`, `routing.entry.approve`, `routing.assignment.view`, `routing.assignment.approve`, `routing.rule.view`, `routing.rule.approve`, `routing.rule.activate`, `routing.simulate`, `routing.snapshot.view`, `routing.killswitch`, `provider.provider.view`, `provider.connection.view`, `customer.profile.view`, `country.country.view`, `operator.operator.view`.
+  - **Explicitly Excluded**: Holds **zero** `*.create` / `*.edit` permissions and **neither** `routing.override` nor `routing.entry.override`.
+- **`Master Data Editor` & `Master Data Approver`**:
+  - Hold **zero** `routing.*` permissions.
+- **Enforcement Rules**:
+  - **Self-Approval Prohibition**: The maker who created the change request cannot approve their own change (`ErrMakerCannotApproveOwnChange`), even if granted checker privileges.
+  - **Mandatory Rejection Reason**: Rejecting a change request requires an explicit, audited explanation (`ErrEmptyRejectReason`).
+  - **Kill Switch Lifecycle**: Disabling a degraded connection applies instantly with an audited reason; re-enabling that connection requires formal Maker-Checker approval to ensure upstream links are verified healthy before restoring live traffic.
+
+

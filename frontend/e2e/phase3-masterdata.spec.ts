@@ -1,5 +1,51 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
+import { execSync } from 'child_process';
+
+function cleanupTestCountries() {
+	try {
+		const psql = 'C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe';
+		execSync(
+			`"${psql}" -U postgres -d znero_dev -c "DELETE FROM change_requests WHERE entity_type='country' AND (proposed_data->>'name' LIKE '[E2E-TEST]%' OR proposed_data->>'name' LIKE 'DualControl Country%' OR proposed_data->>'name' LIKE 'Test Country %'); DELETE FROM countries_history WHERE country_id IN (SELECT id FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %'); DELETE FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %';"`,
+			{ stdio: 'ignore' }
+		);
+	} catch {
+		// Ignore if psql path differs
+	}
+}
+
+// Strictly uses ISO 3166-1 officially user-assigned codes:
+// - Alpha-2: XA..XZ (ASCII 65..90) or QM..QZ (ASCII 77..90)
+// - Alpha-3: XAA..XZZ
+// - Numeric: 900..999
+function getFreeCountryCodes(): { iso2: string; iso3: string; num: string } {
+	try {
+		const psql = 'C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe';
+		const sql = `
+			SELECT s.code, 'X' || s.code AS iso3, n.num
+			FROM (
+				SELECT 'X' || chr(i) AS code FROM generate_series(65, 90) i
+				UNION ALL
+				SELECT 'Q' || chr(i) AS code FROM generate_series(77, 90) i
+			) s
+			CROSS JOIN (
+				SELECT lpad(i::text, 3, '0') AS num FROM generate_series(900, 999) i
+			) n
+			WHERE NOT EXISTS (SELECT 1 FROM countries WHERE iso2 = s.code)
+			  AND NOT EXISTS (SELECT 1 FROM countries WHERE iso3 = 'X' || s.code)
+			  AND NOT EXISTS (SELECT 1 FROM countries WHERE numeric_code = n.num)
+			LIMIT 1;
+		`.replace(/\s+/g, ' ');
+		const out = execSync(`"${psql}" -U postgres -d znero_dev -t -A -c "${sql}"`).toString().trim();
+		const [iso2, iso3, num] = out.split('|');
+		if (iso2 && iso3 && num) {
+			return { iso2, iso3, num };
+		}
+	} catch {
+		// Fallback within user-assigned range
+	}
+	return { iso2: 'XZ', iso3: 'XZZ', num: '999' };
+}
 
 test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 	const adminEmail = process.env.TEST_ADMIN_EMAIL || 'dev-superadmin@dev.znero.test';
@@ -26,6 +72,7 @@ test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 	});
 
 	test('2. Countries page lists authoritative countries and creates country', async ({ page }) => {
+		cleanupTestCountries();
 		await page.goto('/master-data/countries');
 		await expect(page.locator('main h1')).toContainText('Countries');
 
@@ -42,37 +89,21 @@ test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 		// Modal should appear
 		await expect(page.locator('h2:has-text("Add New Country")')).toBeVisible();
 
-		// Fill country creation form using an unused user-assigned ISO code (XA-XZ, QM-QZ, 900-999)
-		const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-		const candidates: Array<{ iso2: string; num: string }> = [];
-		for (let i = 0; i < 20; i++) {
-			const p = ['X', 'Q', 'Z'][Math.floor(Math.random() * 3)];
-			const l = letters[Math.floor(Math.random() * 26)];
-			const n = String(900 + Math.floor(Math.random() * 99));
-			candidates.push({ iso2: p + l, num: n });
-		}
+		// Fill country creation form using strictly ISO 3166-1 user-assigned codes (XA-XZ, QM-QZ, XAA-XZZ, 900-999)
+		const { iso2, iso3, num } = getFreeCountryCodes();
+		await page.locator('input[required]').nth(0).fill(`[E2E-TEST] Country ${iso2}`); // Name
+		await page.locator('input[required]').nth(1).fill('995'); // Calling code
+		await page.locator('input[maxlength="2"]').fill(iso2); // ISO2
+		await page.locator('input[maxlength="3"]').first().fill(iso3); // ISO3
+		await page.locator('input[maxlength="3"]').nth(1).fill(num); // Numeric code (900-999)
+		await page.locator('input[placeholder*="Describe why"]').fill('Playwright automated E2E country test');
 
-		for (const cand of candidates) {
-			await page.locator('input[required]').nth(0).fill('Test Country ' + cand.iso2); // Name
-			await page.locator('input[required]').nth(1).fill('99' + Math.floor(Math.random() * 9)); // Calling code
-			await page.locator('input[maxlength="2"]').fill(cand.iso2); // ISO2
-			await page.locator('input[maxlength="3"]').first().fill(cand.iso2 + 'A'); // ISO3
-			await page.locator('input[maxlength="3"]').nth(1).fill(cand.num); // Numeric code
-			await page.locator('input[placeholder*="Describe why"]').fill('Playwright automated E2E country test');
-
-			// Submit creation form
-			await page.locator('button:has-text("Create Country")').click();
-
-			try {
-				await expect(page.locator('h2:has-text("Add New Country")')).not.toBeVisible({ timeout: 2500 });
-				break;
-			} catch {
-				// Try next user-assigned code if collision occurred
-			}
-		}
+		// Submit creation form
+		await page.locator('button:has-text("Create Country")').click();
 
 		// Modal should close on success
 		await expect(page.locator('h2:has-text("Add New Country")')).not.toBeVisible({ timeout: 10000 });
+		cleanupTestCountries();
 	});
 
 	test('3. Operators page renders and filters by country', async ({ page }) => {
@@ -133,13 +164,8 @@ test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 	});
 
 	test('7. Dual-control Maker-Checker: User A creates pending change, cannot self-approve, User B approves and change appears', async ({ page, browser }) => {
+		cleanupTestCountries();
 		const makerEmail = process.env.TEST_MAKER_EMAIL || 'dev-maker@dev.znero.test';
-		const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-		const suffix = letters[Math.floor(Math.random() * 26)];
-		const iso2 = 'Q' + suffix;
-		const iso3 = 'Q' + suffix + 'Z';
-		const numCode = String(950 + Math.floor(Math.random() * 48));
-		const countryName = `DualControl Country ${iso2}`;
 
 		// 1. User A (Maker without override) logs in and submits a country creation
 		const makerContext = await browser.newContext();
@@ -151,11 +177,15 @@ test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 		await makerPage.waitForURL('**/dashboard', { timeout: 15000 });
 
 		await makerPage.goto('/master-data/countries');
+		const { iso2: chosenIso2, iso3, num: numCode } = getFreeCountryCodes();
+
+		const countryName = `[E2E-TEST] DualControl Country ${chosenIso2}`;
+
 		await makerPage.locator('button:has-text("Add Country")').click();
 		await expect(makerPage.locator('h2:has-text("Add New Country")')).toBeVisible();
 		await makerPage.locator('input[required]').nth(0).fill(countryName);
 		await makerPage.locator('input[required]').nth(1).fill('996');
-		await makerPage.locator('input[maxlength="2"]').fill(iso2);
+		await makerPage.locator('input[maxlength="2"]').fill(chosenIso2);
 		await makerPage.locator('input[maxlength="3"]').first().fill(iso3);
 		await makerPage.locator('input[maxlength="3"]').nth(1).fill(numCode);
 		await makerPage.locator('input[placeholder*="Describe why"]').fill('Maker pending creation test');
@@ -170,20 +200,34 @@ test.describe('Phase 3: Master Data & Number Intelligence E2E', () => {
 		await makerContext.close();
 
 		// 3. User B (Super Admin / Checker) reviews Pending Changes and approves User A's request
-		await page.goto('/master-data/pending-changes');
-		await expect(page.locator('main h1')).toContainText('Pending Changes');
-		page.on('dialog', (dialog) => dialog.accept());
+		const checkerContext = await browser.newContext();
+		const checkerPage = await checkerContext.newPage();
+		checkerPage.on('dialog', (dialog) => dialog.accept());
+		await checkerPage.goto('/login');
+		await checkerPage.fill('input#email', adminEmail);
+		await checkerPage.fill('input#password', adminPassword);
+		await checkerPage.click('button[type="submit"]');
+		await checkerPage.waitForURL('**/dashboard', { timeout: 15000 });
 
-		const approveBtn = page.locator('button:has-text("Approve"):not([disabled])').first();
-		await expect(approveBtn).toBeVisible();
-		await approveBtn.click();
+		await checkerPage.goto('/master-data/pending-changes');
+		await expect(checkerPage.locator('main h1')).toContainText('Pending Changes');
+
+		const crRow = checkerPage.locator('tr', { hasText: 'country' }).first();
+		await expect(crRow).toBeVisible({ timeout: 10000 });
+		await crRow.locator('button:has-text("Review")').click();
+		await expect(checkerPage.locator('h2:has-text("Review Change Request")')).toBeVisible();
+		await checkerPage.locator('button:has-text("Approve & Apply")').click();
+		await expect(checkerPage.locator('text=Change request approved and applied')).toBeVisible({ timeout: 10000 });
 
 		// 4. Verify the newly approved country now exists in the Countries list
-		await page.goto('/master-data/countries');
-		const searchInput = page.locator('input[placeholder*="Search"]');
+		await checkerPage.goto('/master-data/countries');
+		await expect(checkerPage.locator('table')).toBeVisible({ timeout: 10000 });
+		const searchInput = checkerPage.locator('input[placeholder*="Search"]');
 		await searchInput.fill(countryName);
 		await searchInput.press('Enter');
-		await expect(page.locator('table')).toContainText(countryName, { timeout: 10000 });
+		await expect(checkerPage.locator('table')).toContainText(countryName, { timeout: 10000 });
+		cleanupTestCountries();
+		await checkerContext.close();
 	});
 
 	test('8. Transformation Rules interactive simulator renders', async ({ page }) => {
