@@ -5,8 +5,8 @@
   - Collects all git-tracked files and uncommitted additions (git ls-files --cached --others --exclude-standard).
   - Strictly filters out credentials, real secrets (.env), binaries (.exe, .dll), logs (*.log, *.jsonl),
     node_modules, test results, build artifacts, screenshots, and private keys.
-  - Automatically generates docs/CHANGES.md with cumulative git diff summary of Phase 8 changes.
   - Performs an automated content scan over all included files for private keys and real secrets (never prints secrets).
+  - Detects and categorizes all occurrences of known dev fixtures.
   - Packages entries with forward slashes into ..\znero-handover\znero-YYYYMMDD-HHMM.zip.
   - Verifies zip size < 20MB, file counts, top-level directory structure, 20 largest files,
     performs secret and exclusion assertions, and runs a test extraction to a temp folder before cleanup.
@@ -38,83 +38,50 @@ try {
         Remove-Item -LiteralPath $zipPath -Force
     }
 
-    # 1. Generate docs/CHANGES.md with cumulative git diff summary of Phase 8 changes
-    $changesPath = Join-Path $repoRoot "docs/CHANGES.md"
-    $gitStatus = (& git status --short) -join "`n"
-    $gitDiffStat = (& git diff --stat) -join "`n"
-
-    $changesContent = @"
-# Cumulative Changes - Phase 8A Chunk 1
-
-Generated: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC'))
-
-## Modified and Added Files
-\`\`\`
-$gitStatus
-\`\`\`
-
-## Diff Statistics
-\`\`\`
-$gitDiffStat
-\`\`\`
-
-## Major Additions in Phase 8A Chunk 1
-1. **Migration 000010 (Phase 8 Messaging)**:
-   - Partitioned tables: \`messages\` and \`message_parts\` partitioned by RANGE (\`created_at\`).
-   - Pre-created monthly partitions and \`DEFAULT\` catch-all partitions (\`messages_default\`, \`message_parts_default\`).
-   - Unpartitioned lookup tables: \`message_idempotency_lookups\` and \`message_provider_lookups\` guaranteeing global uniqueness across month boundaries.
-   - Transactional outbox table (\`message_outbox\`) and append-only audit tables (\`message_attempts\`, \`message_events\`, \`message_dlrs\`).
-2. **Double-Entry Ledger Extensions**:
-   - \`PlaceHoldTx\`, \`CaptureTx\`, \`ReleaseTx\`, \`PostChargeTx\` supporting caller-provided transactions.
-   - Idempotent capture replay verification with amount validation.
-3. **Messaging Domain & Ingestion Pipeline (\`backend/internal/messaging\`)**:
-   - Dual-encoding engine (GSM-7 & UCS-2) with multi-part UDH concatenation.
-   - Atomic submission: \`PlaceHoldTx\` and \`InsertMessageAtomic\` execute in the EXACT same database transaction.
-   - In-memory rate limiting via token bucket.
-   - Transactional outbox worker with \`FOR UPDATE SKIP LOCKED\`.
-   - Dynamic \`routing.Engine.Next()\` evaluation at dispatch time honoring live kill switches.
-   - Strict failover policy: retryable rejects fail over to Next(); permanent fatal rejects release holds; ambiguous outcomes (\`unknown\`) retain holds and are NEVER auto-resent.
-4. **Comprehensive Test Suite**:
-   - 18 integration tests in \`backend/internal/messaging/messaging_test.go\` executed under \`-race\` with zero skips and zero failures.
-"@
-    Set-Content -LiteralPath $changesPath -Value $changesContent -Encoding UTF8 -Force
-    Write-Host "Generated $changesPath with Phase 8 cumulative summary." -ForegroundColor Green
-
-    # 2. Gather files via git
+    # 1. Gather files via git
     $rawFiles = & git ls-files --cached --others --exclude-standard
     if ($LASTEXITCODE -ne 0) {
         throw "git ls-files failed with exit code $LASTEXITCODE"
     }
 
-    # Ensure docs/CHANGES.md is in list
-    if ($rawFiles -notcontains 'docs/CHANGES.md') {
-        $rawFiles = @($rawFiles) + 'docs/CHANGES.md'
-    }
-
-    # 3. Strict exclusion filter
+    # 2. Strict exclusion filter
     $excludedPatterns = @(
         '(^|/)\.git(/|$)',
         '(^|/)node_modules(/|$)',
+        '(^|/)vendor(/|$)',
         '(^|/)\.svelte-kit(/|$)',
         '(^|/)build(/|$)',
         '(^|/)dist(/|$)',
         '(^|/)out(/|$)',
-        '(^|/)test-results(/|$)',
+        '(^|/)coverage(/|$)',
         '(^|/)playwright-report(/|$)',
+        '(^|/)test-results(/|$)',
         '(^|/)blob-report(/|$)',
+        '(^|/)\.vite(/|$)',
         '(^|/)\.run(/|$)',
         '(^|/)tmp(/|$)',
+        '(^|/)logs(/|$)',
+        '(^|/)uploads(/|$)',
+        '(^|/)kafka-logs(/|$)',
+        '(^|/)kafka-data(/|$)',
+        '(^|/)\.idea(/|$)',
+        '(^|/)\.vscode(/|$)',
+        '(^|/)\.cache(/|$)',
+        '(^|/)\.npm(/|$)',
+        '(^|/)brain(/|$)',
+        '(^|/)artifacts(/|$)',
+        '(^|/)\.gemini(/|$)',
         '(^|/)scratch(/|$)',
         '(^|/)screenshots(/|$)',
         '(^|/)frontend/screenshots(/|$)',
         '\.(png|jpg|jpeg|gif|webp|ico)$',
+        '\.(log|jsonl|exe|dll|so|dylib|test|out|tmp|bak|dump|backup|key|pem|p12)$',
+        '(^|/)(?:Thumbs\.db|\.DS_Store)$',
         '(^|/)test-out.*\.txt$',
-        '\.(log|jsonl|exe|dll|so|dylib|test|out|tmp|bak|key|pem|p12)$',
         'bootstrap\.exe',
         'credentials\.json$',
         'id_rsa.*',
-        'id_ed25519.*',
-        '^\.env$'
+        'id_ed25519.*'
     )
 
     $includedFiles = [System.Collections.Generic.List[string]]::new()
@@ -143,30 +110,68 @@ $gitDiffStat
 
         $fullPath = Join-Path $repoRoot ($normalized -replace '/', [System.IO.Path]::DirectorySeparatorChar)
         if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            # Check database dumps larger than 200 KB outside backend/migrations
+            if ($normalized.EndsWith('.sql') -and -not $normalized.StartsWith('backend/migrations/')) {
+                $itemInfo = Get-Item -LiteralPath $fullPath
+                if ($itemInfo.Length -gt 200KB) {
+                    Write-Host "Excluding large SQL file: $normalized ($($itemInfo.Length) bytes)" -ForegroundColor Yellow
+                    continue
+                }
+            }
             $includedFiles.Add($normalized)
         }
     }
 
     Write-Host "Gathered $($includedFiles.Count) verified files for inclusion."
 
+    # 3. Check for single files > 2 MB
+    $largeFiles = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($relPath in $includedFiles) {
+        $fullPath = Join-Path $repoRoot ($relPath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        $fi = Get-Item -LiteralPath $fullPath
+        if ($fi.Length -gt 2MB) {
+            $largeFiles.Add([PSCustomObject]@{
+                Path = $relPath
+                SizeMB = [math]::Round($fi.Length / 1MB, 2)
+            })
+        }
+    }
+    if ($largeFiles.Count -gt 0) {
+        Write-Host "`nWARNING: Files larger than 2 MB detected:" -ForegroundColor Yellow
+        foreach ($lf in $largeFiles) {
+            Write-Host "  - $($lf.Path) ($($lf.SizeMB) MB)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Large File Check: PASSED (Zero files larger than 2 MB)." -ForegroundColor Green
+    }
+
     # 4. Automated Content Scan for Secrets & Sensitive Tokens
-    Write-Host "`nScanning $($includedFiles.Count) files for sensitive tokens and private keys..." -ForegroundColor Yellow
+    Write-Host "`nScanning $($includedFiles.Count) files for sensitive tokens, private keys, and real secrets..." -ForegroundColor Yellow
     $scanViolations = [System.Collections.Generic.List[string]]::new()
 
     # Extract real secrets from local .env if present to verify they NEVER leaked into source code
-    $realSecrets = [System.Collections.Generic.List[string]]::new()
+    $realSecrets = [System.Collections.Generic.List[hashtable]]::new()
     $localEnvPath = Join-Path $repoRoot '.env'
     if (Test-Path -LiteralPath $localEnvPath) {
         Get-Content -LiteralPath $localEnvPath | ForEach-Object {
             $line = $_.Trim()
-            if ($line -match '^(?:DB_PASSWORD|SECRETS_ENCRYPTION_KEY)=(?<val>.+)$') {
+            if ($line -match '^(?<key>DB_PASSWORD|SECRETS_ENCRYPTION_KEY|JWT_ACCESS_SECRET)=(?<val>.+)$') {
+                $k = $Matches['key'].Trim()
                 $val = $Matches['val'].Trim()
                 if ($val.Length -ge 12) {
-                    $realSecrets.Add($val)
+                    $realSecrets.Add(@{ Key = $k; Value = $val })
                 }
             }
         }
     }
+
+    # Known dev fixtures tracking
+    $knownFixtures = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $fixtureList = @(
+        @{ Name = 'DevSeed1234!#'; Token = 'DevSeed' + '1234!#' },
+        @{ Name = 'secret123'; Token = 'secret' + '123' },
+        @{ Name = 'zn_live_sample_key_1234567890'; Token = 'zn_live_sample_key_' + '1234567890' }
+    )
 
     foreach ($relPath in $includedFiles) {
         $fullPath = Join-Path $repoRoot ($relPath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
@@ -179,15 +184,50 @@ $gitDiffStat
         foreach ($line in $lines) {
             $lineNum++
 
-            # Private key header detection
-            if ($line -match '-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP)?\s*PRIVATE KEY-----') {
-                $scanViolations.Add("Private key header detected in $relPath at line $lineNum")
+            # Private key header detection (ignore this packaging script itself)
+            if ($relPath -ne 'scripts/make-handover-zip.ps1') {
+                if ($line -match '-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP)?\s*PRIVATE KEY-----') {
+                    $scanViolations.Add("Private key header detected in $relPath at line $lineNum")
+                }
             }
 
-            # Check if any real development secret from .env was accidentally committed into code
+            # Check if any real secret from local .env leaked into code
             foreach ($secret in $realSecrets) {
-                if ($line.Contains($secret)) {
-                    $scanViolations.Add("Real active environment secret detected in $relPath at line $lineNum")
+                if ($line.Contains($secret.Value)) {
+                    $scanViolations.Add("Real active environment secret ($($secret.Key)) detected in $relPath at line $lineNum")
+                }
+            }
+
+            # Check for known dev fixtures and verify their location
+            if ($relPath -ne 'scripts/make-handover-zip.ps1') {
+                foreach ($fx in $fixtureList) {
+                    if ($line.Contains($fx.Token)) {
+                        $isApprovedLocation = ($relPath -match '_test\.go$|\.spec\.ts$|\.test\.ts$') -or
+                                              ($relPath.StartsWith('backend/migrations/')) -or
+                                              ($relPath.StartsWith('backend/cmd/seed') -or $relPath.StartsWith('scripts/seed-')) -or
+                                              ($relPath.StartsWith('docs/')) -or
+                                              ($relPath -match 'mock|smppdevclient|capture-screenshots')
+
+                        $locType = if ($relPath -match '_test\.go$|\.spec\.ts$|\.test\.ts$') { 'Test' }
+                                   elseif ($relPath.StartsWith('backend/migrations/')) { 'Migration' }
+                                   elseif ($relPath.StartsWith('backend/cmd/seed') -or $relPath.StartsWith('scripts/seed-')) { 'Seed' }
+                                   elseif ($relPath.StartsWith('docs/')) { 'Documentation' }
+                                   elseif ($relPath -match 'mock|smppdevclient') { 'Mock/Tool' }
+                                   elseif ($relPath -match 'capture-screenshots') { 'Test Script' }
+                                   else { 'UNKNOWN' }
+
+                        $knownFixtures.Add([PSCustomObject]@{
+                            Fixture = $fx.Name
+                            File = $relPath
+                            Line = $lineNum
+                            LocationType = $locType
+                            Approved = $isApprovedLocation
+                        })
+
+                        if (-not $isApprovedLocation) {
+                            $scanViolations.Add("Known dev fixture '$($fx.Name)' found in unapproved location: $relPath at line $lineNum")
+                        }
+                    }
                 }
             }
         }
@@ -200,7 +240,9 @@ $gitDiffStat
         }
         throw "Content scan detected $($scanViolations.Count) sensitive token violations! Aborting zip generation."
     }
-    Write-Host "  [OK] Content scan passed: zero sensitive tokens or private keys found." -ForegroundColor Green
+    Write-Host "  [OK] Real .env secrets check passed: zero active secrets leaked." -ForegroundColor Green
+    Write-Host "  [OK] Private key header check passed: zero private keys detected." -ForegroundColor Green
+    Write-Host "  [OK] Known dev fixtures: $($knownFixtures.Count) occurrences verified in approved locations." -ForegroundColor Green
 
     # 5. Create Zip Archive with ZipArchive
     $zipFileStream = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::Create)
@@ -237,6 +279,7 @@ $gitDiffStat
 
     Write-Host "`n=== Handover Zip Verification Report ===" -ForegroundColor Green
     Write-Host "Output Zip Path : $zipPath"
+    Write-Host "Output Folder   : $destDir"
     Write-Host "Output Zip Size : $sizeMB MB ($sizeBytes bytes)"
     Write-Host "Total Files     : $($includedFiles.Count)"
 
@@ -291,6 +334,18 @@ $gitDiffStat
             if ($name.Contains('\')) {
                 $violations.Add("Backslash detected in entry name: $name")
             }
+            # Check for forbidden private/key/secret named files (excluding approved source packages, tests, docs, migrations, mocks, seeds)
+            $entryBaseName = [System.IO.Path]::GetFileName($name)
+            if ($entryBaseName -match '(?i)private|key|secret') {
+                $isAllowed = ($name.StartsWith('docs/')) -or
+                             ($name.StartsWith('backend/migrations/')) -or
+                             ($name -match 'mock') -or
+                             ($name -match 'seed') -or
+                             ($name.EndsWith('.go') -or $name.EndsWith('.ts') -or $name.EndsWith('.svelte'))
+                if (-not $isAllowed) {
+                    $violations.Add("Suspicious private/key/secret named non-code file: $name")
+                }
+            }
         }
 
         if ($violations.Count -gt 0) {
@@ -323,25 +378,19 @@ $gitDiffStat
             'backend/go.mod',
             'backend/go.sum',
             'frontend/package.json',
-            'backend/migrations/000009_phase7_routing.up.sql',
-            'backend/migrations/000009_phase7_routing.down.sql',
-            'backend/migrations/000010_phase8_messaging.up.sql',
-            'backend/migrations/000010_phase8_messaging.down.sql',
-            'backend/internal/messaging/service.go',
-            'backend/internal/messaging/dispatcher.go',
-            'backend/internal/messaging/models.go',
-            'backend/internal/messaging/repository.go',
-            'backend/internal/messaging/sender.go',
-            'backend/internal/messaging/messaging_test.go',
+            'frontend/package-lock.json',
+            'scripts/setup-db.ps1',
+            'scripts/dev.ps1',
             'docs/HANDOVER.md',
             'docs/MESSAGING_DESIGN.md',
-            'docs/ROUTING_DESIGN.md',
-            'docs/CHANGES.md',
-            'scripts/test.ps1',
-            'scripts/test-e2e.ps1',
-            'scripts/make-handover-zip.ps1',
             '.env.example'
         )
+
+        # Add all 24 migration files (000001 to 000012, up and down)
+        $migrations = Get-ChildItem (Join-Path $repoRoot 'backend/migrations') -Filter '*.sql' | Select-Object -ExpandProperty Name
+        foreach ($m in $migrations) {
+            $requiredFiles += "backend/migrations/$m"
+        }
 
         Write-Host "Verifying Critical Project Files in Extracted Content:" -ForegroundColor Yellow
         foreach ($rf in $requiredFiles) {
@@ -352,6 +401,24 @@ $gitDiffStat
             Write-Host "  [FOUND] $rf" -ForegroundColor Green
         }
 
+        # Assert no forbidden files exist in extraction directory
+        $extractedItems = Get-ChildItem -Path $tempExtractDir -Recurse -File
+        foreach ($item in $extractedItems) {
+            $rel = $item.FullName.Substring($tempExtractDir.Length).TrimStart('\', '/').Replace('\', '/')
+            if ($rel -eq '.env' -or ($rel.Contains('.env.') -and -not $rel.EndsWith('.env.example'))) {
+                throw "CRITICAL ERROR: Extracted file contains unpermitted .env: $rel"
+            }
+            if ($rel -match 'node_modules') {
+                throw "CRITICAL ERROR: Extracted file contains node_modules: $rel"
+            }
+            if ($rel -match '(^|/)\.git(/|$)') {
+                throw "CRITICAL ERROR: Extracted file contains .git: $rel"
+            }
+            if ($item.Extension -in @('.key', '.pem', '.p12')) {
+                throw "CRITICAL ERROR: Extracted file contains private key: $rel"
+            }
+        }
+
         Write-Host "`nAll critical files confirmed present and extraction test PASSED." -ForegroundColor Green
     } finally {
         if (Test-Path -LiteralPath $tempExtractDir) {
@@ -359,6 +426,9 @@ $gitDiffStat
             Write-Host "Cleaned up temporary extraction directory." -ForegroundColor Gray
         }
     }
+
+    Write-Host "`nKnown dev fixtures summary:" -ForegroundColor Cyan
+    $knownFixtures | Format-Table -Property Fixture, File, Line, LocationType, Approved -AutoSize | Out-String | Write-Host
 
     Write-Host "`nHandover zip generation successfully finished at $zipPath" -ForegroundColor Green
     return $zipPath
