@@ -442,3 +442,45 @@ Phase 8A is partitioned into three gated milestones:
 > **Phase 8A Implementation Status**:
 > Chunks 1, 2, and 3 are fully implemented with zero build, vet, or TypeScript errors. Awaiting user go-ahead for test execution, verification runs, and handover packaging in Phase 8A closeout.
 
+
+
+---
+
+## 15. Message Lifecycle — Manager State Mapping
+
+The platform manager's lifecycle uses the following stages. This table maps each manager state to either a code `status` column value or a `message_events.event_type` entry recorded in the same transaction.
+
+| Manager State | Code Representation | Recorded When |
+|:---|:---|:---|
+| **RECEIVED** | `event_type = "submitted"`, `to_status = "accepted"` | Customer submits via HTTP POST or SMPP `submit_sm`. Initial insert. |
+| **VALIDATED** | Implicit in the submission pipeline | Destination normalises to E.164, sender ID verified, encoding detected, message length within limits — all in-process before the DB transaction. No separate event; failure = `rejected` stored immediately. |
+| **AUTHORIZED** | `event_type = "submitted"`, `to_status = "accepted"` | `PlaceHoldTx` succeeds in the same atomic transaction as the message insert. Hold ID stored on the message row. |
+| **QUEUED** | `status = "accepted"`, outbox row `status = "pending"` | Outbox writer dispatches the outbox row to Kafka. Status remains `accepted` until dispatcher picks it up. |
+| **ROUTED** | `status = "queued"` | Dispatcher reads outbox, calls `routing.Engine.Resolve`, selects provider connection. Status updated to `queued`. |
+| **SUBMITTED** | `status = "submitting"` → `status = "submitted"` | `submitting` set when SMPP `submit_sm` / HTTP is sent to provider. `submitted` set when provider returns a definitive OK response with a message ID. |
+| **PROVIDER_ACCEPTED** | `status = "submitted"` + `provider_message_id` stored | `provider_message_id` written alongside the `submitted` status. No separate status value — the stored ID is the evidence of provider acceptance. |
+| **DELIVERED** | `status = "delivered"` | `deliver_sm` receipt / HTTP DLR callback arrives with `DELIVRD` or equivalent; `CaptureTx` or `PostChargeTx` fires in the same transaction (billing trigger dependent). |
+| **FAILED** | `status = "failed"` or `status = "undelivered"` | Permanent provider reject (`UNDELIV`, `REJECTD`, etc.) or reaper TTL expiry. Hold released (`ReleaseTx`) or captured (`CaptureTx`) depending on billing trigger. |
+| **EXPIRED** | `status = "expired"` | Reaper marks messages in `submitted` state past TTL with no DLR as expired. Hold treatment per NoDLR policy (see §16). |
+| **UNKNOWN** | `status = "unknown"` | Ambiguous outcome (timeout, dropped connection, crash after PDU write). **Never auto-resent**. Hold retained until unknown-resolution window elapses, then released with exposure flag. |
+
+> [!NOTE]
+> The intermediate `submitting` status (while the PDU is in-flight) is an internal platform state not exposed in customer-facing APIs. Customers see only: `accepted`, `queued`, `submitted`, `delivered`, `failed`, `expired`, `unknown`.
+
+> [!IMPORTANT]
+> State transitions are **strictly monotonic**. Final states (`delivered`, `failed`, `expired`, `unknown`, `rejected`) are never overwritten. A conflicting later DLR is recorded in `message_events` with `event_type = "dlr_conflict"` and flagged for review.
+
+---
+
+## 16. NoDLR Hold Policy
+
+When a message reaches `submitted` state but no DLR arrives before the message TTL, the Reaper transitions it to `expired`. The `NoDLRHoldPolicy` governs what happens to the customer wallet hold at that point (only relevant when `billing_trigger = "on_delivery"`).
+
+| Policy Value | Behaviour | Use Case |
+|:---|:---|:---|
+| `retain_until_resolution` | Hold is retained past TTL and released only after `unknown_resolution_window` elapses. A `SettlementException` of type `no_dlr_expired_exposure` is recorded. | **Default (safe)**. Gives provider time to deliver a late DLR. Supplier liability exposure is flagged for finance review. |
+| `immediate_release` | Hold is released immediately when the message TTL expires, without waiting for the resolution window. | Aggressive cash-flow preference; accept potential write-off risk on late DLRs. |
+| `capture_at_ttl` | Hold is **captured** (customer charged) in the same transaction as the `expired` state change. A `SettlementException` of type `capture_at_ttl` is recorded for finance review. | Use when the platform bears the supplier cost and must recover it even without delivery confirmation. |
+
+Configure via `MESSAGING_NO_DLR_HOLD_POLICY` environment variable (default: `retain_until_resolution`).
+

@@ -44,6 +44,7 @@ type ClientSession struct {
 	msgSvc  *messaging.Service
 	repo    messaging.Repository
 	limiter *customeredge.CustomerLimiter
+	bindLim *BindLimiter
 	tracker *SessionTracker
 	cfg     ServerConfig
 	logger  *slog.Logger
@@ -70,6 +71,7 @@ func NewClientSession(
 	msgSvc *messaging.Service,
 	repo messaging.Repository,
 	limiter *customeredge.CustomerLimiter,
+	bindLim *BindLimiter,
 	tracker *SessionTracker,
 	cfg ServerConfig,
 	logger *slog.Logger,
@@ -89,6 +91,7 @@ func NewClientSession(
 		msgSvc:       msgSvc,
 		repo:         repo,
 		limiter:      limiter,
+		bindLim:      bindLim,
 		tracker:      tracker,
 		cfg:          cfg,
 		logger:       logger.With("session_id", uuid.New().String(), "remote_ip", remoteIP),
@@ -232,6 +235,15 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 		return errors.New("empty system_id")
 	}
 
+	// Brute-force lockout check: keyed on IP + system_id so an attacker from one IP
+	// cannot lock out a legitimate customer bound from a different IP.
+	if s.bindLim != nil && s.bindLim.IsLockedOut(s.RemoteIP, systemID) {
+		s.logger.Warn("smpp bind rejected: too many failures (lockout)", "system_id", systemID, "remote_ip", s.RemoteIP)
+		resp := pdu.NewBindResp(bindCmd|0x80000000, pdu.StatusRBindFail, bind.Header.SequenceNumber, s.cfg.SystemID)
+		_ = s.writePDU(resp)
+		return errors.New("bind locked out due to too many failures")
+	}
+
 	// Query account and verify credentials
 	q := `
 		SELECT a.id, a.organization_id, a.password_hash, a.allowed_ips,
@@ -260,7 +272,10 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 		&orgStatus, &orgType,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Generic bind failure
+		// Record failure for this IP+system_id to throttle guessing
+		if s.bindLim != nil {
+			s.bindLim.RecordFailure(s.RemoteIP, systemID)
+		}
 		resp := pdu.NewBindResp(bindCmd|0x80000000, pdu.StatusRBindFail, bind.Header.SequenceNumber, s.cfg.SystemID)
 		_ = s.writePDU(resp)
 		return errors.New("smpp account not found")
@@ -274,6 +289,9 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 	// 1. Password Verification via constant-time Argon2id
 	match, verifyErr := password.Verify(bind.Password, dbHash)
 	if verifyErr != nil || !match {
+		if s.bindLim != nil {
+			s.bindLim.RecordFailure(s.RemoteIP, systemID)
+		}
 		s.logger.Warn("smpp bind failed: invalid password", "system_id", systemID)
 		resp := pdu.NewBindResp(bindCmd|0x80000000, pdu.StatusRInvPaswd, bind.Header.SequenceNumber, s.cfg.SystemID)
 		_ = s.writePDU(resp)
@@ -350,6 +368,11 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 	}
 
 	s.tracker.Register(s)
+
+	// Successful bind — reset failure counter for this IP+system_id.
+	if s.bindLim != nil {
+		s.bindLim.RecordSuccess(s.RemoteIP, systemID)
+	}
 
 	resp := pdu.NewBindResp(bindCmd|0x80000000, pdu.StatusROK, bind.Header.SequenceNumber, s.cfg.SystemID)
 	if err := s.writePDU(resp); err != nil {

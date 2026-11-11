@@ -35,6 +35,7 @@ type Server struct {
 	msgSvc     *messaging.Service
 	repo       messaging.Repository
 	limiter    *customeredge.CustomerLimiter
+	bindLim    *BindLimiter
 	logger     *slog.Logger
 	listener   net.Listener
 	tracker    *SessionTracker
@@ -74,6 +75,7 @@ func NewServer(
 		msgSvc:  msgSvc,
 		repo:    repo,
 		limiter: limiter,
+		bindLim: NewBindLimiter(),
 		logger:  logger,
 		tracker: NewSessionTracker(),
 	}
@@ -163,7 +165,7 @@ func (s *Server) acceptLoop(ctx context.Context) {
 			}
 		}
 
-		session := NewClientSession(conn, s.pool, s.msgSvc, s.repo, s.limiter, s.tracker, s.cfg, s.logger)
+		session := NewClientSession(conn, s.pool, s.msgSvc, s.repo, s.limiter, s.bindLim, s.tracker, s.cfg, s.logger)
 		go session.Run(ctx)
 	}
 }

@@ -16,7 +16,7 @@ import (
 func main() {
 	addr := flag.String("addr", "localhost:2776", "SMPP server host:port")
 	systemID := flag.String("system-id", "dev_client", "SMPP system_id")
-	password := flag.String("password", "secret123", "SMPP password")
+	password := flag.String("password", "", "SMPP password (required; use the value printed by seedcustomeredge)")
 	bindType := flag.String("bind-type", "trx", "Bind type: tx, rx, or trx")
 	dest := flag.String("to", "", "Destination phone number (E.164) to submit SMS")
 	src := flag.String("from", "DEVCLIENT", "Source sender ID")

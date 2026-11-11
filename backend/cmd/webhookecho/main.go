@@ -10,7 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -30,24 +30,26 @@ func main() {
 		defer func() { _ = r.Body.Close() }()
 
 		timestamp := time.Now().Format(time.RFC3339)
-		deliveryID := r.Header.Get("X-Znero-Delivery-ID")
+		eventID := r.Header.Get("X-Znero-Event-Id")
 		eventType := r.Header.Get("X-Znero-Event")
+		tsHeader := r.Header.Get("X-Znero-Timestamp")
 		sigHeader := r.Header.Get("X-Znero-Signature")
 
 		fmt.Printf("\n--- [%s] Incoming Webhook ---\n", timestamp)
 		fmt.Printf("Method:      %s %s\n", r.Method, r.URL.Path)
-		fmt.Printf("Delivery ID: %s\n", deliveryID)
+		fmt.Printf("Event-Id:    %s\n", eventID)
 		fmt.Printf("Event:       %s\n", eventType)
+		fmt.Printf("Timestamp:   %s\n", tsHeader)
 		fmt.Printf("Signature:   %s\n", sigHeader)
 		fmt.Printf("Content-Len: %d bytes\n", len(body))
 		fmt.Printf("Payload:\n%s\n", string(body))
 
 		if *secret != "" {
-			valid := verifySignature(sigHeader, body, *secret)
+			valid := verifySignature(tsHeader, sigHeader, body, *secret)
 			if valid {
-				fmt.Printf("Signature Verification: [VALID âœ“]\n")
+				fmt.Printf("Signature Verification: [VALID ✓]\n")
 			} else {
-				fmt.Printf("Signature Verification: [INVALID âœ—]\n")
+				fmt.Printf("Signature Verification: [INVALID ✗]\n")
 			}
 		}
 
@@ -57,7 +59,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(*statusCode)
-		_, _ = fmt.Fprintf(w, `{"received":true,"delivery_id":"%s"}`+"\n", deliveryID)
+		_, _ = fmt.Fprintf(w, `{"received":true,"event_id":"%s"}`+"\n", eventID)
 	})
 
 	log.Printf("Webhook Echo Server listening on %s (Secret: %t, Status: %d, Delay: %dms)", *addr, *secret != "", *statusCode, *delayMs)
@@ -66,32 +68,39 @@ func main() {
 	}
 }
 
-func verifySignature(sigHeader string, payload []byte, secret string) bool {
-	if sigHeader == "" {
+// verifySignature reconstructs the signed payload "{timestamp}.{body}" and verifies the
+// HMAC-SHA256 against the "v1=<hex>" value in X-Znero-Signature.
+func verifySignature(tsHeader, sigHeader string, payload []byte, secret string) bool {
+	if tsHeader == "" || sigHeader == "" {
 		return false
 	}
 
-	parts := strings.Split(sigHeader, ",")
-	var tsPart, v1Part string
-	for _, p := range parts {
-		kv := strings.SplitN(p, "=", 2)
-		if len(kv) == 2 {
-			if kv[0] == "t" {
-				tsPart = kv[1]
-			} else if kv[0] == "v1" {
-				v1Part = kv[1]
-			}
-		}
+	// Validate timestamp is a reasonable unix timestamp (not more than 5 minutes old)
+	ts, err := strconv.ParseInt(tsHeader, 10, 64)
+	if err != nil {
+		return false
+	}
+	age := time.Since(time.Unix(ts, 0))
+	if age < 0 {
+		age = -age
+	}
+	if age > 5*time.Minute {
+		fmt.Printf("Warning: webhook timestamp is %v old (tolerance: 5m)\n", age.Round(time.Second))
 	}
 
-	if tsPart == "" || v1Part == "" {
+	// Extract v1=<hex> from signature header
+	v1Hex := ""
+	if len(sigHeader) > 3 && sigHeader[:3] == "v1=" {
+		v1Hex = sigHeader[3:]
+	}
+	if v1Hex == "" {
 		return false
 	}
 
-	payloadToSign := fmt.Sprintf("%s.%s", tsPart, string(payload))
+	payloadToSign := fmt.Sprintf("%s.%s", tsHeader, string(payload))
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payloadToSign))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
 
-	return hmac.Equal([]byte(v1Part), []byte(expectedSig))
+	return hmac.Equal([]byte(v1Hex), []byte(expectedSig))
 }

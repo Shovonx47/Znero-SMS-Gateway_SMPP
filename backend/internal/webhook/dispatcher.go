@@ -193,11 +193,11 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 	}
 
 	ts := time.Now().Unix()
-	signedPayload := fmt.Sprintf("%d.%s", ts, string(item.Payload))
+	tsStr := fmt.Sprintf("%d", ts)
+	signedPayload := fmt.Sprintf("%s.%s", tsStr, string(item.Payload))
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(signedPayload))
-	sig := hex.EncodeToString(mac.Sum(nil))
-	sigHeader := fmt.Sprintf("t=%d,v1=%s", ts, sig)
+	sig := "v1=" + hex.EncodeToString(mac.Sum(nil))
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, wh.URL, bytes.NewReader(item.Payload))
 	if err != nil {
@@ -207,9 +207,10 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "Znero-Webhook-Dispatcher/1.0")
-	httpReq.Header.Set("X-Znero-Delivery-ID", item.ID.String())
+	httpReq.Header.Set("X-Znero-Event-Id", item.ID.String())
 	httpReq.Header.Set("X-Znero-Event", item.EventType)
-	httpReq.Header.Set("X-Znero-Signature", sigHeader)
+	httpReq.Header.Set("X-Znero-Timestamp", tsStr)
+	httpReq.Header.Set("X-Znero-Signature", sig)
 
 	start := time.Now()
 	resp, err := d.httpClient.Do(httpReq)

@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,6 +23,11 @@ const (
 
 	// HoldPolicyImmediateRelease immediately releases the customer hold upon message TTL expiry.
 	HoldPolicyImmediateRelease NoDLRHoldPolicy = "immediate_release"
+
+	// HoldPolicyCaptureAtTTL charges the customer (captures the hold) when a provider-accepted
+	// message expires with no DLR receipt, rather than releasing.  Use when the platform bears
+	// the supplier cost and must recover it even without delivery confirmation.
+	HoldPolicyCaptureAtTTL NoDLRHoldPolicy = "capture_at_ttl"
 )
 
 // ReaperConfig contains configurable durations for the messaging reaper worker.
@@ -284,10 +290,41 @@ func (r *Reaper) reapNoDLRMessages(ctx context.Context) {
 
 		// If billing trigger is on_delivery, apply configured hold policy
 		if r.dlrProc.billingTrig == "on_delivery" && msg.HoldID != nil {
-			if r.cfg.NoDLRHoldPolicy == HoldPolicyImmediateRelease {
+			switch r.cfg.NoDLRHoldPolicy {
+			case HoldPolicyCaptureAtTTL:
+				// Charge the customer for the expired message in the same transaction as the state change.
+				idempKey := fmt.Sprintf("reaper-capture-at-ttl-%s", msg.ID.String())
+				_, captureErr := r.ledgerSvc.CaptureTx(ctx, tx, *msg.HoldID, msg.SellPrice, &idempKey)
+				if captureErr != nil {
+					r.logger.Error("reaper capture_at_ttl failed; hold remains open",
+						"msg_id", msg.ID, "hold_id", *msg.HoldID, "err", captureErr)
+				} else {
+					r.logger.Info("reaper captured hold at TTL (capture_at_ttl policy)",
+						"msg_id", msg.ID, "hold_id", *msg.HoldID, "amount", msg.SellPrice)
+					// Record a settlement exception so finance can review capture-at-ttl events.
+					details, _ := json.Marshal(map[string]interface{}{
+						"message_id":      msg.ID.String(),
+						"customer_org_id": msg.CustomerOrgID.String(),
+						"sell_price":      msg.SellPrice.String(),
+						"hold_id":         msg.HoldID,
+						"note":            "No DLR within TTL; hold captured per capture_at_ttl policy.",
+					})
+					_ = r.repo.RecordSettlementException(ctx, SettlementException{
+						MessageID:        msg.ID,
+						MessageCreatedAt: msg.CreatedAt,
+						CustomerOrgID:    &msg.CustomerOrgID,
+						HoldID:           msg.HoldID,
+						ExceptionType:    "capture_at_ttl",
+						Severity:         "info",
+						Details:          details,
+					})
+				}
+
+			case HoldPolicyImmediateRelease:
 				_ = r.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
-			} else {
-				// Default HoldPolicyRetainUntilResolution: retain until unknown-resolution window ends
+
+			default:
+				// HoldPolicyRetainUntilResolution: retain until unknown-resolution window ends
 				submittedAt := msg.CreatedAt
 				if msg.SubmittedAt != nil {
 					submittedAt = *msg.SubmittedAt

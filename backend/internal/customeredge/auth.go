@@ -75,12 +75,18 @@ func (a *EdgeAuthenticator) InvalidateOrg(orgID uuid.UUID) {
 func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey string, clientIP string) (*Principal, error) {
 	rawKey = strings.TrimSpace(rawKey)
 	if !strings.HasPrefix(rawKey, "znk_live_") || len(rawKey) < 20 {
+		// Key is too short to have a meaningful prefix; use IP alone for lockout
 		a.recordFailure(clientIP)
 		return nil, ErrUnauthorized
 	}
 
+	// Lockout key: IP + first 17 chars of key (prefix). This prevents an attacker from locking
+	// out a legitimate customer by submitting garbage from many IPs, while still blocking brute-
+	// force attempts from one IP against one credential prefix.
+	lockoutKey := clientIP + "|" + rawKey[:17]
+
 	// 1. Brute-force lockout check
-	if a.isLockedOut(clientIP) {
+	if a.isLockedOut(lockoutKey) {
 		return nil, ErrUnauthorized
 	}
 
@@ -96,6 +102,7 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 	now := time.Now()
 	if ok && now.Sub(cached.cachedAt) < a.cacheTTL {
 		if cached.principal == nil || !cached.principal.IsActive {
+			a.recordFailure(lockoutKey)
 			return nil, ErrUnauthorized
 		}
 		if !cached.principal.ValidateIP(clientIP) {
@@ -135,13 +142,13 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 		&orgStatus, &orgType, &tpsLimit,
 	)
 	if err != nil {
-		a.recordFailure(clientIP)
+		a.recordFailure(lockoutKey)
 		return nil, ErrUnauthorized
 	}
 
 	// 5. Constant-time verification of key hash
 	if subtle.ConstantTimeCompare([]byte(keyHash), []byte(dbHash)) != 1 {
-		a.recordFailure(clientIP)
+		a.recordFailure(lockoutKey)
 		return nil, ErrUnauthorized
 	}
 

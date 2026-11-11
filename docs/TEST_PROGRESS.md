@@ -60,3 +60,4 @@
 - `npm run check` (svelte-check): **0 errors, 0 warnings**
 - `npx tsc --noEmit` (including e2e): **0 errors**
 - IDE Problems panel: **0 errors**
+

@@ -19,3 +19,4 @@ This document tracks all bugs, regressions, security flaws, and specification vi
 | `BUG-001` | **HIGH** | Working copy corruption in `internal/messaging/repository.go` and `internal/customeredge`: 370+ lines of repository methods, fingerprint lookup, and `ToTenantContext()` were stripped in an uncommitted edit, cascading into 83 compilation failures across 8 packages. | Stage 0 Working Tree Triage (`go build ./...`) | An incomplete/aborted closing-fix edit left truncated files in the working directory. Restored working copy to verified commit `f93ffee`, ran `gofmt -w .`, and confirmed clean compilation. | `Stage 0 Compile & Vet Verification` |
 
 ---
+
