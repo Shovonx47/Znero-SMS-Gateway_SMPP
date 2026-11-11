@@ -137,6 +137,29 @@ func (c *Client) EnsureTopic(ctx context.Context, topic string, partitions int32
 	return nil
 }
 
+// DeleteTopic deletes the named Kafka topic. If the topic does not exist the call succeeds.
+func (c *Client) DeleteTopic(ctx context.Context, topic string) error {
+	req := kmsg.NewPtrDeleteTopicsRequest()
+	req.TopicNames = []string{topic}
+	req.TimeoutMillis = 10000
+
+	resp, err := req.RequestWith(ctx, c.cl)
+	if err != nil {
+		return fmt.Errorf("delete topic %q: %w", topic, err)
+	}
+	for _, rt := range resp.Topics {
+		if rt.ErrorCode == 0 {
+			continue
+		}
+		topicErr := kerr.ErrorForCode(rt.ErrorCode)
+		if errors.Is(topicErr, kerr.UnknownTopicOrPartition) {
+			continue // already gone
+		}
+		return fmt.Errorf("delete topic %q: %w", topic, topicErr)
+	}
+	return nil
+}
+
 // Handler processes one received message. A returned error is logged; the message is still
 // committed (there is no dead-letter queue yet).
 type Handler func(ctx context.Context, m Message) error

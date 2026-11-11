@@ -11,8 +11,8 @@
 | Stage | Name | Status | Build & Vet | Test Results | Notes / Blocker |
 |:---:|:---|:---:|:---:|:---:|:---|
 | **0** | **Working Tree Triage** | **COMPLETE** | **PASS (0 errors)** | N/A | Working tree triaged, backup saved to `..\znero-wip\uncommitted.patch`, clean compile confirmed. |
-| **1** | Closing Fixes Implementation | NOT STARTED | Pending | Pending | Random seed credentials, NO_DLR_HOLD_POLICY, webhook signing headers, auth lockout, lifecycle mapping. |
-| **2** | Test Infrastructure & Baseline | NOT STARTED | Pending | Pending | Test DB guard, topic cleanup, injectable clock, migration up/down test, baseline test suite run. |
+| **1** | **Closing Fixes Implementation** | **COMPLETE** | **PASS (0 errors)** | N/A | Random seed credentials, NoDLR `capture_at_ttl` policy, webhook headers `X-Znero-{Event-Id,Timestamp,Signature}`, IP+credential lockout keying in HTTP & SMPP, lifecycle mapping documented. |
+| **2** | Test Infrastructure & Baseline | IN PROGRESS | PASS (0 errors) | In Progress | Test DB guard, topic cleanup, injectable clock, log leak scanner, mock SMPP/HTTP harnesses, Kafka KRaft started. |
 | **3** | Earlier-Phase Doubt List (2–7) | NOT STARTED | Pending | Pending | Ledger property tests, 100k rate import, routing snapshot benchmarks, auth & number engine edge cases. |
 | **4** | Phase 8A Tests (Messaging Core & SMPP) | NOT STARTED | Pending | Pending | Pipeline order, GSM-7/UCS-2 segmentation, 50 concurrent duplicates, outbox crash resilience, SMPP codec round-trip. |
 | **5** | Phase 8B Tests (Customer Edge & SMPP Server) | NOT STARTED | Pending | Pending | API key auth & scopes, leak scan, rate limiters, SMPP server bind lockout, webhooks HMAC, inbound MO routing. |
