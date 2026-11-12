@@ -42,7 +42,7 @@ Push-Location -LiteralPath (Join-Path $script:RepoRoot 'backend')
 try {
     $gosecCmd = Get-Command 'gosec' -ErrorAction SilentlyContinue
     if ($gosecCmd) {
-        & gosec -quiet -exclude=G104,G304,G115 ./...
+        & gosec -quiet "-exclude=G104,G304,G115" ./...
         if ($global:LASTEXITCODE -ne 0) {
             Write-Host "gosec reported security findings (see output above)." -ForegroundColor Yellow
             $issues++
