@@ -23,7 +23,7 @@
 				apiClient.getLoginHistory(1, 20)
 			]);
 			sessions = sessRes.data;
-			loginHistory = historyRes.data.items;
+			loginHistory = historyRes.data.items || [];
 		} catch (err) {
 			if (err instanceof ApiClientError) {
 				errorMessage = err.message;

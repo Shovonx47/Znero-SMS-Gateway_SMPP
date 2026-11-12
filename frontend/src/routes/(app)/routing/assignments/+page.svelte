@@ -55,8 +55,12 @@
 			// Load customer orgs and countries for modal
 			try {
 				const [orgRes, cntRes] = await Promise.all([
-					apiClient.listOrganizations({ pageSize: 100, type: 'customer' }),
-					apiClient.listCountries({ pageSize: 250 })
+					auth.hasPermission('org.organization.view')
+						? apiClient.listOrganizations({ pageSize: 100, type: 'customer' })
+						: Promise.resolve({ data: { items: [] as Organization[] } }),
+					auth.hasPermission('country.country.view')
+						? apiClient.listCountries({ pageSize: 250 })
+						: Promise.resolve({ data: { items: [] as Country[] } })
 				]);
 				customers = orgRes.data.items || [];
 				countries = cntRes.data.items || [];
@@ -175,7 +179,7 @@
 	<!-- Filters -->
 	<div class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
 		<div class="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-			<select
+			<select aria-label="Filter by customer"
 				bind:value={customerFilter}
 				onchange={handleFilter}
 				class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white"
@@ -186,7 +190,7 @@
 				{/each}
 			</select>
 
-			<select
+			<select aria-label="Filter by route plan"
 				bind:value={planFilter}
 				onchange={handleFilter}
 				class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white"

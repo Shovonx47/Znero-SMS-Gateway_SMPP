@@ -53,12 +53,22 @@ func Hash(pwd string) (string, error) {
 	if err := ValidateStrength(pwd); err != nil {
 		return "", err
 	}
+	return HashRaw(pwd)
+}
+
+// HashRaw creates an Argon2id hash without applying the 12-char human-password policy.
+// Intended strictly for machine-generated protocol secrets bounded by wire specs
+// (e.g. SMPP v3.4 bind passwords capped at 8 usable octets / C-Octet max 9).
+func HashRaw(secret string) (string, error) {
+	if secret == "" {
+		return "", ErrPasswordTooShort
+	}
 	salt := make([]byte, argonSaltLength)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
 
-	hash := argon2.IDKey([]byte(pwd), salt, argonIterations, argonMemory, argonParallelism, argonKeyLength)
+	hash := argon2.IDKey([]byte(secret), salt, argonIterations, argonMemory, argonParallelism, argonKeyLength)
 	saltB64 := base64.RawStdEncoding.EncodeToString(salt)
 	hashB64 := base64.RawStdEncoding.EncodeToString(hash)
 

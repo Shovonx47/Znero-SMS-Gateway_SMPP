@@ -5,6 +5,8 @@
 	import { auth } from '$lib/auth.svelte';
 	import type {
 		Country,
+		HTTPConnectorConfig,
+		HTTPTestSendResult,
 		Operator,
 		Provider,
 		ProviderConnection,
@@ -61,16 +63,51 @@
 	let connSmppCharset = $state('GSM7');
 	let connIpAllowlist = $state('');
 	let connHttpBaseUrl = $state('');
-	let connHttpAuthType = $state<'none' | 'basic' | 'header_token' | 'query_token'>('header_token');
+	let connHttpAuthType = $state<'none' | 'basic' | 'bearer' | 'header_token' | 'api_key_header' | 'query_token' | 'api_key_query'>('bearer');
 	let connHttpCredentials = $state('');
 	let connHttpFormatNotes = $state('');
 	let connHttpDlrNotes = $state('');
+	let connHttpMethod = $state('POST');
+	let connHttpUrlTemplate = $state('');
+	let connHttpAuthHeaderName = $state('');
+	let connHttpAuthQueryParam = $state('');
+	let connHttpHeadersJson = $state('{}');
+	let connHttpBodyFormat = $state<'json' | 'form' | 'none'>('json');
+	let connHttpBodyTemplate = $state('{"to":"{{destination}}","from":"{{sender}}","text":"{{text}}","message_id":"{{message_id}}","encoding":"{{encoding}}"}');
+	let connHttpMsgIdPath = $state('message_id');
+	let connHttpErrorCodePath = $state('error');
+	let connHttpSuccessMin = $state(200);
+	let connHttpSuccessMax = $state(299);
+	let connHttpDlrMode = $state<'none' | 'callback' | 'polling'>('none');
+	let connHttpDlrSecret = $state('');
+	let connHttpCallbackSigAlgo = $state<'hmac_sha256' | 'shared_secret' | 'none'>('hmac_sha256');
+	let connHttpCallbackMsgIdPath = $state('message_id');
+	let connHttpCallbackStatusPath = $state('status');
+	let connHttpPollUrlTemplate = $state('');
+	let connHttpPollIntervalSec = $state(30);
+	let connHttpPollStatusPath = $state('status');
 	let connReason = $state('');
 	let connError = $state<string | null>(null);
 	let isSubmittingConn = $state(false);
 
+	// Edit HTTP Template Modal
+	let editHttpConn = $state<ProviderConnection | null>(null);
+	let editHttpError = $state<string | null>(null);
+	let isSavingHttpCfg = $state(false);
+
+	// Test Send Modal (HTTP Connector)
+	let testSendTargetConn = $state<ProviderConnection | null>(null);
+	let testDest = $state('+15550001234');
+	let testSenderId = $state('ZNERO');
+	let testText = $state('Znero HTTP connector test');
+	let testSimMode = $state<'' | 'accept' | 'reject' | 'throttle' | 'server_err'>('accept');
+	let testResult = $state<HTTPTestSendResult | null>(null);
+	let testError = $state<string | null>(null);
+	let isTestingSend = $state(false);
+
 	// Update Secret Modal (write-only)
 	let secretTargetConn = $state<ProviderConnection | null>(null);
+	let secretKind = $state<'auth' | 'dlr'>('auth');
 	let newSecretValue = $state('');
 	let secretReason = $state('');
 	let secretError = $state<string | null>(null);
@@ -191,13 +228,159 @@
 		connSmppCharset = 'GSM7';
 		connIpAllowlist = '';
 		connHttpBaseUrl = '';
-		connHttpAuthType = 'header_token';
+		connHttpAuthType = 'bearer';
 		connHttpCredentials = '';
 		connHttpFormatNotes = '';
 		connHttpDlrNotes = '';
+		connHttpMethod = 'POST';
+		connHttpUrlTemplate = '';
+		connHttpAuthHeaderName = '';
+		connHttpAuthQueryParam = '';
+		connHttpHeadersJson = '{}';
+		connHttpBodyFormat = 'json';
+		connHttpBodyTemplate = '{"to":"{{destination}}","from":"{{sender}}","text":"{{text}}","message_id":"{{message_id}}","encoding":"{{encoding}}"}';
+		connHttpMsgIdPath = 'message_id';
+		connHttpErrorCodePath = 'error';
+		connHttpSuccessMin = 200;
+		connHttpSuccessMax = 299;
+		connHttpDlrMode = 'none';
+		connHttpDlrSecret = '';
+		connHttpCallbackSigAlgo = 'hmac_sha256';
+		connHttpCallbackMsgIdPath = 'message_id';
+		connHttpCallbackStatusPath = 'status';
+		connHttpPollUrlTemplate = '';
+		connHttpPollIntervalSec = 30;
+		connHttpPollStatusPath = 'status';
 		connReason = '';
 		connError = null;
 		isConnModalOpen = true;
+	}
+
+	function buildHttpConfigPayload(): HTTPConnectorConfig {
+		let headers: Record<string, string> | undefined = undefined;
+		const trimmedHdr = connHttpHeadersJson.trim();
+		if (trimmedHdr && trimmedHdr !== '{}') {
+			const parsed = JSON.parse(trimmedHdr);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				headers = {};
+				for (const [k, v] of Object.entries(parsed)) {
+					headers[k] = String(v);
+				}
+			} else {
+				throw new Error('Custom headers must be a JSON object of key/value strings');
+			}
+		}
+		return {
+			method: connHttpMethod,
+			url_template: connHttpUrlTemplate.trim() || undefined,
+			headers,
+			auth_header_name: connHttpAuthHeaderName.trim() || undefined,
+			auth_query_param: connHttpAuthQueryParam.trim() || undefined,
+			body_format: connHttpBodyFormat,
+			body_template: connHttpBodyTemplate,
+			success_http_min: Number(connHttpSuccessMin) || 200,
+			success_http_max: Number(connHttpSuccessMax) || 299,
+			provider_msg_id_path: connHttpMsgIdPath.trim() || 'message_id',
+			error_code_path: connHttpErrorCodePath.trim() || 'error',
+			callback_signature_algo: connHttpCallbackSigAlgo,
+			callback_msg_id_path: connHttpCallbackMsgIdPath.trim() || 'message_id',
+			callback_status_path: connHttpCallbackStatusPath.trim() || 'status',
+			poll_url_template: connHttpPollUrlTemplate.trim() || undefined,
+			poll_interval_sec: Number(connHttpPollIntervalSec) || 30,
+			poll_status_path: connHttpPollStatusPath.trim() || 'status'
+		};
+	}
+
+	function openEditHttpConfig(c: ProviderConnection) {
+		editHttpConn = c;
+		connHttpBaseUrl = c.http_base_url;
+		connHttpAuthType = c.http_auth_type;
+		const cfg = c.http_config || {};
+		connHttpMethod = cfg.method || 'POST';
+		connHttpUrlTemplate = cfg.url_template || '';
+		connHttpAuthHeaderName = cfg.auth_header_name || '';
+		connHttpAuthQueryParam = cfg.auth_query_param || '';
+		connHttpHeadersJson = JSON.stringify(cfg.headers || {}, null, 2);
+		connHttpBodyFormat = (cfg.body_format as 'json' | 'form' | 'none') || 'json';
+		connHttpBodyTemplate = cfg.body_template || '{"to":"{{destination}}","from":"{{sender}}","text":"{{text}}","message_id":"{{message_id}}","encoding":"{{encoding}}"}';
+		connHttpMsgIdPath = cfg.provider_msg_id_path || 'message_id';
+		connHttpErrorCodePath = cfg.error_code_path || 'error';
+		connHttpSuccessMin = cfg.success_http_min || 200;
+		connHttpSuccessMax = cfg.success_http_max || 299;
+		connHttpDlrMode = c.http_dlr_mode || 'none';
+		connHttpCallbackSigAlgo = (cfg.callback_signature_algo as 'hmac_sha256' | 'shared_secret' | 'none') || 'hmac_sha256';
+		connHttpCallbackMsgIdPath = cfg.callback_msg_id_path || 'message_id';
+		connHttpCallbackStatusPath = cfg.callback_status_path || 'status';
+		connHttpPollUrlTemplate = cfg.poll_url_template || '';
+		connHttpPollIntervalSec = cfg.poll_interval_sec || 30;
+		connHttpPollStatusPath = cfg.poll_status_path || 'status';
+		connReason = '';
+		editHttpError = null;
+	}
+
+	async function submitEditHttpConfig() {
+		if (!editHttpConn) return;
+		isSavingHttpCfg = true;
+		editHttpError = null;
+		try {
+			const httpCfg = buildHttpConfigPayload();
+			const res = await apiClient.updateProviderConnection(providerId, editHttpConn.id, {
+				http_base_url: connHttpBaseUrl.trim(),
+				http_auth_type: connHttpAuthType,
+				http_config: httpCfg,
+				http_dlr_mode: connHttpDlrMode,
+				reason: connReason.trim() || 'Updated HTTP connector template'
+			});
+			editHttpConn = null;
+			if (res.data.pending_approval) {
+				toast('HTTP config update submitted for approval', 'info');
+			} else {
+				toast('HTTP connector template saved', 'success');
+			}
+			await loadAll();
+		} catch (err) {
+			editHttpError = err instanceof ApiClientError ? err.message : (err instanceof Error ? err.message : 'Failed to save HTTP config');
+		} finally {
+			isSavingHttpCfg = false;
+		}
+	}
+
+	function openTestSend(c: ProviderConnection) {
+		testSendTargetConn = c;
+		testDest = '+15550001234';
+		testSenderId = 'ZNERO';
+		testText = 'Znero HTTP connector test';
+		testSimMode = '';
+		testResult = null;
+		testError = null;
+	}
+
+	async function submitTestSend() {
+		if (!testSendTargetConn) return;
+		isTestingSend = true;
+		testError = null;
+		testResult = null;
+		try {
+			const res = await apiClient.testProviderConnectionSend(providerId, testSendTargetConn.id, {
+				destination: testDest.trim(),
+				sender_id: testSenderId.trim(),
+				text: testText,
+				simulate_mode: testSimMode
+			});
+			testResult = res.data;
+		} catch (err) {
+			testError = err instanceof ApiClientError ? err.message : 'Test send failed';
+		} finally {
+			isTestingSend = false;
+		}
+	}
+
+	function copyCallbackUrl(path: string) {
+		const full = typeof window !== 'undefined' ? window.location.origin + path : path;
+		if (typeof navigator !== 'undefined' && navigator.clipboard) {
+			void navigator.clipboard.writeText(full);
+			toast('Callback URL copied to clipboard', 'success');
+		}
 	}
 
 	async function submitConnection() {
@@ -230,11 +413,15 @@
 				if (connHttpCredentials) payload.http_credentials = connHttpCredentials;
 				payload.http_format_notes = connHttpFormatNotes.trim();
 				payload.http_dlr_callback_notes = connHttpDlrNotes.trim();
+				payload.http_config = buildHttpConfigPayload();
+				payload.http_dlr_mode = connHttpDlrMode;
+				if (connHttpDlrSecret) payload.http_dlr_secret = connHttpDlrSecret;
 			}
 			const res = await apiClient.createProviderConnection(providerId, payload);
 			isConnModalOpen = false;
 			connSmppPassword = '';
 			connHttpCredentials = '';
+			connHttpDlrSecret = '';
 			if (res.data.pending_approval) {
 				toast('Connection creation submitted to Maker-Checker approval queue', 'info');
 			} else {
@@ -250,6 +437,7 @@
 
 	function openUpdateSecretModal(c: ProviderConnection) {
 		secretTargetConn = c;
+		secretKind = 'auth';
 		newSecretValue = '';
 		secretReason = '';
 		secretError = null;
@@ -260,11 +448,13 @@
 		isUpdatingSecret = true;
 		secretError = null;
 		try {
-			const body: { smpp_password?: string; http_credentials?: string; reason: string } = {
+			const body: { smpp_password?: string; http_credentials?: string; http_dlr_secret?: string; reason: string } = {
 				reason: secretReason.trim() || 'Rotated connection credential'
 			};
 			if (secretTargetConn.protocol === 'smpp') {
 				body.smpp_password = newSecretValue;
+			} else if (secretKind === 'dlr') {
+				body.http_dlr_secret = newSecretValue;
 			} else {
 				body.http_credentials = newSecretValue;
 			}
@@ -466,6 +656,22 @@
 									</div>
 
 									<div class="flex flex-wrap items-center gap-2 text-xs">
+										{#if c.protocol === 'http'}
+											<button
+												type="button"
+												onclick={() => openTestSend(c)}
+												class="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300"
+											>
+												Test Send
+											</button>
+											<button
+												type="button"
+												onclick={() => openEditHttpConfig(c)}
+												class="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+											>
+												Configure HTTP
+											</button>
+										{/if}
 										<button
 											type="button"
 											onclick={() => openUpdateSecretModal(c)}
@@ -504,8 +710,28 @@
 										<div class="sm:col-span-2">
 											<span class="text-slate-400">Base URL:</span>
 											<span class="ml-1 font-mono font-semibold">{c.http_base_url}</span>
-											<span class="ml-2 text-slate-400">({c.http_auth_type})</span>
+											<span class="ml-2 text-slate-400">({c.http_config?.method || 'POST'} / {c.http_config?.body_format || 'json'} / auth:{c.http_auth_type})</span>
 										</div>
+										<div>
+											<span class="text-slate-400">DLR Mode:</span>
+											<span class="ml-1 font-mono font-semibold uppercase">{c.http_dlr_mode || 'none'}</span>
+										</div>
+										{#if c.http_dlr_callback_path && c.http_dlr_mode === 'callback'}
+											<div class="sm:col-span-3 flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-800/60">
+												<span class="text-slate-500">Generated Callback URL:</span>
+												<code data-testid="http-callback-url" class="font-mono text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">{c.http_dlr_callback_path}</code>
+												<button
+													type="button"
+													onclick={() => copyCallbackUrl(c.http_dlr_callback_path || '')}
+													class="rounded border border-slate-300 px-2 py-0.5 text-[10px] font-semibold text-slate-600 hover:bg-white dark:border-slate-700 dark:text-slate-300"
+												>
+													Copy Full URL
+												</button>
+												<span class="text-[11px] text-slate-400">
+													DLR Secret: {c.http_dlr_secret?.masked_display || 'Not set'}
+												</span>
+											</div>
+										{/if}
 									{/if}
 									<div>
 										<span class="text-slate-400">Max TPS:</span>
@@ -736,9 +962,12 @@
 					<div>
 						<label for="conn-auth" class="block font-medium text-slate-700 mb-1">HTTP Auth Type</label>
 						<select id="conn-auth" bind:value={connHttpAuthType} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
-							<option value="header_token">Header Token (Bearer)</option>
-							<option value="basic">HTTP Basic</option>
-							<option value="query_token">Query Token</option>
+							<option value="bearer">Bearer Token</option>
+							<option value="api_key_header">API Key in Header</option>
+							<option value="api_key_query">API Key in Query</option>
+							<option value="basic">HTTP Basic (user:pass)</option>
+							<option value="header_token">Legacy Header Token</option>
+							<option value="query_token">Legacy Query Token</option>
 							<option value="none">None</option>
 						</select>
 					</div>
@@ -746,6 +975,80 @@
 						<label for="conn-http-sec" class="block font-medium text-slate-700 mb-1">HTTP Credentials (Write-Only)</label>
 						<input id="conn-http-sec" type="password" autocomplete="new-password" bind:value={connHttpCredentials} placeholder="Encrypted at rest" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
 					</div>
+					<div>
+						<label for="conn-http-method" class="block font-medium text-slate-700 mb-1">HTTP Method</label>
+						<select id="conn-http-method" bind:value={connHttpMethod} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+							<option value="POST">POST</option>
+							<option value="PUT">PUT</option>
+							<option value="GET">GET</option>
+						</select>
+					</div>
+					<div>
+						<label for="conn-http-fmt" class="block font-medium text-slate-700 mb-1">Body Format</label>
+						<select id="conn-http-fmt" bind:value={connHttpBodyFormat} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+							<option value="json">JSON (escaped)</option>
+							<option value="form">Form URL-Encoded (escaped)</option>
+							<option value="none">None (Query URL only)</option>
+						</select>
+					</div>
+					<div class="sm:col-span-2">
+						<label for="conn-http-urltpl" class="block font-medium text-slate-700 mb-1">Optional URL Path/Query Template</label>
+						<input id="conn-http-urltpl" type="text" bind:value={connHttpUrlTemplate} placeholder="e.g. /send?to=&#123;&#123;destination&#125;&#125; (optional)" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+					{#if connHttpAuthType === 'api_key_header' || connHttpAuthType === 'header_token' || connHttpAuthType === 'bearer'}
+						<div>
+							<label for="conn-auth-hdr" class="block font-medium text-slate-700 mb-1">Auth Header Name</label>
+							<input id="conn-auth-hdr" type="text" bind:value={connHttpAuthHeaderName} placeholder={connHttpAuthType === 'api_key_header' ? 'X-API-Key' : 'Authorization'} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+						</div>
+					{:else if connHttpAuthType === 'api_key_query' || connHttpAuthType === 'query_token'}
+						<div>
+							<label for="conn-auth-qp" class="block font-medium text-slate-700 mb-1">Auth Query Param</label>
+							<input id="conn-auth-qp" type="text" bind:value={connHttpAuthQueryParam} placeholder="api_key" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+						</div>
+					{/if}
+					<div>
+						<label for="conn-http-dlrmode" class="block font-medium text-slate-700 mb-1">DLR Mode</label>
+						<select id="conn-http-dlrmode" bind:value={connHttpDlrMode} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+							<option value="none">None</option>
+							<option value="callback">Webhook Callback</option>
+							<option value="polling">Active Polling</option>
+						</select>
+					</div>
+					{#if connHttpBodyFormat !== 'none'}
+						<div class="sm:col-span-2">
+							<label for="conn-http-bodytpl" class="block font-medium text-slate-700 mb-1">
+								Body Template (placeholders: &#123;&#123;destination&#125;&#125;, &#123;&#123;sender&#125;&#125;, &#123;&#123;text&#125;&#125;, &#123;&#123;message_id&#125;&#125;, &#123;&#123;encoding&#125;&#125;)
+							</label>
+							<textarea id="conn-http-bodytpl" rows="3" bind:value={connHttpBodyTemplate} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-800 dark:text-white"></textarea>
+						</div>
+					{/if}
+					<div>
+						<label for="conn-http-msgidpath" class="block font-medium text-slate-700 mb-1">Provider Msg ID JSON Path</label>
+						<input id="conn-http-msgidpath" type="text" bind:value={connHttpMsgIdPath} placeholder="message_id" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+					<div>
+						<label for="conn-http-errpath" class="block font-medium text-slate-700 mb-1">Error Code JSON Path</label>
+						<input id="conn-http-errpath" type="text" bind:value={connHttpErrorCodePath} placeholder="error" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+					{#if connHttpDlrMode === 'callback'}
+						<div>
+							<label for="conn-dlr-algo" class="block font-medium text-slate-700 mb-1">Callback Verification</label>
+							<select id="conn-dlr-algo" bind:value={connHttpCallbackSigAlgo} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+								<option value="hmac_sha256">HMAC-SHA256</option>
+								<option value="shared_secret">Shared Secret</option>
+								<option value="none">Unsigned</option>
+							</select>
+						</div>
+						<div>
+							<label for="conn-dlr-sec" class="block font-medium text-slate-700 mb-1">Callback Secret (Optional Write-Only)</label>
+							<input id="conn-dlr-sec" type="password" autocomplete="new-password" bind:value={connHttpDlrSecret} placeholder="Optional HMAC secret" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+						</div>
+					{:else if connHttpDlrMode === 'polling'}
+						<div class="sm:col-span-2">
+							<label for="conn-poll-url" class="block font-medium text-slate-700 mb-1">Polling URL Template *</label>
+							<input id="conn-poll-url" type="url" bind:value={connHttpPollUrlTemplate} placeholder="https://api.carrier.example.com/v1/dlr?id=&#123;&#123;provider_message_id&#125;&#125;" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+						</div>
+					{/if}
 				{/if}
 
 				<div class="sm:col-span-2">
@@ -787,6 +1090,15 @@
 				<div class="mt-3 rounded-lg bg-rose-50 p-2.5 text-xs text-rose-700 border border-rose-200">{secretError}</div>
 			{/if}
 			<div class="mt-4 space-y-3 text-xs">
+				{#if secretTargetConn.protocol === 'http'}
+					<div>
+						<label for="sec-kind" class="block font-medium text-slate-700 mb-1">Credential Target</label>
+						<select id="sec-kind" bind:value={secretKind} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+							<option value="auth">HTTP API Credential / Key</option>
+							<option value="dlr">HTTP DLR Callback Secret (HMAC)</option>
+						</select>
+					</div>
+				{/if}
 				<div>
 					<label for="sec-val" class="block font-medium text-slate-700 mb-1">New Secret / Password *</label>
 					<input id="sec-val" type="password" autocomplete="new-password" bind:value={newSecretValue} placeholder="Enter new credential" class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
@@ -839,6 +1151,186 @@
 					class="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
 				>
 					{isChangingStatus ? 'Submitting...' : 'Submit Status Change'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Edit HTTP Connector Template Modal -->
+{#if editHttpConn}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm overflow-y-auto">
+		<div class="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl dark:bg-slate-900 my-8">
+			<div class="flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+				<h2 class="text-base font-bold text-slate-900 dark:text-white">Configure HTTP Connector: {editHttpConn.name}</h2>
+				<button type="button" aria-label="Close modal" onclick={() => editHttpConn = null} class="text-slate-400">✕</button>
+			</div>
+			{#if editHttpError}
+				<div class="mt-3 rounded-lg bg-rose-50 p-3 text-xs text-rose-700 border border-rose-200">{editHttpError}</div>
+			{/if}
+			<div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+				<div class="sm:col-span-2">
+					<label for="edit-http-url" class="block font-medium text-slate-700 mb-1">Base URL *</label>
+					<input id="edit-http-url" type="url" bind:value={connHttpBaseUrl} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div>
+					<label for="edit-http-auth" class="block font-medium text-slate-700 mb-1">Auth Type</label>
+					<select id="edit-http-auth" bind:value={connHttpAuthType} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="bearer">Bearer Token</option>
+						<option value="api_key_header">API Key in Header</option>
+						<option value="api_key_query">API Key in Query</option>
+						<option value="basic">HTTP Basic (user:pass)</option>
+						<option value="header_token">Legacy Header Token</option>
+						<option value="query_token">Legacy Query Token</option>
+						<option value="none">None</option>
+					</select>
+				</div>
+				<div>
+					<label for="edit-http-method" class="block font-medium text-slate-700 mb-1">Method</label>
+					<select id="edit-http-method" bind:value={connHttpMethod} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="POST">POST</option>
+						<option value="PUT">PUT</option>
+						<option value="GET">GET</option>
+					</select>
+				</div>
+				<div>
+					<label for="edit-http-fmt" class="block font-medium text-slate-700 mb-1">Body Format</label>
+					<select id="edit-http-fmt" bind:value={connHttpBodyFormat} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="json">JSON</option>
+						<option value="form">Form URL-Encoded</option>
+						<option value="none">None</option>
+					</select>
+				</div>
+				<div>
+					<label for="edit-http-dlrmode" class="block font-medium text-slate-700 mb-1">DLR Mode</label>
+					<select id="edit-http-dlrmode" bind:value={connHttpDlrMode} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="none">None</option>
+						<option value="callback">Webhook Callback</option>
+						<option value="polling">Active Polling</option>
+					</select>
+				</div>
+				<div class="sm:col-span-2">
+					<label for="edit-http-hdrs" class="block font-medium text-slate-700 mb-1">Custom Headers (JSON)</label>
+					<textarea id="edit-http-hdrs" rows="2" bind:value={connHttpHeadersJson} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-800 dark:text-white"></textarea>
+				</div>
+				{#if connHttpBodyFormat !== 'none'}
+					<div class="sm:col-span-2">
+						<label for="edit-http-tpl" class="block font-medium text-slate-700 mb-1">Body Template</label>
+						<textarea id="edit-http-tpl" rows="3" bind:value={connHttpBodyTemplate} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-800 dark:text-white"></textarea>
+					</div>
+				{/if}
+				<div>
+					<label for="edit-http-msgidpath" class="block font-medium text-slate-700 mb-1">Provider Msg ID Path</label>
+					<input id="edit-http-msgidpath" type="text" bind:value={connHttpMsgIdPath} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div>
+					<label for="edit-http-errpath" class="block font-medium text-slate-700 mb-1">Error Code Path</label>
+					<input id="edit-http-errpath" type="text" bind:value={connHttpErrorCodePath} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				{#if connHttpDlrMode === 'callback'}
+					<div>
+						<label for="edit-cb-algo" class="block font-medium text-slate-700 mb-1">Callback Auth Algo</label>
+						<select id="edit-cb-algo" bind:value={connHttpCallbackSigAlgo} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+							<option value="hmac_sha256">HMAC-SHA256</option>
+							<option value="shared_secret">Shared Secret</option>
+							<option value="none">Unsigned</option>
+						</select>
+					</div>
+					<div>
+						<label for="edit-cb-id" class="block font-medium text-slate-700 mb-1">Callback Msg ID Path</label>
+						<input id="edit-cb-id" type="text" bind:value={connHttpCallbackMsgIdPath} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+				{:else if connHttpDlrMode === 'polling'}
+					<div class="sm:col-span-2">
+						<label for="edit-poll-url" class="block font-medium text-slate-700 mb-1">Poll URL Template *</label>
+						<input id="edit-poll-url" type="url" bind:value={connHttpPollUrlTemplate} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+					<div>
+						<label for="edit-poll-int" class="block font-medium text-slate-700 mb-1">Poll Interval (sec)</label>
+						<input id="edit-poll-int" type="number" min="5" max="3600" bind:value={connHttpPollIntervalSec} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+					<div>
+						<label for="edit-poll-stat" class="block font-medium text-slate-700 mb-1">Poll Status Path</label>
+						<input id="edit-poll-stat" type="text" bind:value={connHttpPollStatusPath} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+					</div>
+				{/if}
+				<div class="sm:col-span-2">
+					<label for="edit-http-reason" class="block font-medium text-slate-700 mb-1">Audit Reason *</label>
+					<input id="edit-http-reason" type="text" bind:value={connReason} placeholder="Reason for updating HTTP connector configuration" class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+			</div>
+			<div class="mt-5 flex justify-end gap-2">
+				<button type="button" onclick={() => editHttpConn = null} class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700">Cancel</button>
+				<button type="button" disabled={isSavingHttpCfg} onclick={submitEditHttpConfig} class="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50">
+					{isSavingHttpCfg ? 'Saving...' : 'Save HTTP Config'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- HTTP Test Send Modal -->
+{#if testSendTargetConn}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm overflow-y-auto">
+		<div class="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl dark:bg-slate-900">
+			<div class="flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+				<h2 class="text-base font-bold text-slate-900 dark:text-white">Test HTTP Send: {testSendTargetConn.name}</h2>
+				<button type="button" aria-label="Close modal" onclick={() => testSendTargetConn = null} class="text-slate-400">✕</button>
+			</div>
+			{#if testError}
+				<div class="mt-3 rounded-lg bg-rose-50 p-3 text-xs text-rose-700 border border-rose-200">{testError}</div>
+			{/if}
+			<div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+				<div>
+					<label for="test-dest" class="block font-medium text-slate-700 mb-1">Destination (E.164)</label>
+					<input id="test-dest" type="text" bind:value={testDest} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div>
+					<label for="test-sender" class="block font-medium text-slate-700 mb-1">Sender ID</label>
+					<input id="test-sender" type="text" bind:value={testSenderId} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div class="sm:col-span-2">
+					<label for="test-text" class="block font-medium text-slate-700 mb-1">Message Text</label>
+					<input id="test-text" type="text" bind:value={testText} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div class="sm:col-span-2">
+					<label for="test-sim" class="block font-medium text-slate-700 mb-1">Target Mode</label>
+					<select id="test-sim" bind:value={testSimMode} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="">Configured Base URL ({testSendTargetConn.http_base_url})</option>
+						<option value="accept">Simulate FakeHTTPProvider: 200 Accept</option>
+						<option value="reject">Simulate FakeHTTPProvider: 400 Permanent Reject</option>
+						<option value="throttle">Simulate FakeHTTPProvider: 429 Throttle</option>
+						<option value="server_err">Simulate FakeHTTPProvider: 500 Ambiguous</option>
+					</select>
+				</div>
+			</div>
+			{#if testResult}
+				<div data-testid="http-test-send-result" class="mt-4 rounded-xl border p-3 text-xs {testResult.success ? 'border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30' : 'border-amber-200 bg-amber-50 dark:bg-amber-950/30'}">
+					<div class="flex items-center justify-between font-bold">
+						<span>Outcome: {testResult.status} (HTTP {testResult.http_status_code || 'N/A'})</span>
+						<span class="font-mono">{testResult.latency_ms}ms {testResult.simulated ? '[Simulated]' : ''}</span>
+					</div>
+					<div class="mt-2 space-y-1 font-mono text-[11px]">
+						{#if testResult.provider_message_id}
+							<div>Provider Msg ID: {testResult.provider_message_id}</div>
+						{/if}
+						{#if testResult.error_code}
+							<div>Error Code: {testResult.error_code} — {testResult.error_message}</div>
+						{/if}
+						<div class="truncate">Request: {testResult.method} {testResult.redacted_url}</div>
+						{#if testResult.redacted_body}
+							<div class="break-all text-slate-600 dark:text-slate-300">Rendered Body: {testResult.redacted_body}</div>
+						{/if}
+						{#if testResult.response_snippet}
+							<div class="break-all text-slate-600 dark:text-slate-300">Response: {testResult.response_snippet}</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+			<div class="mt-5 flex justify-end gap-2">
+				<button type="button" onclick={() => testSendTargetConn = null} class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700">Close</button>
+				<button type="button" disabled={isTestingSend} onclick={submitTestSend} class="rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
+					{isTestingSend ? 'Sending...' : 'Execute Test Send'}
 				</button>
 			</div>
 		</div>

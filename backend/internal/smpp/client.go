@@ -39,6 +39,14 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 }
 
+// CanSend checks whether this process holds or can acquire ownership of connectionID.
+func (c *Client) CanSend(ctx context.Context, connID uuid.UUID) bool {
+	if c.manager == nil {
+		return true
+	}
+	return c.manager.CanSendOnConnection(ctx, connID)
+}
+
 // Send fulfills the messaging.Sender interface for upstream carrier submission.
 func (c *Client) Send(ctx context.Context, attempt messaging.SendAttempt) (messaging.SendResult, error) {
 	start := time.Now()
@@ -131,18 +139,19 @@ func (c *Client) Send(ctx context.Context, attempt messaging.SendAttempt) (messa
 	latency := time.Since(start)
 
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			// CRITICAL OUTCOME RULE: Timeout after PDU was written is UNKNOWN and is NEVER resent or failed over!
-			c.logger.Warn("smpp submission timed out - marked UNKNOWN with no resend",
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, ErrAmbiguousOutcome) {
+			// CRITICAL OUTCOME RULE: Timeout or socket drop after PDU was written is UNKNOWN and NEVER resent/failed over!
+			c.logger.Warn("smpp submission ambiguous after write - marked UNKNOWN with no resend",
 				slog.String("message_id", attempt.MessageID.String()),
 				slog.String("connection_id", attempt.ConnectionID.String()),
 				slog.String("destination", maskedDest),
+				slog.String("error", err.Error()),
 				slog.Duration("latency", latency),
 			)
 			return messaging.SendResult{
 				Status:       messaging.SendStatusUnknown,
 				ErrorCode:    "SUBMIT_TIMEOUT_UNKNOWN",
-				ErrorMessage: "Carrier submission timed out with unconfirmed outcome; hold retained pending reconciliation",
+				ErrorMessage: "Carrier submission outcome ambiguous after write; hold retained pending reconciliation",
 				Latency:      latency,
 			}, nil
 		}
@@ -165,6 +174,17 @@ func (c *Client) Send(ctx context.Context, attempt messaging.SendAttempt) (messa
 	sendStatus := ClassifyStatus(resp.Header.CommandStatus)
 	errCodeName := StatusString(resp.Header.CommandStatus)
 
+	// Record provider message ID BEFORE returning/logging so fast immediate DLRs can match immediately.
+	if sendStatus == messaging.SendStatusAccepted && resp.MessageID != "" && c.db != nil {
+		if recErr := c.recordProviderLookup(ctx, attempt.ConnectionID, resp.MessageID, attempt.MessageID); recErr != nil {
+			c.logger.Warn("failed to record smpp provider lookup before return",
+				slog.String("message_id", attempt.MessageID.String()),
+				slog.String("connection_id", attempt.ConnectionID.String()),
+				slog.Any("error", recErr),
+			)
+		}
+	}
+
 	c.logger.Info("smpp submission answered by upstream carrier",
 		slog.String("message_id", attempt.MessageID.String()),
 		slog.String("connection_id", attempt.ConnectionID.String()),
@@ -174,11 +194,6 @@ func (c *Client) Send(ctx context.Context, attempt messaging.SendAttempt) (messa
 		slog.String("provider_message_id", resp.MessageID),
 		slog.Duration("latency", latency),
 	)
-
-	// 5. If accepted, record provider message ID in lookup table
-	if sendStatus == messaging.SendStatusAccepted && resp.MessageID != "" && c.db != nil {
-		_ = c.recordProviderLookup(ctx, attempt.ConnectionID, resp.MessageID, attempt.MessageID)
-	}
 
 	return messaging.SendResult{
 		Status:            sendStatus,
@@ -233,19 +248,12 @@ func (c *Client) HandleDLR(ctx context.Context, connectionID uuid.UUID, deliver 
 }
 
 func (c *Client) recordProviderLookup(ctx context.Context, connID uuid.UUID, providerMsgID string, msgID uuid.UUID) error {
-	// Look up message created_at
-	var createdAt time.Time
-	err := c.db.QueryRow(ctx, "SELECT created_at FROM messages WHERE id = $1", msgID).Scan(&createdAt)
-	if err != nil {
-		return err
-	}
-
 	query := `
 		INSERT INTO message_provider_lookups (connection_id, provider_message_id, message_id, message_created_at)
-		VALUES ($1, $2, $3, $4)
+		SELECT $1, $2, id, created_at FROM messages WHERE id = $3 LIMIT 1
 		ON CONFLICT (connection_id, provider_message_id) DO NOTHING
 	`
-	_, err = c.db.Exec(ctx, query, connID, providerMsgID, msgID, createdAt)
+	_, err := c.db.Exec(ctx, query, connID, providerMsgID, msgID)
 	return err
 }
 

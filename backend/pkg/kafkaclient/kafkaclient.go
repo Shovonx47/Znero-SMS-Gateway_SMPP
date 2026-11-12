@@ -52,6 +52,9 @@ type slogAdapter struct{ l *slog.Logger }
 func (a slogAdapter) Level() kgo.LogLevel { return kgo.LogLevelWarn }
 
 func (a slogAdapter) Log(level kgo.LogLevel, msg string, keyvals ...any) {
+	if a.l == nil {
+		return
+	}
 	lvl := slog.LevelWarn
 	if level == kgo.LogLevelError {
 		lvl = slog.LevelError
@@ -60,6 +63,9 @@ func (a slogAdapter) Log(level kgo.LogLevel, msg string, keyvals ...any) {
 }
 
 func baseOpts(cfg Config, logger *slog.Logger) []kgo.Opt {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	// franz-go refuses delivery timeouts below 1s.
 	if cfg.RequestTimeout < time.Second {
 		cfg.RequestTimeout = time.Second

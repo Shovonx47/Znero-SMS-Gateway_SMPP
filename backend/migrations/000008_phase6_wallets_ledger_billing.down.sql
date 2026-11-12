@@ -36,6 +36,15 @@ DROP TABLE IF EXISTS ledger_transactions CASCADE;
 DROP TABLE IF EXISTS ledger_accounts CASCADE;
 DROP TABLE IF EXISTS wallets CASCADE;
 
+DELETE FROM change_requests WHERE operation NOT IN (
+    'create', 'update', 'deactivate', 'activate', 'archive', 'rollback',
+    'confirm_import', 'status_change', 'secret_update', 'approve_sender_id'
+) OR entity_type NOT IN (
+    'country', 'operator', 'prefix', 'number_rule', 'import_job',
+    'provider', 'provider_connection', 'provider_coverage', 'customer_profile', 'sender_id',
+    'rate_card', 'rate', 'rate_assignment', 'reseller_cost_assignment'
+);
+
 ALTER TABLE change_requests DROP CONSTRAINT IF EXISTS change_requests_operation_check;
 ALTER TABLE change_requests ADD CONSTRAINT change_requests_operation_check
     CHECK (operation IN (

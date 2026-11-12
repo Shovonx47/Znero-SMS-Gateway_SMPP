@@ -13,6 +13,10 @@ DELETE FROM role_permissions WHERE permission_code LIKE 'rate.%';
 DELETE FROM permissions WHERE module = 'rate';
 
 -- Restore Phase 4 check constraints
+DELETE FROM change_requests WHERE entity_type NOT IN (
+    'country', 'operator', 'prefix', 'number_rule', 'import_job',
+    'provider', 'provider_connection', 'provider_coverage', 'customer_profile', 'sender_id'
+);
 ALTER TABLE change_requests DROP CONSTRAINT IF EXISTS change_requests_entity_type_check;
 ALTER TABLE change_requests ADD CONSTRAINT change_requests_entity_type_check
     CHECK (entity_type IN (
@@ -20,6 +24,7 @@ ALTER TABLE change_requests ADD CONSTRAINT change_requests_entity_type_check
         'provider', 'provider_connection', 'provider_coverage', 'customer_profile', 'sender_id'
     ));
 
+DELETE FROM import_jobs WHERE entity_type NOT IN ('country', 'operator', 'prefix', 'provider_coverage', 'sender_id');
 ALTER TABLE import_jobs DROP CONSTRAINT IF EXISTS import_jobs_entity_type_check;
 ALTER TABLE import_jobs ADD CONSTRAINT import_jobs_entity_type_check
     CHECK (entity_type IN ('country', 'operator', 'prefix', 'provider_coverage', 'sender_id'));

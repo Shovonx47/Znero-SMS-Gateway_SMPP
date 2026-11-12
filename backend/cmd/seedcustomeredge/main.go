@@ -127,15 +127,15 @@ func runSeed(ctx context.Context, pool *pgxpool.Pool, keyRing *secrets.KeyRing) 
 		}
 	}
 
-	// 3. Seed Customer SMPP Account — random system_id and password per run.
+	// 3. Seed Customer SMPP Account — random system_id and SMPP 3.4-compliant password per run.
 	smppSystemID := fmt.Sprintf("dev_%s", randomHex(4))
-	smppPassword, err := secrets.GenerateRandomPassword(16)
+	smppPassword, err := secrets.GenerateSMPPPassword()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to generate SMPP password: %v\n", err)
 		os.Exit(1)
 	}
 
-	pwHash, err := password.Hash(smppPassword)
+	pwHash, err := password.HashRaw(smppPassword)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to hash SMPP password: %v\n", err)
 		os.Exit(1)

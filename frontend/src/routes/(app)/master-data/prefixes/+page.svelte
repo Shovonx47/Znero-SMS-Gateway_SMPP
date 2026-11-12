@@ -59,8 +59,8 @@
 				apiClient.listCountries({ pageSize: 500 }),
 				apiClient.listOperators({ pageSize: 500 })
 			]);
-			countries = cRes.data.items;
-			operators = oRes.data.items;
+			countries = cRes.data.items || [];
+			operators = oRes.data.items || [];
 		} catch {
 			// ignore fallback
 		}
@@ -80,7 +80,7 @@
 				page,
 				pageSize
 			});
-			prefixes = res.data.items;
+			prefixes = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -294,7 +294,7 @@
 				</div>
 
 				<div>
-					<select
+					<select aria-label="Filter by country"
 						bind:value={countryFilter}
 						onchange={() => { page = 1; loadPrefixes(); }}
 						class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -307,7 +307,7 @@
 				</div>
 
 				<div>
-					<select
+					<select aria-label="Filter by type"
 						bind:value={typeFilter}
 						onchange={() => { page = 1; loadPrefixes(); }}
 						class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -320,7 +320,7 @@
 				</div>
 
 				<div>
-					<select
+					<select aria-label="Filter by status"
 						bind:value={statusFilter}
 						onchange={() => { page = 1; loadPrefixes(); }}
 						class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

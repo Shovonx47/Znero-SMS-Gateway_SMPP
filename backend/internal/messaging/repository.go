@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,11 +17,22 @@ import (
 )
 
 // Repository specifies the persistence interface for messaging operations.
+// BulkInsertItem groups one message and its associated records for a single-batch TX insert.
+type BulkInsertItem struct {
+	Msg    *Message
+	Parts  []MessagePart
+	Outbox *MessageOutbox
+	Event  *MessageEvent
+}
+
 type Repository interface {
 	InsertMessageAtomic(ctx context.Context, tx pgx.Tx, msg *Message, parts []MessagePart, outbox *MessageOutbox, event *MessageEvent) error
+	InsertMessagesBulkAtomic(ctx context.Context, tx pgx.Tx, items []BulkInsertItem) error
 	CheckIdempotency(ctx context.Context, customerOrgID uuid.UUID, clientRef string) (*uuid.UUID, *time.Time, error)
+	CheckIdempotencyBatch(ctx context.Context, customerOrgID uuid.UUID, refs []string) (map[string]MessageLocator, error)
 	CheckIdempotencyWithFingerprint(ctx context.Context, customerOrgID uuid.UUID, clientRef string) (*uuid.UUID, *time.Time, *string, error)
 	GetMessageLocator(ctx context.Context, messageID uuid.UUID) (*MessageLocator, error)
+	GetMessageHeader(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, error)
 	GetMessage(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, []MessagePart, error)
 	GetMessageByID(ctx context.Context, id uuid.UUID) (*Message, []MessagePart, error)
 	ListMessages(ctx context.Context, customerOrgID *uuid.UUID, status string, page, pageSize int) ([]Message, int, error)
@@ -29,6 +41,7 @@ type Repository interface {
 	RecordEvent(ctx context.Context, tx pgx.Tx, event MessageEvent) error
 	RecordProviderLookup(ctx context.Context, tx pgx.Tx, connectionID uuid.UUID, providerMsgID string, messageID uuid.UUID, createdAt time.Time) error
 	FetchOutboxPending(ctx context.Context, limit int, workerID string, lockDuration time.Duration) ([]MessageOutbox, error)
+	ReleaseOutboxPending(ctx context.Context, outboxID uuid.UUID, delay time.Duration) error
 	UpdateOutboxStatus(ctx context.Context, tx pgx.Tx, outboxID uuid.UUID, status string, nextAttemptAt *time.Time) error
 	EnsureMonthlyPartitions(ctx context.Context, monthsAhead int) error
 	GetProviderLookup(ctx context.Context, connectionID uuid.UUID, providerMsgID string) (*uuid.UUID, *time.Time, error)
@@ -42,6 +55,7 @@ type Repository interface {
 	DeleteDLRMapping(ctx context.Context, id uuid.UUID) error
 	ListDLRMappings(ctx context.Context, connectionID *uuid.UUID) ([]DLRMapping, error)
 	RecordSettlementException(ctx context.Context, exc SettlementException) error
+	RecordSettlementExceptionTx(ctx context.Context, tx pgx.Tx, exc SettlementException) error
 	ListSettlementExceptions(ctx context.Context, orgID *uuid.UUID, resolved *bool, page, pageSize int) ([]SettlementException, int, error)
 	ResolveSettlementException(ctx context.Context, id uuid.UUID, resolvedBy uuid.UUID) error
 	RecordReconciliationRun(ctx context.Context, run ReconciliationRun) error
@@ -57,10 +71,12 @@ type Repository interface {
 	ListMessagesAdvanced(ctx context.Context, orgID *uuid.UUID, status, destination, senderID string, connID *uuid.UUID, fromDate, toDate *time.Time, page, pageSize int) ([]Message, int, error)
 	IncrementUsageCountersTx(ctx context.Context, tx pgx.Tx, customerOrgID uuid.UUID, parts int, dailyCap, monthlyCap *int64) error
 	GetCustomerUsage(ctx context.Context, customerOrgID uuid.UUID) (dailyCount int64, monthlyCount int64, dailyCap int64, monthlyCap int64, tpsLimit int, err error)
+	GetCustomerBillingTerms(ctx context.Context, customerOrgID uuid.UUID, defaults CustomerBillingTerms) (CustomerBillingTerms, error)
 	TransitionToFinalStateTx(ctx context.Context, tx pgx.Tx, ledgerSvc *ledger.Service, billingTrig string, params FinalStateParams) error
 	InsertSMPPDLRQueue(ctx context.Context, tx pgx.Tx, item SMPPDLRQueueItem) error
 	FetchPendingSMPPDLRs(ctx context.Context, limit int, leasedBy string, leaseDuration time.Duration) ([]SMPPDLRQueueItem, error)
 	UpdateSMPPDLRQueueStatus(ctx context.Context, id uuid.UUID, status string) error
+	UpdateSMPPDLRQueueStatusBatch(ctx context.Context, ids []uuid.UUID, status string) error
 	CreateWebhook(ctx context.Context, wh *CustomerWebhook) error
 	GetWebhook(ctx context.Context, id uuid.UUID, customerOrgID uuid.UUID) (*CustomerWebhook, error)
 	ListWebhooks(ctx context.Context, customerOrgID uuid.UUID) ([]CustomerWebhook, error)
@@ -100,6 +116,46 @@ func (r *pgRepository) InsertMessageAtomic(
 	outbox *MessageOutbox,
 	event *MessageEvent,
 ) error {
+	return r.InsertMessagesBulkAtomic(ctx, tx, []BulkInsertItem{{
+		Msg:    msg,
+		Parts:  parts,
+		Outbox: outbox,
+		Event:  event,
+	}})
+}
+
+// InsertMessagesBulkAtomic inserts one or more messages and all related rows in a single pgx.Batch.
+func (r *pgRepository) InsertMessagesBulkAtomic(ctx context.Context, tx pgx.Tx, items []BulkInsertItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	var batch pgx.Batch
+	hasIdemp := make([]bool, len(items))
+	for idx, it := range items {
+		hasIdemp[idx] = queueSingleMessageBatch(&batch, it.Msg, it.Parts, it.Outbox, it.Event)
+	}
+
+	br := tx.SendBatch(ctx, &batch)
+	defer br.Close()
+
+	for idx, it := range items {
+		if err := readSingleMessageBatch(br, it.Msg, it.Parts, it.Outbox, it.Event, hasIdemp[idx]); err != nil {
+			return err
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("close atomic message batch: %w", err)
+	}
+	return nil
+}
+
+func queueSingleMessageBatch(
+	batch *pgx.Batch,
+	msg *Message,
+	parts []MessagePart,
+	outbox *MessageOutbox,
+	event *MessageEvent,
+) bool {
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
 	}
@@ -107,72 +163,70 @@ func (r *pgRepository) InsertMessageAtomic(
 		msg.ID = uuid.New()
 	}
 
-	// 1. Insert into partitioned messages table
-	msgQuery := `
+	const msgQuery = `
 		INSERT INTO messages (
 			id, created_at, customer_org_id, client_reference, original_destination, destination,
 			sender_id, sender_id_type, message_type, encoding, encrypted_body, key_id,
 			body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
 			estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
 			provider_message_id, attempts, max_attempts, expires_at, updated_at,
-			ingress_channel, ingress_account_id, dlr_requested
+			ingress_channel, ingress_account_id, dlr_requested,
+			billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10, $11, $12,
 			$13, $14, $15, $16, $17, $18, $19,
 			$20, $21, $22, $23, $24,
 			$25, $26, $27, $28, $29,
-			$30, $31, $32
+			$30, $31, $32,
+			$33, $34, $35, $36
 		)
 	`
 	ingressChan := msg.IngressChannel
 	if ingressChan == "" {
 		ingressChan = "platform"
 	}
-	_, err := tx.Exec(ctx, msgQuery,
+	defTerms := DefaultCustomerBillingTerms()
+	if msg.BillingModeSnapshot == "" {
+		msg.BillingModeSnapshot = defTerms.BillingMode
+	}
+	if msg.DLRWaitHoursSnapshot <= 0 {
+		msg.DLRWaitHoursSnapshot = defTerms.DLRWaitHours
+	}
+	if msg.NoDLRPolicySnapshot == "" {
+		msg.NoDLRPolicySnapshot = defTerms.NoDLRPolicy
+	}
+	if msg.FailedAfterAcceptPolicySnapshot == "" {
+		msg.FailedAfterAcceptPolicySnapshot = defTerms.FailedAfterAcceptPolicy
+	}
+	batch.Queue(msgQuery,
 		msg.ID, msg.CreatedAt, msg.CustomerOrgID, msg.ClientReference, msg.OriginalDestination, msg.Destination,
 		msg.SenderID, msg.SenderIDType, msg.MessageType, msg.Encoding, msg.EncryptedBody, msg.KeyID,
 		msg.BodyLength, msg.TotalParts, msg.Status, msg.FailureReason, msg.HoldID, msg.SellPrice, msg.SellCurrency,
 		msg.EstimatedBuyCost, msg.ActualBuyCost, msg.BuyCurrency, msg.RoutePlanID, msg.ProviderConnectionID,
 		msg.ProviderMessageID, msg.Attempts, msg.MaxAttempts, msg.ExpiresAt, msg.CreatedAt,
 		ingressChan, msg.IngressAccountID, msg.DLRRequested,
+		msg.BillingModeSnapshot, msg.DLRWaitHoursSnapshot, msg.NoDLRPolicySnapshot, msg.FailedAfterAcceptPolicySnapshot,
 	)
-	if err != nil {
-		return fmt.Errorf("insert message row: %w", err)
-	}
 
-	// 1b. Insert unpartitioned locator to allow fast O(1) single-partition pruning on point lookups by ID
-	locatorQuery := `
+	const locatorQuery = `
 		INSERT INTO message_locator (message_id, created_at, customer_org_id)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (message_id) DO NOTHING
 	`
-	if _, err := tx.Exec(ctx, locatorQuery, msg.ID, msg.CreatedAt, msg.CustomerOrgID); err != nil {
-		return fmt.Errorf("insert message locator: %w", err)
-	}
+	batch.Queue(locatorQuery, msg.ID, msg.CreatedAt, msg.CustomerOrgID)
 
-	// 2. Insert unpartitioned idempotency lookup (Amendment 2: enforces uniqueness across month boundaries)
-	// (Must be inserted after messages row so fk_message_idempotency_target constraint is satisfied)
-	if msg.ClientReference != nil && *msg.ClientReference != "" {
-		lookupQuery := `
+	hasIdemp := msg.ClientReference != nil && *msg.ClientReference != ""
+	if hasIdemp {
+		const lookupQuery = `
 			INSERT INTO message_idempotency_lookups (
 				customer_org_id, client_reference, message_id, message_created_at, request_fingerprint, created_at
 			) VALUES ($1, $2, $3, $4, $5, $6)
 		`
-		_, err := tx.Exec(ctx, lookupQuery,
-			msg.CustomerOrgID, *msg.ClientReference, msg.ID, msg.CreatedAt, msg.RequestFingerprint, msg.CreatedAt,
-		)
-		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
-				return fmt.Errorf("%w: client_reference %q already submitted for this customer", ErrDuplicateClientRef, *msg.ClientReference)
-			}
-			return fmt.Errorf("insert idempotency lookup: %w", err)
-		}
+		batch.Queue(lookupQuery, msg.CustomerOrgID, *msg.ClientReference, msg.ID, msg.CreatedAt, msg.RequestFingerprint, msg.CreatedAt)
 	}
 
-	// 3. Insert parts
-	partQuery := `
+	const partQuery = `
 		INSERT INTO message_parts (
 			id, message_id, created_at, part_number, total_parts, udh,
 			encrypted_part_body, key_id, provider_message_id, status, updated_at
@@ -185,16 +239,12 @@ func (r *pgRepository) InsertMessageAtomic(
 		parts[i].MessageID = msg.ID
 		parts[i].CreatedAt = msg.CreatedAt
 		parts[i].UpdatedAt = msg.CreatedAt
-		_, err := tx.Exec(ctx, partQuery,
+		batch.Queue(partQuery,
 			parts[i].ID, parts[i].MessageID, parts[i].CreatedAt, parts[i].PartNumber, parts[i].TotalParts, parts[i].UDH,
 			parts[i].EncryptedPartBody, parts[i].KeyID, parts[i].ProviderMessageID, parts[i].Status, parts[i].UpdatedAt,
 		)
-		if err != nil {
-			return fmt.Errorf("insert message part %d: %w", parts[i].PartNumber, err)
-		}
 	}
 
-	// 4. Insert outbox row
 	if outbox != nil {
 		if outbox.ID == uuid.Nil {
 			outbox.ID = uuid.New()
@@ -205,22 +255,18 @@ func (r *pgRepository) InsertMessageAtomic(
 		outbox.CreatedAt = msg.CreatedAt
 		outbox.UpdatedAt = msg.CreatedAt
 
-		outboxQuery := `
+		const outboxQuery = `
 			INSERT INTO message_outbox (
 				id, message_id, message_created_at, customer_org_id, payload,
 				status, attempts, next_attempt_at, created_at, updated_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`
-		_, err := tx.Exec(ctx, outboxQuery,
+		batch.Queue(outboxQuery,
 			outbox.ID, outbox.MessageID, outbox.MessageCreatedAt, outbox.CustomerOrgID, outbox.Payload,
 			outbox.Status, outbox.Attempts, outbox.NextAttemptAt, outbox.CreatedAt, outbox.UpdatedAt,
 		)
-		if err != nil {
-			return fmt.Errorf("insert outbox row: %w", err)
-		}
 	}
 
-	// 5. Insert initial event
 	if event != nil {
 		if event.ID == uuid.Nil {
 			event.ID = uuid.New()
@@ -229,22 +275,87 @@ func (r *pgRepository) InsertMessageAtomic(
 		event.MessageCreatedAt = msg.CreatedAt
 		event.CreatedAt = msg.CreatedAt
 
-		eventQuery := `
+		const eventQuery = `
 			INSERT INTO message_events (
 				id, message_id, message_created_at, event_type, from_status,
 				to_status, actor_type, details, created_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`
-		_, err := tx.Exec(ctx, eventQuery,
+		batch.Queue(eventQuery,
 			event.ID, event.MessageID, event.MessageCreatedAt, event.EventType, event.FromStatus,
 			event.ToStatus, event.ActorType, event.Details, event.CreatedAt,
 		)
-		if err != nil {
+	}
+
+	return hasIdemp
+}
+
+func readSingleMessageBatch(
+	br pgx.BatchResults,
+	msg *Message,
+	parts []MessagePart,
+	outbox *MessageOutbox,
+	event *MessageEvent,
+	hasIdemp bool,
+) error {
+	if _, err := br.Exec(); err != nil {
+		return fmt.Errorf("insert message row: %w", err)
+	}
+	if _, err := br.Exec(); err != nil {
+		return fmt.Errorf("insert message locator: %w", err)
+	}
+	if hasIdemp {
+		if _, err := br.Exec(); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+				return fmt.Errorf("%w: client_reference %q already submitted for this customer", ErrDuplicateClientRef, *msg.ClientReference)
+			}
+			return fmt.Errorf("insert idempotency lookup: %w", err)
+		}
+	}
+	for i := range parts {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("insert message part %d: %w", parts[i].PartNumber, err)
+		}
+	}
+	if outbox != nil {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("insert outbox row: %w", err)
+		}
+	}
+	if event != nil {
+		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("insert initial event: %w", err)
 		}
 	}
-
 	return nil
+}
+
+// CheckIdempotencyBatch resolves existing message locators for a slice of client references in one SQL query.
+func (r *pgRepository) CheckIdempotencyBatch(ctx context.Context, customerOrgID uuid.UUID, refs []string) (map[string]MessageLocator, error) {
+	out := make(map[string]MessageLocator)
+	if len(refs) == 0 {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT client_reference, message_id, message_created_at
+		FROM message_idempotency_lookups
+		WHERE customer_org_id = $1 AND client_reference = ANY($2)
+	`, customerOrgID, refs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref string
+		var loc MessageLocator
+		loc.CustomerOrgID = customerOrgID
+		if err := rows.Scan(&ref, &loc.MessageID, &loc.CreatedAt); err != nil {
+			return nil, err
+		}
+		out[ref] = loc
+	}
+	return out, rows.Err()
 }
 
 // CheckIdempotency verifies if client_reference exists in the unpartitioned lookup table.
@@ -267,13 +378,15 @@ func (r *pgRepository) CheckIdempotency(ctx context.Context, customerOrgID uuid.
 }
 
 // GetMessage fetches a message and its parts by composite key (id, created_at).
-func (r *pgRepository) GetMessage(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, []MessagePart, error) {
+// GetMessageHeader fetches the message row without querying message_parts (used on hot DLR paths).
+func (r *pgRepository) GetMessageHeader(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, error) {
 	query := `
 		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
 		       sender_id, sender_id_type, message_type, encoding, encrypted_body, key_id,
 		       body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
 		       estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
 		WHERE id = $1 AND created_at = $2
 	`
@@ -284,6 +397,36 @@ func (r *pgRepository) GetMessage(ctx context.Context, id uuid.UUID, createdAt t
 		&m.BodyLength, &m.TotalParts, &m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency,
 		&m.EstimatedBuyCost, &m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 		&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (r *pgRepository) GetMessage(ctx context.Context, id uuid.UUID, createdAt time.Time) (*Message, []MessagePart, error) {
+	query := `
+		SELECT id, created_at, customer_org_id, client_reference, original_destination, destination,
+		       sender_id, sender_id_type, message_type, encoding, encrypted_body, key_id,
+		       body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
+		       estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
+		FROM messages
+		WHERE id = $1 AND created_at = $2
+	`
+	var m Message
+	err := r.pool.QueryRow(ctx, query, id, createdAt).Scan(
+		&m.ID, &m.CreatedAt, &m.CustomerOrgID, &m.ClientReference, &m.OriginalDestination, &m.Destination,
+		&m.SenderID, &m.SenderIDType, &m.MessageType, &m.Encoding, &m.EncryptedBody, &m.KeyID,
+		&m.BodyLength, &m.TotalParts, &m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency,
+		&m.EstimatedBuyCost, &m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
+		&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+		&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, nil
@@ -386,7 +529,8 @@ func (r *pgRepository) ListMessages(ctx context.Context, customerOrgID *uuid.UUI
 		       sender_id, sender_id_type, message_type, encoding, key_id,
 		       body_length, total_parts, status, failure_reason, hold_id, sell_price, sell_currency,
 		       estimated_buy_cost, actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
 		%s
 		ORDER BY created_at DESC
@@ -409,6 +553,7 @@ func (r *pgRepository) ListMessages(ctx context.Context, customerOrgID *uuid.UUI
 			&m.BodyLength, &m.TotalParts, &m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency,
 			&m.EstimatedBuyCost, &m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+			&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -455,17 +600,24 @@ func (r *pgRepository) UpdateMessageStatus(
 		    attempts = attempts + 1,
 		    updated_at = $8
 		WHERE id = $9 AND created_at = $10 AND status = $11
+		RETURNING customer_org_id, client_reference, destination, sender_id,
+		          ingress_channel, ingress_account_id, dlr_requested
 	`
-	cmd, err := tx.Exec(ctx, query,
+	var notif notifMessageInfo
+	err := tx.QueryRow(ctx, query,
 		toStatus, reason, buyCost, connID, providerMsgID, submittedAt, deliveredAt, now,
 		id, createdAt, fromStatus,
+	).Scan(
+		&notif.CustomerOrgID, &notif.ClientReference, &notif.Destination, &notif.SenderID,
+		&notif.IngressChannel, &notif.IngressAccountID, &notif.DLRRequested,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: message %s not in expected status %q (concurrent update or invalid transition)", ErrInvalidStateTransition, id, fromStatus)
+	}
 	if err != nil {
 		return fmt.Errorf("update message status: %w", err)
 	}
-	if cmd.RowsAffected() == 0 {
-		return fmt.Errorf("%w: message %s not in expected status %q (concurrent update or invalid transition)", ErrInvalidStateTransition, id, fromStatus)
-	}
+	notif.MessageID = id
 
 	// Record lifecycle transition event
 	detailsMap := map[string]any{
@@ -491,16 +643,53 @@ func (r *pgRepository) UpdateMessageStatus(
 		CreatedAt:        now,
 	}
 
-	return r.RecordEvent(ctx, tx, event)
+	if err := r.RecordEvent(ctx, tx, event); err != nil {
+		return err
+	}
+
+	if err := r.enqueueCustomerNotificationsTx(ctx, tx, notif, toStatus, reason, deliveredAt, now); err != nil {
+		return err
+	}
+	return nil
 }
 
-// RecordAttempt stores an upstream transmission attempt in message_attempts.
+// RecordAttempt stores or finalizes an upstream transmission attempt in message_attempts.
+// If a pre-send 'submitting' checkpoint row exists for (message_id, attempt_number), it updates it in-place.
 func (r *pgRepository) RecordAttempt(ctx context.Context, tx pgx.Tx, attempt MessageAttempt) error {
 	if attempt.ID == uuid.Nil {
 		attempt.ID = uuid.New()
 	}
 	if attempt.StartedAt.IsZero() {
 		attempt.StartedAt = time.Now().UTC()
+	}
+
+	updateQuery := `
+		UPDATE message_attempts
+		SET connection_id = $1,
+		    status = $2,
+		    provider_message_id = COALESCE($3, provider_message_id),
+		    error_code = COALESCE($4, error_code),
+		    error_message = COALESCE($5, error_message),
+		    buy_cost = COALESCE($6, buy_cost),
+		    buy_currency = COALESCE($7, buy_currency),
+		    latency_ms = COALESCE($8, latency_ms),
+		    finished_at = COALESCE($9, now())
+		WHERE message_id = $10
+		  AND message_created_at = $11
+		  AND attempt_number = $12
+		  AND status = 'submitting'
+	`
+	tag, err := tx.Exec(ctx, updateQuery,
+		attempt.ConnectionID, attempt.Status, attempt.ProviderMessageID,
+		attempt.ErrorCode, attempt.ErrorMessage, attempt.BuyCost,
+		attempt.BuyCurrency, attempt.LatencyMs, attempt.FinishedAt,
+		attempt.MessageID, attempt.MessageCreatedAt, attempt.AttemptNumber,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
 	}
 
 	query := `
@@ -510,7 +699,7 @@ func (r *pgRepository) RecordAttempt(ctx context.Context, tx pgx.Tx, attempt Mes
 			buy_currency, latency_ms, started_at, finished_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`
-	_, err := tx.Exec(ctx, query,
+	_, err = tx.Exec(ctx, query,
 		attempt.ID, attempt.MessageID, attempt.MessageCreatedAt, attempt.AttemptNumber, attempt.ConnectionID,
 		attempt.Status, attempt.ProviderMessageID, attempt.ErrorCode, attempt.ErrorMessage, attempt.BuyCost,
 		attempt.BuyCurrency, attempt.LatencyMs, attempt.StartedAt, attempt.FinishedAt,
@@ -607,8 +796,19 @@ func (r *pgRepository) FetchOutboxPending(
 		items = append(items, o)
 	}
 
-	// Claim rows atomically
-	for i := range items {
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Claim rows atomically in a single roundtrip
+	if len(items) > 0 {
+		ids := make([]uuid.UUID, len(items))
+		for i := range items {
+			ids[i] = items[i].ID
+			items[i].Status = "sending"
+			items[i].Attempts++
+		}
 		claimQuery := `
 			UPDATE message_outbox
 			SET status = 'sending',
@@ -616,14 +816,11 @@ func (r *pgRepository) FetchOutboxPending(
 			    locked_by = $2,
 			    attempts = attempts + 1,
 			    updated_at = $3
-			WHERE id = $4
+			WHERE id = ANY($4)
 		`
-		_, err := tx.Exec(ctx, claimQuery, lockUntil, workerID, now, items[i].ID)
-		if err != nil {
+		if _, err := tx.Exec(ctx, claimQuery, lockUntil, workerID, now, ids); err != nil {
 			return nil, err
 		}
-		items[i].Status = "sending"
-		items[i].Attempts++
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -631,6 +828,24 @@ func (r *pgRepository) FetchOutboxPending(
 	}
 
 	return items, nil
+}
+
+// ReleaseOutboxPending returns a claimed outbox row cleanly to 'pending' without incrementing attempt penalty
+// (e.g. when a peer dispatcher process owns an exclusive SMPP carrier advisory lock).
+func (r *pgRepository) ReleaseOutboxPending(ctx context.Context, outboxID uuid.UUID, delay time.Duration) error {
+	now := time.Now().UTC()
+	nextAt := now.Add(delay)
+	_, err := r.pool.Exec(ctx, `
+		UPDATE message_outbox
+		SET status = 'pending',
+		    locked_until = NULL,
+		    locked_by = NULL,
+		    attempts = GREATEST(0, attempts - 1),
+		    next_attempt_at = $1,
+		    updated_at = $2
+		WHERE id = $3
+	`, nextAt, now, outboxID)
+	return err
 }
 
 // UpdateOutboxStatus updates an outbox row's terminal or retry status.
@@ -973,6 +1188,10 @@ func (r *pgRepository) ListDLRMappings(ctx context.Context, connectionID *uuid.U
 }
 
 func (r *pgRepository) RecordSettlementException(ctx context.Context, exc SettlementException) error {
+	return r.RecordSettlementExceptionTx(ctx, nil, exc)
+}
+
+func (r *pgRepository) RecordSettlementExceptionTx(ctx context.Context, tx pgx.Tx, exc SettlementException) error {
 	if exc.ID == uuid.Nil {
 		exc.ID = uuid.New()
 	}
@@ -986,12 +1205,18 @@ func (r *pgRepository) RecordSettlementException(ctx context.Context, exc Settle
 		exc.Details = []byte("{}")
 	}
 
-	_, err := r.pool.Exec(ctx, `
+	const q = `
 		INSERT INTO settlement_exceptions (
 			id, message_id, message_created_at, customer_org_id, hold_id,
 			exception_type, severity, details, resolved, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, exc.ID, exc.MessageID, exc.MessageCreatedAt, exc.CustomerOrgID, exc.HoldID,
+	`
+	if tx != nil {
+		_, err := tx.Exec(ctx, q, exc.ID, exc.MessageID, exc.MessageCreatedAt, exc.CustomerOrgID, exc.HoldID,
+			exc.ExceptionType, exc.Severity, exc.Details, exc.Resolved, exc.CreatedAt)
+		return err
+	}
+	_, err := r.pool.Exec(ctx, q, exc.ID, exc.MessageID, exc.MessageCreatedAt, exc.CustomerOrgID, exc.HoldID,
 		exc.ExceptionType, exc.Severity, exc.Details, exc.Resolved, exc.CreatedAt)
 	return err
 }
@@ -1223,7 +1448,8 @@ func (r *pgRepository) FindStuckMessages(ctx context.Context, before time.Time, 
 		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
 		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
 		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
 		WHERE status IN ('accepted', 'queued', 'submitting') AND created_at < $1
 		LIMIT $2
@@ -1242,6 +1468,7 @@ func (r *pgRepository) FindStuckMessages(ctx context.Context, before time.Time, 
 			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
 			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+			&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 		); err != nil {
 			return nil, err
 		}
@@ -1259,9 +1486,10 @@ func (r *pgRepository) FindUnknownMessages(ctx context.Context, before time.Time
 		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
 		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
 		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
-		WHERE status = 'unknown' AND created_at < $1
+		WHERE status = 'unknown' AND updated_at < $1
 		LIMIT $2
 	`, before, limit)
 	if err != nil {
@@ -1278,6 +1506,7 @@ func (r *pgRepository) FindUnknownMessages(ctx context.Context, before time.Time
 			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
 			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+			&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 		); err != nil {
 			return nil, err
 		}
@@ -1286,7 +1515,8 @@ func (r *pgRepository) FindUnknownMessages(ctx context.Context, before time.Time
 	return list, nil
 }
 
-func (r *pgRepository) FindNoDLRSubmittedMessages(ctx context.Context, before time.Time, limit int) ([]Message, error) {
+// FindNoDLRSubmittedMessages finds submitted messages whose per-message snapshotted dlr_wait_hours window has elapsed asOf.
+func (r *pgRepository) FindNoDLRSubmittedMessages(ctx context.Context, asOf time.Time, limit int) ([]Message, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1295,11 +1525,13 @@ func (r *pgRepository) FindNoDLRSubmittedMessages(ctx context.Context, before ti
 		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
 		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
 		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
-		WHERE status = 'submitted' AND created_at < $1
+		WHERE status = 'submitted'
+		  AND COALESCE(submitted_at, created_at) + make_interval(hours => dlr_wait_hours_snapshot) <= $1
 		LIMIT $2
-	`, before, limit)
+	`, asOf, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1314,6 +1546,7 @@ func (r *pgRepository) FindNoDLRSubmittedMessages(ctx context.Context, before ti
 			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
 			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+			&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 		); err != nil {
 			return nil, err
 		}
@@ -1420,7 +1653,8 @@ func (r *pgRepository) ListMessagesAdvanced(
 		       sender_id, sender_id_type, message_type, encoding, body_length, total_parts,
 		       status, failure_reason, hold_id, sell_price, sell_currency, estimated_buy_cost,
 		       actual_buy_cost, buy_currency, route_plan_id, provider_connection_id,
-		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at
+		       provider_message_id, attempts, max_attempts, expires_at, submitted_at, delivered_at, updated_at,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
 		%s
 		ORDER BY created_at DESC
@@ -1443,6 +1677,7 @@ func (r *pgRepository) ListMessagesAdvanced(
 			&m.Status, &m.FailureReason, &m.HoldID, &m.SellPrice, &m.SellCurrency, &m.EstimatedBuyCost,
 			&m.ActualBuyCost, &m.BuyCurrency, &m.RoutePlanID, &m.ProviderConnectionID,
 			&m.ProviderMessageID, &m.Attempts, &m.MaxAttempts, &m.ExpiresAt, &m.SubmittedAt, &m.DeliveredAt, &m.UpdatedAt,
+			&m.BillingModeSnapshot, &m.DLRWaitHoursSnapshot, &m.NoDLRPolicySnapshot, &m.FailedAfterAcceptPolicySnapshot,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1559,7 +1794,7 @@ func (r *pgRepository) GetCustomerUsage(ctx context.Context, customerOrgID uuid.
 	var dCap, mCap *int64
 	var tps *int
 	row := r.pool.QueryRow(ctx, `
-		SELECT daily_message_cap, monthly_message_cap, tps_limit
+		SELECT daily_message_cap, monthly_message_cap, default_max_tps
 		FROM customer_profiles
 		WHERE organization_id = $1
 	`, customerOrgID)
@@ -1578,6 +1813,39 @@ func (r *pgRepository) GetCustomerUsage(ctx context.Context, customerOrgID uuid.
 	return dailyCount, monthlyCount, dailyCap, monthlyCap, tpsLimit, nil
 }
 
+// GetCustomerBillingTerms reads the active per-customer billing terms from customer_profiles,
+// falling back to the supplied defaults if no profile exists for the customer organization.
+func (r *pgRepository) GetCustomerBillingTerms(ctx context.Context, customerOrgID uuid.UUID, defaults CustomerBillingTerms) (CustomerBillingTerms, error) {
+	if defaults.BillingMode == "" {
+		defaults = DefaultCustomerBillingTerms()
+	}
+	var out CustomerBillingTerms
+	err := r.pool.QueryRow(ctx, `
+		SELECT billing_mode, dlr_wait_hours, no_dlr_policy, failed_after_accept_policy
+		FROM customer_profiles
+		WHERE organization_id = $1
+	`, customerOrgID).Scan(&out.BillingMode, &out.DLRWaitHours, &out.NoDLRPolicy, &out.FailedAfterAcceptPolicy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return defaults, nil
+		}
+		return defaults, err
+	}
+	if out.BillingMode == "" {
+		out.BillingMode = defaults.BillingMode
+	}
+	if out.DLRWaitHours < 1 || out.DLRWaitHours > 168 {
+		out.DLRWaitHours = defaults.DLRWaitHours
+	}
+	if out.NoDLRPolicy == "" {
+		out.NoDLRPolicy = defaults.NoDLRPolicy
+	}
+	if out.FailedAfterAcceptPolicy == "" {
+		out.FailedAfterAcceptPolicy = defaults.FailedAfterAcceptPolicy
+	}
+	return out, nil
+}
+
 // TransitionToFinalStateTx executes monotonic state transition, financial settlement, audit recording,
 // and atomically queues customer delivery receipts (SMPP DLR / Webhook) inside one caller transaction.
 func (r *pgRepository) TransitionToFinalStateTx(
@@ -1591,7 +1859,8 @@ func (r *pgRepository) TransitionToFinalStateTx(
 	var current Message
 	queryLock := `
 		SELECT id, created_at, customer_org_id, client_reference, destination, sender_id,
-		       status, hold_id, sell_price, sell_currency, ingress_channel, ingress_account_id, dlr_requested
+		       status, hold_id, sell_price, sell_currency, ingress_channel, ingress_account_id, dlr_requested,
+		       billing_mode_snapshot, dlr_wait_hours_snapshot, no_dlr_policy_snapshot, failed_after_accept_policy_snapshot
 		FROM messages
 		WHERE id = $1 AND created_at = $2
 		FOR UPDATE
@@ -1601,6 +1870,7 @@ func (r *pgRepository) TransitionToFinalStateTx(
 		&current.Destination, &current.SenderID, &current.Status, &current.HoldID,
 		&current.SellPrice, &current.SellCurrency, &current.IngressChannel, &current.IngressAccountID,
 		&current.DLRRequested,
+		&current.BillingModeSnapshot, &current.DLRWaitHoursSnapshot, &current.NoDLRPolicySnapshot, &current.FailedAfterAcceptPolicySnapshot,
 	)
 	if err != nil {
 		return fmt.Errorf("lock message for transition: %w", err)
@@ -1621,29 +1891,53 @@ func (r *pgRepository) TransitionToFinalStateTx(
 		deliveredAt = &now
 	}
 
-	// 2. Financial settlement according to billing trigger
+	// 2. Financial settlement according to immutable snapshotted billing terms
 	if current.HoldID != nil && ledgerSvc != nil {
-		shouldCapture := false
-		switch billingTrig {
-		case "submission":
-			// Captured at carrier acceptance, or delivered
-			shouldCapture = (params.ToStatus == StatusSubmitted || params.ToStatus == StatusDelivered)
-		case "delivery":
-			fallthrough
-		default:
-			shouldCapture = (params.ToStatus == StatusDelivered)
+		mode := current.BillingModeSnapshot
+		if mode == "" {
+			if billingTrig == "submission" || billingTrig == "on_provider_accept" {
+				mode = "on_provider_accept"
+			} else {
+				mode = "on_delivery"
+			}
 		}
 
-		if shouldCapture {
-			idempotencyKey := fmt.Sprintf("capture-%s", current.ID.String())
-			_, capErr := ledgerSvc.CaptureTx(ctx, tx, *current.HoldID, current.SellPrice, &idempotencyKey)
-			if capErr != nil {
-				return fmt.Errorf("capture hold on %s: %w", params.ToStatus, capErr)
+		isOnAccept := (mode == "on_provider_accept")
+		idempotencyKey := fmt.Sprintf("capture-%s", current.ID.String())
+
+		if isOnAccept {
+			switch params.ToStatus {
+			case StatusSubmitted, StatusDelivered:
+				_, capErr := ledgerSvc.CaptureTx(ctx, tx, *current.HoldID, current.SellPrice, &idempotencyKey)
+				if capErr != nil && !errors.Is(capErr, ledger.ErrHoldNotActive) {
+					return fmt.Errorf("capture hold on %s: %w", params.ToStatus, capErr)
+				}
+			case StatusFailed, StatusExpired, StatusUndelivered, StatusRejected:
+				if params.ToStatus == StatusRejected || current.Status == StatusAccepted || current.Status == StatusQueued || current.Status == StatusSubmitting {
+					// Rejected before provider acceptance: release active hold
+					if relErr := ledgerSvc.ReleaseTx(ctx, tx, *current.HoldID); relErr != nil {
+						return fmt.Errorf("release hold on %s: %w", params.ToStatus, relErr)
+					}
+				} else if current.FailedAfterAcceptPolicySnapshot == "refund" {
+					refundKey := fmt.Sprintf("refund-%s", current.ID.String())
+					_, refErr := ledgerSvc.RefundCaptureTx(ctx, tx, *current.HoldID, current.SellPrice, &refundKey, "Refund after failed delivery")
+					if refErr != nil && !errors.Is(refErr, ledger.ErrHoldNotActive) {
+						return fmt.Errorf("refund captured hold on %s: %w", params.ToStatus, refErr)
+					}
+				}
+				// If failed_after_accept_policy == 'keep_charge', leave hold captured.
 			}
-		} else if params.ToStatus == StatusFailed || params.ToStatus == StatusExpired || params.ToStatus == StatusUndelivered || params.ToStatus == StatusRejected {
-			relErr := ledgerSvc.ReleaseTx(ctx, tx, *current.HoldID)
-			if relErr != nil {
-				return fmt.Errorf("release hold on %s: %w", params.ToStatus, relErr)
+		} else {
+			if params.ToStatus == StatusDelivered {
+				_, capErr := ledgerSvc.CaptureTx(ctx, tx, *current.HoldID, current.SellPrice, &idempotencyKey)
+				if capErr != nil {
+					return fmt.Errorf("capture hold on %s: %w", params.ToStatus, capErr)
+				}
+			} else if params.ToStatus == StatusFailed || params.ToStatus == StatusExpired || params.ToStatus == StatusUndelivered || params.ToStatus == StatusRejected {
+				relErr := ledgerSvc.ReleaseTx(ctx, tx, *current.HoldID)
+				if relErr != nil {
+					return fmt.Errorf("release hold on %s: %w", params.ToStatus, relErr)
+				}
 			}
 		}
 	}
@@ -1688,12 +1982,48 @@ func (r *pgRepository) TransitionToFinalStateTx(
 		return fmt.Errorf("record status event: %w", err)
 	}
 
-	// 5. Customer Notification Hooks: queue SMPP DLR if ingress channel was SMPP and DLR requested
-	if current.IngressChannel == "smpp" && current.IngressAccountID != nil && current.DLRRequested {
+	// 5 & 6. Customer Notification Hooks: SMPP DLR & Customer Webhooks
+	notif := notifMessageInfo{
+		MessageID:        params.MessageID,
+		CustomerOrgID:    current.CustomerOrgID,
+		ClientReference:  current.ClientReference,
+		Destination:      current.Destination,
+		SenderID:         current.SenderID,
+		IngressChannel:   current.IngressChannel,
+		IngressAccountID: current.IngressAccountID,
+		DLRRequested:     current.DLRRequested,
+	}
+	return r.enqueueCustomerNotificationsTx(ctx, tx, notif, params.ToStatus, reasonVal, deliveredAt, now)
+}
+
+type notifMessageInfo struct {
+	MessageID        uuid.UUID
+	CustomerOrgID    uuid.UUID
+	ClientReference  *string
+	Destination      string
+	SenderID         string
+	IngressChannel   string
+	IngressAccountID *uuid.UUID
+	DLRRequested     bool
+}
+
+// enqueueCustomerNotificationsTx enqueues SMPP DLRs (for terminal outcomes) and matching customer webhooks
+// atomically inside the state-transition transaction.
+func (r *pgRepository) enqueueCustomerNotificationsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	msg notifMessageInfo,
+	toStatus string,
+	reasonVal *string,
+	deliveredAt *time.Time,
+	now time.Time,
+) error {
+	// 1. SMPP DLR Queue (only when entering terminal state for SMPP ingress with DLR requested)
+	if IsTerminalStatus(toStatus) && msg.IngressChannel == "smpp" && msg.IngressAccountID != nil && msg.DLRRequested {
 		dlrPayload, _ := json.Marshal(map[string]interface{}{
-			"message_id":   params.MessageID.String(),
-			"status":       params.ToStatus,
-			"reason":       params.Reason,
+			"message_id":   msg.MessageID.String(),
+			"status":       toStatus,
+			"reason":       reasonVal,
 			"delivered_at": deliveredAt,
 		})
 		smppDlrQuery := `
@@ -1703,59 +2033,77 @@ func (r *pgRepository) TransitionToFinalStateTx(
 				expires_at, created_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		`
-		msgRef := params.MessageID.String()
+		msgRef := msg.MessageID.String()
 		errCode := "000"
-		if reasonVal != nil {
-			errCode = *reasonVal
+		if toStatus != StatusDelivered {
+			errCode = "045"
+			if reasonVal != nil && len(*reasonVal) > 0 {
+				trimmed := strings.TrimSpace(*reasonVal)
+				if len(trimmed) > 16 {
+					trimmed = trimmed[:16]
+				}
+				errCode = trimmed
+			}
 		}
-		_, _ = tx.Exec(ctx, smppDlrQuery,
-			*current.IngressAccountID, params.MessageID, msgRef, current.ClientReference,
-			current.Destination, current.SenderID, params.ToStatus, errCode, dlrPayload,
+		if _, err := tx.Exec(ctx, smppDlrQuery,
+			*msg.IngressAccountID, msg.MessageID, msgRef, msg.ClientReference,
+			msg.Destination, msg.SenderID, toStatus, errCode, dlrPayload,
 			now.Add(24*time.Hour),
-		)
+		); err != nil {
+			return fmt.Errorf("enqueue smpp dlr: %w", err)
+		}
 	}
 
-	// 6. Customer Notification Hooks: queue Webhook deliveries if active webhooks exist for this event
-	eventType := "message." + params.ToStatus
+	// 2. Customer Webhooks matching event subscription (skip purely internal transient pre-send states)
+	if toStatus == StatusSubmitting || toStatus == StatusAccepted || toStatus == StatusQueued {
+		return nil
+	}
+	eventType := "message." + toStatus
 	whQuery := `
 		SELECT id, url
 		FROM customer_webhooks
 		WHERE customer_org_id = $1 AND status = 'active' AND events @> to_jsonb($2::text)
 	`
-	whRows, whErr := tx.Query(ctx, whQuery, current.CustomerOrgID, eventType)
-	if whErr == nil {
-		type activeWH struct {
-			id  uuid.UUID
-			url string
+	whRows, whErr := tx.Query(ctx, whQuery, msg.CustomerOrgID, eventType)
+	if whErr != nil {
+		return fmt.Errorf("query customer webhooks: %w", whErr)
+	}
+	type activeWH struct {
+		id  uuid.UUID
+		url string
+	}
+	var activeList []activeWH
+	for whRows.Next() {
+		var w activeWH
+		if scanErr := whRows.Scan(&w.id, &w.url); scanErr == nil {
+			activeList = append(activeList, w)
 		}
-		var activeList []activeWH
-		for whRows.Next() {
-			var w activeWH
-			if scanErr := whRows.Scan(&w.id, &w.url); scanErr == nil {
-				activeList = append(activeList, w)
-			}
-		}
-		whRows.Close()
+	}
+	whRows.Close()
+	if err := whRows.Err(); err != nil {
+		return fmt.Errorf("iterate customer webhooks: %w", err)
+	}
 
-		for _, wh := range activeList {
-			payloadObj := map[string]interface{}{
-				"event":            eventType,
-				"message_id":       params.MessageID.String(),
-				"client_reference": current.ClientReference,
-				"destination":      current.Destination,
-				"sender_id":        current.SenderID,
-				"status":           params.ToStatus,
-				"reason":           params.Reason,
-				"timestamp":        now.Format(time.RFC3339),
-			}
-			payloadJSON, _ := json.Marshal(payloadObj)
-			insDeliv := `
-				INSERT INTO customer_webhook_deliveries (
-					id, webhook_id, customer_org_id, event_id, event_type, payload,
-					status, attempts, max_attempts, next_attempt_at, created_at
-				) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, 5, now(), now())
-			`
-			_, _ = tx.Exec(ctx, insDeliv, uuid.New(), wh.id, current.CustomerOrgID, uuid.New().String(), eventType, payloadJSON)
+	for _, wh := range activeList {
+		payloadObj := map[string]interface{}{
+			"event":            eventType,
+			"message_id":       msg.MessageID.String(),
+			"client_reference": msg.ClientReference,
+			"destination":      msg.Destination,
+			"sender_id":        msg.SenderID,
+			"status":           toStatus,
+			"reason":           reasonVal,
+			"timestamp":        now.Format(time.RFC3339),
+		}
+		payloadJSON, _ := json.Marshal(payloadObj)
+		insDeliv := `
+			INSERT INTO customer_webhook_deliveries (
+				id, webhook_id, customer_org_id, event_id, event_type, payload,
+				status, attempts, max_attempts, next_attempt_at, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, 5, now(), now())
+		`
+		if _, err := tx.Exec(ctx, insDeliv, uuid.New(), wh.id, msg.CustomerOrgID, uuid.New().String(), eventType, payloadJSON); err != nil {
+			return fmt.Errorf("enqueue webhook delivery: %w", err)
 		}
 	}
 
@@ -1777,9 +2125,13 @@ func (r *pgRepository) InsertSMPPDLRQueue(ctx context.Context, tx pgx.Tx, item S
 	if tx != nil {
 		execer = tx
 	}
+	payload := item.Payload
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
 	_, err := execer.Exec(ctx, query,
 		item.AccountID, item.MessageID, item.MessageRef, item.ClientReference,
-		item.Destination, item.SenderID, item.Status, item.ErrorCode, item.Payload,
+		item.Destination, item.SenderID, item.Status, item.ErrorCode, payload,
 		item.ExpiresAt,
 	)
 	return err
@@ -1838,6 +2190,9 @@ func (r *pgRepository) FetchPendingSMPPDLRs(ctx context.Context, limit int, leas
 		if err != nil {
 			return nil, err
 		}
+		for i := range items {
+			items[i].Attempts++
+		}
 	}
 
 	return items, tx.Commit(ctx)
@@ -1851,6 +2206,20 @@ func (r *pgRepository) UpdateSMPPDLRQueueStatus(ctx context.Context, id uuid.UUI
 		    delivered_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivered_at END
 		WHERE id = $2
 	`, status, id)
+	return err
+}
+
+// UpdateSMPPDLRQueueStatusBatch updates multiple SMPP DLR queue items in one SQL roundtrip.
+func (r *pgRepository) UpdateSMPPDLRQueueStatusBatch(ctx context.Context, ids []uuid.UUID, status string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE smpp_dlr_queue
+		SET queue_status = $1, leased_until = NULL, leased_by = NULL,
+		    delivered_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivered_at END
+		WHERE id = ANY($2)
+	`, status, ids)
 	return err
 }
 
@@ -2187,6 +2556,9 @@ func (r *pgRepository) FetchPendingWebhookDeliveries(ctx context.Context, limit 
 		if err != nil {
 			return nil, err
 		}
+		for i := range list {
+			list[i].Attempts++
+		}
 	}
 
 	return list, tx.Commit(ctx)
@@ -2207,25 +2579,23 @@ func (r *pgRepository) RecordWebhookAttempt(ctx context.Context, attempt Custome
 		attempt.CreatedAt = time.Now().UTC()
 	}
 
+	var deliveredAt *time.Time
+	if nextStatus == "success" {
+		now := time.Now().UTC()
+		deliveredAt = &now
+	}
+
+	var batch pgx.Batch
 	attQ := `
 		INSERT INTO customer_webhook_attempts (
 			id, delivery_id, attempt_number, response_code, latency_ms,
 			response_snippet, error_class, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err = tx.Exec(ctx, attQ,
+	batch.Queue(attQ,
 		attempt.ID, attempt.DeliveryID, attempt.AttemptNumber, attempt.ResponseCode,
 		attempt.LatencyMs, attempt.ResponseSnippet, attempt.ErrorClass, attempt.CreatedAt,
 	)
-	if err != nil {
-		return err
-	}
-
-	var deliveredAt *time.Time
-	if nextStatus == "success" {
-		now := time.Now().UTC()
-		deliveredAt = &now
-	}
 
 	delivQ := `
 		UPDATE customer_webhook_deliveries
@@ -2233,21 +2603,19 @@ func (r *pgRepository) RecordWebhookAttempt(ctx context.Context, attempt Custome
 		    delivered_at = coalesce($3, delivered_at)
 		WHERE id = $4
 	`
-	_, err = tx.Exec(ctx, delivQ, nextStatus, nextAttempt, deliveredAt, attempt.DeliveryID)
-	if err != nil {
-		return err
-	}
+	batch.Queue(delivQ, nextStatus, nextAttempt, deliveredAt, attempt.DeliveryID)
 
+	hasHookUpdate := false
 	// Update consecutive failures and auto-disable status on parent webhook
 	if nextStatus == "success" {
 		resetQ := `
 			UPDATE customer_webhooks
 			SET consecutive_failures = 0, updated_at = now()
 			WHERE id = (SELECT webhook_id FROM customer_webhook_deliveries WHERE id = $1)
+			  AND consecutive_failures > 0
 		`
-		if _, err := tx.Exec(ctx, resetQ, attempt.DeliveryID); err != nil {
-			return err
-		}
+		batch.Queue(resetQ, attempt.DeliveryID)
+		hasHookUpdate = true
 	} else if nextStatus == "failed" {
 		failQ := `
 			UPDATE customer_webhooks
@@ -2256,9 +2624,25 @@ func (r *pgRepository) RecordWebhookAttempt(ctx context.Context, attempt Custome
 			    updated_at = now()
 			WHERE id = (SELECT webhook_id FROM customer_webhook_deliveries WHERE id = $1)
 		`
-		if _, err := tx.Exec(ctx, failQ, attempt.DeliveryID); err != nil {
+		batch.Queue(failQ, attempt.DeliveryID)
+		hasHookUpdate = true
+	}
+
+	br := tx.SendBatch(ctx, &batch)
+	defer br.Close()
+	if _, err := br.Exec(); err != nil {
+		return err
+	}
+	if _, err := br.Exec(); err != nil {
+		return err
+	}
+	if hasHookUpdate {
+		if _, err := br.Exec(); err != nil {
 			return err
 		}
+	}
+	if err := br.Close(); err != nil {
+		return err
 	}
 
 	return tx.Commit(ctx)

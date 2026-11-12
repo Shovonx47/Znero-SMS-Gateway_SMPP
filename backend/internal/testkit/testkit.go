@@ -62,16 +62,37 @@ type Env struct {
 }
 
 // Integration returns the connection URL or skips the test when integration mode is off.
+// It enforces that the target database name ends with "_test" so znero_dev is never touched.
 func Integration(t testing.TB) string {
 	t.Helper()
 	if os.Getenv("ZNERO_INTEGRATION") != "1" {
 		t.Skip("skipping integration test without ZNERO_INTEGRATION=1")
 	}
-	url := os.Getenv("DATABASE_URL")
+	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
-		t.Fatal("DATABASE_URL must be set for integration tests (run scripts/test.ps1 -Integration)")
+		url = os.Getenv("DATABASE_URL")
 	}
+	if url == "" {
+		t.Fatal("TEST_DATABASE_URL or DATABASE_URL must be set for integration tests (run scripts/test.ps1 -Integration)")
+	}
+	assertTestDBName(t, url)
 	return url
+}
+
+func assertTestDBName(t testing.TB, url string) {
+	t.Helper()
+	dbName := ""
+	if idx := strings.LastIndex(url, "/"); idx != -1 {
+		rest := url[idx+1:]
+		if q := strings.Index(rest, "?"); q != -1 {
+			dbName = rest[:q]
+		} else {
+			dbName = rest
+		}
+	}
+	if !strings.HasSuffix(dbName, "_test") {
+		t.Fatalf("SAFETY GUARD: integration tests must target a database whose name ends in '_test'. Got database name: %q. Set TEST_DATABASE_URL or DATABASE_URL to point at your 'znero_test' database.", dbName)
+	}
 }
 
 // RandHex returns n random bytes hex-encoded. Use it for every fixture secret/identifier.

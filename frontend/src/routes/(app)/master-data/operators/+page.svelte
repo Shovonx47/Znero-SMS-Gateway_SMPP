@@ -55,7 +55,7 @@
 	async function loadCountries() {
 		try {
 			const res = await apiClient.listCountries({ pageSize: 500 });
-			countries = res.data.items;
+			countries = res.data.items || [];
 		} catch {
 			// ignore fallback
 		}
@@ -77,7 +77,7 @@
 				page,
 				pageSize
 			});
-			operators = res.data.items;
+			operators = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -305,7 +305,7 @@
 				</div>
 
 				<div>
-					<select
+					<select aria-label="Filter by country"
 						bind:value={countryFilter}
 						onchange={() => { page = 1; loadOperators(); }}
 						class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -333,7 +333,7 @@
 				</div>
 
 				<div class="flex gap-2">
-					<select
+					<select aria-label="Filter by technology"
 						bind:value={technologyFilter}
 						onchange={() => { page = 1; loadOperators(); }}
 						class="w-1/2 rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

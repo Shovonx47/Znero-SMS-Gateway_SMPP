@@ -197,35 +197,64 @@ test.describe('Phase 6: Wallets, Ledger, Credit Enforcement & Billing Basics E2E
 	});
 
 	test('4. Reseller isolation: cross-tenant wallet and invoice access is refused (403)', async ({
-		page
+		browser
 	}) => {
+		// Create/ensure a real foreign wallet directly under Platform (outside Reseller's subtree)
+		const adminCtx = await browser.newContext();
+		const adminPage = await adminCtx.newPage();
+		await loginAs(adminPage, adminEmail);
+		const foreignWalletId = await adminPage.evaluate(async () => {
+			const refreshRes = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' });
+			const refreshJson = await refreshRes.json();
+			const token = refreshJson?.data?.access_token || '';
+			const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+			const orgRes = await fetch('/api/v1/organizations', {
+				method: 'POST',
+				headers,
+				body: JSON.stringify({ name: `E2E Foreign Isolation ${Date.now()}`, type: 'customer' })
+			});
+			const orgJson = await orgRes.json();
+			const orgId = orgJson?.data?.id;
+			const wRes = await fetch('/api/v1/wallets', {
+				method: 'POST',
+				headers,
+				body: JSON.stringify({ organization_id: orgId, currency: 'USD', account_type: 'prepaid' })
+			});
+			const wJson = await wRes.json();
+			return wJson?.data?.id || '';
+		});
+		expect(foreignWalletId).toBeTruthy();
+		await adminCtx.close();
+
+		const resellerCtx = await browser.newContext();
+		const page = await resellerCtx.newPage();
 		await loginAs(page, resellerEmail);
 
 		// 1. Reseller visits Wallets list
 		await page.goto('/wallets');
 		await expect(page.locator('main h1')).toContainText('Wallets');
 
-		// 2. Reseller attempts direct API access to foreign customer wallet (Fintech Messaging Corp)
-		const crossTenantCheck = await page.evaluate(async () => {
+		// 2. Reseller attempts direct API access to foreign customer wallet
+		const crossTenantCheck = await page.evaluate(async (targetId: string) => {
 			const refreshRes = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' });
 			const refreshJson = await refreshRes.json();
 			const token = refreshJson?.data?.access_token || '';
 			const headers = { Authorization: `Bearer ${token}` };
 
-			const foreignWalletId = 'fa3e6ec8-a0c5-4776-844c-c25b76d3af76';
-			const res = await fetch(`/api/v1/wallets/${foreignWalletId}`, { headers });
-			const stmtRes = await fetch(`/api/v1/wallets/${foreignWalletId}/statement`, { headers });
+			const res = await fetch(`/api/v1/wallets/${targetId}`, { headers });
+			const stmtRes = await fetch(`/api/v1/wallets/${targetId}/statement`, { headers });
 			return {
 				walletStatus: res.status,
 				stmtStatus: stmtRes.status
 			};
-		});
+		}, foreignWalletId);
 		expect(crossTenantCheck.walletStatus).toBe(403);
 		expect(crossTenantCheck.stmtStatus).toBe(403);
 
 		// 3. Direct browser navigation to foreign wallet page displays error state
-		await page.goto('/wallets/fa3e6ec8-a0c5-4776-844c-c25b76d3af76');
+		await page.goto(`/wallets/${foreignWalletId}`);
 		await expect(page.locator('text=outside tenant boundary')).toBeVisible({ timeout: 10000 });
+		await resellerCtx.close();
 	});
 
 	test('5. Platform admin creates draft invoice -> Issues gap-free invoice -> Records payment -> Verifies printable document', async ({

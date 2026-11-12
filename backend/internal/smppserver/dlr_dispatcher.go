@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/messaging"
@@ -17,6 +18,7 @@ import (
 // DLRDispatcherConfig configures the background SMPP DLR worker.
 type DLRDispatcherConfig struct {
 	BatchSize     int           `json:"batch_size"`
+	WorkerCount   int           `json:"worker_count"`
 	PollInterval  time.Duration `json:"poll_interval"`
 	LeaseDuration time.Duration `json:"lease_duration"`
 	WorkerID      string        `json:"worker_id"`
@@ -42,10 +44,13 @@ func NewDLRDispatcher(
 	logger *slog.Logger,
 ) *DLRDispatcher {
 	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = 50
+		cfg.BatchSize = 200
+	}
+	if cfg.WorkerCount <= 0 {
+		cfg.WorkerCount = 32
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 1 * time.Second
+		cfg.PollInterval = 50 * time.Millisecond
 	}
 	if cfg.LeaseDuration <= 0 {
 		cfg.LeaseDuration = 10 * time.Second
@@ -90,27 +95,89 @@ func (d *DLRDispatcher) run(ctx context.Context) {
 		case <-d.stopCh:
 			return
 		case <-ticker.C:
-			d.processBatch(ctx)
+			for d.processBatch(ctx) >= d.cfg.BatchSize {
+				select {
+				case <-ctx.Done():
+					return
+				case <-d.stopCh:
+					return
+				default:
+				}
+			}
 		}
 	}
 }
 
-func (d *DLRDispatcher) processBatch(ctx context.Context) {
+// ProcessBatch claims and delivers one batch of queued customer SMPP DLRs deterministically.
+func (d *DLRDispatcher) ProcessBatch(ctx context.Context) {
+	d.processBatch(ctx)
+}
+
+func (d *DLRDispatcher) processBatch(ctx context.Context) int {
 	items, err := d.repo.FetchPendingSMPPDLRs(ctx, d.cfg.BatchSize, d.cfg.WorkerID, d.cfg.LeaseDuration)
 	if err != nil {
 		d.logger.Error("failed to claim pending smpp dlrs", "error", err)
-		return
+		return 0
 	}
 	if len(items) == 0 {
-		return
+		return 0
 	}
 
-	for _, item := range items {
-		d.dispatchItem(ctx, item)
+	workers := d.cfg.WorkerCount
+	if workers <= 0 {
+		workers = 32
 	}
+	if workers > len(items) {
+		workers = len(items)
+	}
+
+	type itemOutcome struct {
+		id     uuid.UUID
+		status string // "", "delivered", "expired"
+	}
+	outcomes := make([]itemOutcome, len(items))
+	jobs := make(chan int, len(items))
+	for i := range items {
+		jobs <- i
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				st := d.dispatchItem(ctx, items[idx])
+				outcomes[idx] = itemOutcome{id: items[idx].ID, status: st}
+			}
+		}()
+	}
+	wg.Wait()
+
+	var deliveredIDs, expiredIDs []uuid.UUID
+	for _, out := range outcomes {
+		switch out.status {
+		case "delivered":
+			deliveredIDs = append(deliveredIDs, out.id)
+		case "expired":
+			expiredIDs = append(expiredIDs, out.id)
+		}
+	}
+	if len(deliveredIDs) > 0 {
+		if err := d.repo.UpdateSMPPDLRQueueStatusBatch(ctx, deliveredIDs, "delivered"); err != nil {
+			d.logger.Error("failed batch update smpp dlr delivered status", "count", len(deliveredIDs), "error", err)
+		}
+	}
+	if len(expiredIDs) > 0 {
+		if err := d.repo.UpdateSMPPDLRQueueStatusBatch(ctx, expiredIDs, "expired"); err != nil {
+			d.logger.Error("failed batch update smpp dlr expired status", "count", len(expiredIDs), "error", err)
+		}
+	}
+	return len(items)
 }
 
-func (d *DLRDispatcher) dispatchItem(ctx context.Context, item messaging.SMPPDLRQueueItem) {
+func (d *DLRDispatcher) dispatchItem(ctx context.Context, item messaging.SMPPDLRQueueItem) string {
 	// Find active receiver or transceiver session for this account
 	sessions := d.tracker.GetSessionsForAccount(item.AccountID)
 	var targetSession *ClientSession
@@ -126,11 +193,11 @@ func (d *DLRDispatcher) dispatchItem(ctx context.Context, item messaging.SMPPDLR
 	// If no bound session is connected
 	if targetSession == nil {
 		if now.After(item.ExpiresAt) {
-			_ = d.repo.UpdateSMPPDLRQueueStatus(ctx, item.ID, "expired")
 			d.logger.Info("smpp dlr expired without bound session", "message_id", item.MessageID)
+			return "expired"
 		}
 		// Otherwise leave leased_until to expire so it retries when client connects
-		return
+		return ""
 	}
 
 	// Map to standard SMPP DLR receipt format
@@ -193,9 +260,8 @@ func (d *DLRDispatcher) dispatchItem(ctx context.Context, item messaging.SMPPDLR
 	dispErr := targetSession.SendDeliverSM(ctx, deliver)
 	if dispErr != nil {
 		d.logger.Warn("smpp deliver_sm failed", "session_id", targetSession.ID, "error", dispErr)
-		return
+		return ""
 	}
 
-	// Mark delivered
-	_ = d.repo.UpdateSMPPDLRQueueStatus(ctx, item.ID, "delivered")
+	return "delivered"
 }

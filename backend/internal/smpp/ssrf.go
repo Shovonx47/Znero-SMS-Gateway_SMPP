@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -134,9 +135,21 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, address string) (
 		return nil, fmt.Errorf("ssrf dial: no valid public IPs for host %s", host)
 	}
 
-	// Connect directly to the first validated IP
+	// Connect directly to the first validated IP, with dial-time Control validation
+	// so even post-DNS socket connections cannot target private/metadata CIDRs.
 	dialer := &net.Dialer{
 		Timeout: d.opts.Timeout,
+		Control: func(network, address string, c syscall.RawConn) error {
+			dialHost, _, splitErr := net.SplitHostPort(address)
+			if splitErr != nil {
+				return fmt.Errorf("ssrf control: invalid address %s: %w", address, splitErr)
+			}
+			ip := net.ParseIP(dialHost)
+			if ip == nil {
+				return fmt.Errorf("ssrf control: non-IP address %s", address)
+			}
+			return ValidateIP(ip, d.opts.AllowLoopback)
+		},
 	}
 
 	targetAddr := net.JoinHostPort(validatedIPs[0].String(), portStr)

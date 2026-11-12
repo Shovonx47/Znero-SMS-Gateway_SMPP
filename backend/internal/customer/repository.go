@@ -79,7 +79,9 @@ const profileSelectCols = `
 	cp.account_type, cp.billing_currency, cp.timezone, cp.default_language,
 	cp.technical_contact, cp.billing_contact,
 	cp.credit_limit::float8, cp.default_max_tps, cp.daily_message_cap, cp.monthly_message_cap,
-	cp.allowed_countries, cp.destination_policy, cp.status, cp.notes, cp.archived,
+	cp.allowed_countries, cp.destination_policy,
+	cp.billing_mode, cp.dlr_wait_hours, cp.no_dlr_policy, cp.failed_after_accept_policy,
+	cp.status, cp.notes, cp.archived,
 	cp.version, cp.created_at, cp.updated_at, cp.created_by, cp.updated_by
 `
 
@@ -96,7 +98,9 @@ func scanProfile(row pgx.Row) (*CustomerProfile, error) {
 		&p.AccountType, &p.BillingCurrency, &p.Timezone, &p.DefaultLanguage,
 		&p.TechnicalContact, &p.BillingContact,
 		&p.CreditLimit, &p.DefaultMaxTPS, &p.DailyMessageCap, &p.MonthlyMessageCap,
-		&p.AllowedCountries, &p.DestinationPolicy, &p.Status, &p.Notes, &p.Archived,
+		&p.AllowedCountries, &p.DestinationPolicy,
+		&p.BillingMode, &p.DLRWaitHours, &p.NoDLRPolicy, &p.FailedAfterAcceptPolicy,
+		&p.Status, &p.Notes, &p.Archived,
 		&p.Version, &p.CreatedAt, &p.UpdatedAt, &p.CreatedBy, &p.UpdatedBy,
 	)
 	if err != nil {
@@ -207,14 +211,18 @@ func (r *pgRepository) CreateProfile(ctx context.Context, tx pgx.Tx, p *Customer
 			organization_id, account_type, billing_currency, timezone, default_language,
 			technical_contact, billing_contact,
 			credit_limit, default_max_tps, daily_message_cap, monthly_message_cap,
-			allowed_countries, destination_policy, status, notes, archived,
+			allowed_countries, destination_policy,
+			billing_mode, dlr_wait_hours, no_dlr_policy, failed_after_accept_policy,
+			status, notes, archived,
 			version, created_by, updated_by
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7,
 			$8, $9, $10, $11,
-			$12, $13, $14, $15, $16,
-			1, $17, $17
+			$12, $13,
+			$14, $15, $16, $17,
+			$18, $19, $20,
+			1, $21, $21
 		)
 		RETURNING id, version, created_at, updated_at`
 
@@ -222,7 +230,9 @@ func (r *pgRepository) CreateProfile(ctx context.Context, tx pgx.Tx, p *Customer
 		p.OrganizationID, p.AccountType, p.BillingCurrency, p.Timezone, p.DefaultLanguage,
 		p.TechnicalContact, p.BillingContact,
 		p.CreditLimit, p.DefaultMaxTPS, p.DailyMessageCap, p.MonthlyMessageCap,
-		p.AllowedCountries, p.DestinationPolicy, p.Status, p.Notes, p.Archived,
+		p.AllowedCountries, p.DestinationPolicy,
+		p.BillingMode, p.DLRWaitHours, p.NoDLRPolicy, p.FailedAfterAcceptPolicy,
+		p.Status, p.Notes, p.Archived,
 		p.CreatedBy,
 	).Scan(&p.ID, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -249,8 +259,10 @@ func (r *pgRepository) UpdateProfile(ctx context.Context, tx pgx.Tx, p *Customer
 			account_type = $2, billing_currency = $3, timezone = $4, default_language = $5,
 			technical_contact = $6, billing_contact = $7,
 			credit_limit = $8, default_max_tps = $9, daily_message_cap = $10, monthly_message_cap = $11,
-			allowed_countries = $12, destination_policy = $13, status = $14, notes = $15, archived = $16,
-			version = version + 1, updated_at = now(), updated_by = $17
+			allowed_countries = $12, destination_policy = $13,
+			billing_mode = $14, dlr_wait_hours = $15, no_dlr_policy = $16, failed_after_accept_policy = $17,
+			status = $18, notes = $19, archived = $20,
+			version = version + 1, updated_at = now(), updated_by = $21
 		WHERE id = $1
 		RETURNING version, updated_at`
 
@@ -258,7 +270,9 @@ func (r *pgRepository) UpdateProfile(ctx context.Context, tx pgx.Tx, p *Customer
 		p.ID, p.AccountType, p.BillingCurrency, p.Timezone, p.DefaultLanguage,
 		p.TechnicalContact, p.BillingContact,
 		p.CreditLimit, p.DefaultMaxTPS, p.DailyMessageCap, p.MonthlyMessageCap,
-		p.AllowedCountries, p.DestinationPolicy, p.Status, p.Notes, p.Archived,
+		p.AllowedCountries, p.DestinationPolicy,
+		p.BillingMode, p.DLRWaitHours, p.NoDLRPolicy, p.FailedAfterAcceptPolicy,
+		p.Status, p.Notes, p.Archived,
 		p.UpdatedBy,
 	).Scan(&p.Version, &p.UpdatedAt)
 	if err != nil {

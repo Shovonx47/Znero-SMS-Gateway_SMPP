@@ -26,19 +26,42 @@ func (f applierFunc) ApplyChange(ctx context.Context, tx pgx.Tx, cr *approval.Ch
 }
 
 type stagedSecret struct {
-	smppCipher string
-	httpCipher string
+	smppCipher          string
+	httpCipher          string
+	httpDLRSecretCipher string
 }
 
 type Service struct {
-	repo        Repository
-	auditSvc    *audit.Service
-	approvalSvc *approval.Service
-	keyRing     *secrets.KeyRing
-	appEnv      string
+	repo          Repository
+	auditSvc      *audit.Service
+	approvalSvc   *approval.Service
+	keyRing       *secrets.KeyRing
+	appEnv        string
+	allowLoopback bool
+	testSender    HTTPTestSender
 
 	mu            sync.Mutex
 	stagedSecrets map[string]stagedSecret
+}
+
+// SetAllowLoopback enables SSRF loopback exceptions ONLY outside production when ALLOW_LOOPBACK_IN_TEST is active.
+func (s *Service) SetAllowLoopback(allow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowLoopback = allow
+}
+
+func (s *Service) loopbackAllowed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowLoopback && !strings.EqualFold(strings.TrimSpace(s.appEnv), "production")
+}
+
+// SetHTTPTestSender attaches the runtime HTTP connector used for Admin UI test-send checks.
+func (s *Service) SetHTTPTestSender(ts HTTPTestSender) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.testSender = ts
 }
 
 func NewService(repo Repository, auditSvc *audit.Service, approvalSvc *approval.Service, keyRing *secrets.KeyRing, appEnv string) *Service {
@@ -515,16 +538,20 @@ func (s *Service) CreateConnection(ctx context.Context, tc *tenant.Context, prov
 		HTTPAuthType:         req.HTTPAuthType,
 		HTTPFormatNotes:      strings.TrimSpace(req.HTTPFormatNotes),
 		HTTPDLRCallbackNotes: strings.TrimSpace(req.HTTPDLRCallbackNotes),
+		HTTPDLRMode:          strings.TrimSpace(req.HTTPDLRMode),
 		CreatedBy:            &tc.ActorUserID,
 		UpdatedBy:            &tc.ActorUserID,
 	}
+	if req.HTTPConfig != nil {
+		c.HTTPConfig = *req.HTTPConfig
+	}
 
-	if err := validateConnectionFields(c, s.appEnv); err != nil {
+	if err := validateConnectionFields(c, s.appEnv, s.loopbackAllowed()); err != nil {
 		return nil, err
 	}
 
 	now := time.Now().UTC()
-	var cipherSMPP, cipherHTTP string
+	var cipherSMPP, cipherHTTP, cipherDLRSecret string
 	secretChanged := false
 	if req.SMPPPassword != nil && strings.TrimSpace(*req.SMPPPassword) != "" {
 		if !tc.HasPermission("provider.connection.secret.update") {
@@ -554,6 +581,17 @@ func (s *Service) CreateConnection(ctx context.Context, tc *tenant.Context, prov
 		c.HTTPCredentials = secrets.NewSecretStatus(enc, &now)
 		secretChanged = true
 	}
+	if req.HTTPDLRSecret != nil && strings.TrimSpace(*req.HTTPDLRSecret) != "" {
+		enc, err := s.keyRing.Encrypt(*req.HTTPDLRSecret)
+		if err != nil {
+			return nil, err
+		}
+		cipherDLRSecret = enc
+		c.HTTPDLRSecretEncrypted = enc
+		c.HTTPDLRSecretChangedAt = &now
+		c.HTTPDLRSecret = secrets.NewSecretStatus(enc, &now)
+		secretChanged = true
+	}
 
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
@@ -565,7 +603,11 @@ func (s *Service) CreateConnection(ctx context.Context, tc *tenant.Context, prov
 		if secretChanged {
 			ref := uuid.NewString()
 			s.mu.Lock()
-			s.stagedSecrets[ref] = stagedSecret{smppCipher: cipherSMPP, httpCipher: cipherHTTP}
+			s.stagedSecrets[ref] = stagedSecret{
+				smppCipher:          cipherSMPP,
+				httpCipher:          cipherHTTP,
+				httpDLRSecretCipher: cipherDLRSecret,
+			}
 			s.mu.Unlock()
 			after["secret_ref"] = ref
 			after["credential"] = "credential changed"
@@ -687,6 +729,12 @@ func (s *Service) UpdateConnection(ctx context.Context, tc *tenant.Context, conn
 	if req.HTTPDLRCallbackNotes != nil {
 		updated.HTTPDLRCallbackNotes = strings.TrimSpace(*req.HTTPDLRCallbackNotes)
 	}
+	if req.HTTPConfig != nil {
+		updated.HTTPConfig = *req.HTTPConfig
+	}
+	if req.HTTPDLRMode != nil {
+		updated.HTTPDLRMode = strings.TrimSpace(*req.HTTPDLRMode)
+	}
 
 	statusChangedToSensitive := false
 	if req.Status != nil && *req.Status != current.Status {
@@ -705,7 +753,7 @@ func (s *Service) UpdateConnection(ctx context.Context, tc *tenant.Context, conn
 		updated.Archived = *req.Archived
 	}
 
-	if err := validateConnectionFields(&updated, s.appEnv); err != nil {
+	if err := validateConnectionFields(&updated, s.appEnv, s.loopbackAllowed()); err != nil {
 		return nil, err
 	}
 	updated.UpdatedBy = &tc.ActorUserID
@@ -768,14 +816,15 @@ func (s *Service) UpdateConnectionSecret(ctx context.Context, tc *tenant.Context
 
 	hasSMPP := req.SMPPPassword != nil && strings.TrimSpace(*req.SMPPPassword) != ""
 	hasHTTP := req.HTTPCredentials != nil && strings.TrimSpace(*req.HTTPCredentials) != ""
-	if !hasSMPP && !hasHTTP {
-		return nil, fmt.Errorf("%w: smpp_password or http_credentials must be non-empty", ErrValidation)
+	hasDLRSecret := req.HTTPDLRSecret != nil && strings.TrimSpace(*req.HTTPDLRSecret) != ""
+	if !hasSMPP && !hasHTTP && !hasDLRSecret {
+		return nil, fmt.Errorf("%w: smpp_password, http_credentials, or http_dlr_secret must be non-empty", ErrValidation)
 	}
 
 	updated := *current
 	now := time.Now().UTC()
 
-	var cipherSMPP, cipherHTTP string
+	var cipherSMPP, cipherHTTP, cipherDLRSecret string
 	if hasSMPP {
 		enc, err := s.keyRing.Encrypt(*req.SMPPPassword)
 		if err != nil {
@@ -796,6 +845,16 @@ func (s *Service) UpdateConnectionSecret(ctx context.Context, tc *tenant.Context
 		updated.HTTPCredentialsChangedAt = &now
 		updated.HTTPCredentials = secrets.NewSecretStatus(enc, &now)
 	}
+	if hasDLRSecret {
+		enc, err := s.keyRing.Encrypt(*req.HTTPDLRSecret)
+		if err != nil {
+			return nil, err
+		}
+		cipherDLRSecret = enc
+		updated.HTTPDLRSecretEncrypted = enc
+		updated.HTTPDLRSecretChangedAt = &now
+		updated.HTTPDLRSecret = secrets.NewSecretStatus(enc, &now)
+	}
 	updated.UpdatedBy = &tc.ActorUserID
 
 	reason := strings.TrimSpace(req.Reason)
@@ -806,7 +865,11 @@ func (s *Service) UpdateConnectionSecret(ctx context.Context, tc *tenant.Context
 	if !hasOverride(tc, "provider.connection.override") && s.approvalSvc != nil {
 		ref := uuid.NewString()
 		s.mu.Lock()
-		s.stagedSecrets[ref] = stagedSecret{smppCipher: cipherSMPP, httpCipher: cipherHTTP}
+		s.stagedSecrets[ref] = stagedSecret{
+			smppCipher:          cipherSMPP,
+			httpCipher:          cipherHTTP,
+			httpDLRSecretCipher: cipherDLRSecret,
+		}
 		s.mu.Unlock()
 
 		after := toMap(&updated)
@@ -944,6 +1007,8 @@ func (s *Service) RollbackConnection(ctx context.Context, tc *tenant.Context, co
 	restored.SMPPPasswordChangedAt = current.SMPPPasswordChangedAt
 	restored.HTTPCredentialsEncrypted = current.HTTPCredentialsEncrypted
 	restored.HTTPCredentialsChangedAt = current.HTTPCredentialsChangedAt
+	restored.HTTPDLRSecretEncrypted = current.HTTPDLRSecretEncrypted
+	restored.HTTPDLRSecretChangedAt = current.HTTPDLRSecretChangedAt
 	restored.UpdatedBy = &tc.ActorUserID
 
 	if strings.TrimSpace(reason) == "" {
@@ -988,6 +1053,43 @@ func (s *Service) RollbackConnection(ctx context.Context, tc *tenant.Context, co
 		return nil, err
 	}
 	return &WriteResult{Connection: saved}, nil
+}
+
+// TestConnectionSend validates an HTTP provider connection template by executing
+// a safe test request via the configured HTTP connector (or an in-process simulated fake server in development).
+func (s *Service) TestConnectionSend(ctx context.Context, tc *tenant.Context, connID uuid.UUID, req TestSendRequest) (*TestSendResult, error) {
+	if err := requirePlatformPerm(tc, "provider.connection.edit"); err != nil {
+		return nil, err
+	}
+	conn, err := s.repo.GetConnectionByID(ctx, connID)
+	if err != nil {
+		return nil, err
+	}
+	if conn.Protocol != "http" {
+		return nil, fmt.Errorf("%w: test-send is only supported for HTTP connections", ErrValidation)
+	}
+	if strings.TrimSpace(req.Destination) == "" {
+		req.Destination = "+15550001234"
+	}
+	if strings.TrimSpace(req.SenderID) == "" {
+		req.SenderID = "ZNERO"
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		req.Text = "Znero HTTP connector test"
+	}
+	if strings.TrimSpace(req.Encoding) == "" {
+		req.Encoding = "GSM7"
+	}
+	if req.SimulateMode != "" && !strings.EqualFold(s.appEnv, "development") {
+		return nil, fmt.Errorf("%w: simulate_mode is only allowed in development", ErrValidation)
+	}
+	s.mu.Lock()
+	ts := s.testSender
+	s.mu.Unlock()
+	if ts == nil {
+		return nil, fmt.Errorf("http test sender is not configured")
+	}
+	return ts.TestConnection(ctx, conn, req)
 }
 
 // ============================================================================
@@ -1358,6 +1460,8 @@ func (s *Service) applyConnectionChange(ctx context.Context, tx pgx.Tx, cr *appr
 			c.SMPPPasswordChangedAt = current.SMPPPasswordChangedAt
 			c.HTTPCredentialsEncrypted = current.HTTPCredentialsEncrypted
 			c.HTTPCredentialsChangedAt = current.HTTPCredentialsChangedAt
+			c.HTTPDLRSecretEncrypted = current.HTTPDLRSecretEncrypted
+			c.HTTPDLRSecretChangedAt = current.HTTPDLRSecretChangedAt
 		}
 	}
 
@@ -1376,6 +1480,10 @@ func (s *Service) applyConnectionChange(ctx context.Context, tx pgx.Tx, cr *appr
 			if sec.httpCipher != "" {
 				c.HTTPCredentialsEncrypted = sec.httpCipher
 				c.HTTPCredentialsChangedAt = &now
+			}
+			if sec.httpDLRSecretCipher != "" {
+				c.HTTPDLRSecretEncrypted = sec.httpDLRSecretCipher
+				c.HTTPDLRSecretChangedAt = &now
 			}
 		}
 	}

@@ -165,6 +165,16 @@ func TestPlatformOnlyPermissions_StrictlyFiltered(t *testing.T) {
 		"rate.margin.view",
 		"import.job.manage",
 		"country.country.create",
+		"message.platform.view",
+		"message.platform.manage",
+		"message.dlr_mapping.manage",
+		"message.queue.view",
+		"message.reconcile",
+		"customer.smppsession.view",
+		"customer.smppsession.disconnect",
+		"inbound.number.create",
+		"inbound.number.read",
+		"system.info.view",
 	}
 	for _, code := range platformOnlyCases {
 		if !IsPlatformOnlyPermission(code) {

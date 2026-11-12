@@ -328,7 +328,7 @@
 		<!-- Filter bar -->
 		<div class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center">
 			<div class="relative flex-1">
-				<input
+				<input aria-label="Select search"
 					type="search"
 					bind:value={search}
 					oninput={() => { currentPage = 1; loadCardAndRates(); }}
@@ -337,7 +337,7 @@
 				/>
 			</div>
 
-			<select
+			<select aria-label="Filter by country"
 				bind:value={countryFilter}
 				onchange={() => { currentPage = 1; loadCardAndRates(); }}
 				class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:text-white"
@@ -348,7 +348,7 @@
 				{/each}
 			</select>
 
-			<select
+			<select aria-label="Filter by status"
 				bind:value={statusFilter}
 				onchange={() => { currentPage = 1; loadCardAndRates(); }}
 				class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:text-white"

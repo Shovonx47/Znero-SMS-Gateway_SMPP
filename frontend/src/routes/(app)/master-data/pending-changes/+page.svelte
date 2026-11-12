@@ -53,7 +53,7 @@
 				page,
 				pageSize
 			});
-			changeRequests = res.data.items;
+			changeRequests = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -144,7 +144,7 @@
 	<div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
 		<div class="flex flex-wrap items-center gap-3">
 			<div>
-				<select
+				<select aria-label="Filter by status"
 					bind:value={statusFilter}
 					onchange={() => { page = 1; loadChangeRequests(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -157,7 +157,7 @@
 			</div>
 
 			<div>
-				<select
+				<select aria-label="Filter by entity type"
 					bind:value={entityTypeFilter}
 					onchange={() => { page = 1; loadChangeRequests(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

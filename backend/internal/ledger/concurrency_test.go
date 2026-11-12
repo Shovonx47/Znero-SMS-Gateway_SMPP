@@ -299,3 +299,111 @@ func TestConcurrencyIdempotentRetriesPostOnce(t *testing.T) {
 		t.Fatalf("expected balance 75, got %s", wFinal.CachedBalance.String())
 	}
 }
+
+// TestConcurrency100MixedHoldsCapturesRefundsInvariant runs 100 concurrent wallet lifecycle workers
+// mixing PlaceHold -> Capture / Release / RefundCaptureTx against a bounded wallet and asserts:
+// zero overdraft, exact ledger sum conservation, and zero reconciliation discrepancies.
+func TestConcurrency100MixedHoldsCapturesRefundsInvariant(t *testing.T) {
+	h := setupHarness(t)
+	ctx := context.Background()
+
+	resellerOrg, resellerPath := h.e.ChildOrg(h.e.PlatformOrgID, h.e.PlatformOrgPath, "inv100-reseller", "reseller")
+	custOrg, _ := h.e.ChildOrg(resellerOrg, resellerPath, "inv100-cust", "customer")
+
+	w, err := h.ledgerSvc.EnsureWallet(ctx, h.e.Override, custOrg, "USD", "prepaid")
+	if err != nil {
+		t.Fatalf("ensure wallet: %v", err)
+	}
+	if _, _, err := h.ledgerSvc.Topup(ctx, h.e.Override, w.ID, ledger.WalletTopupRequest{
+		Amount: decimal.NewFromInt(60),
+		Reason: "100-concurrency invariant seed",
+	}, "127.0.0.1", "test"); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+
+	const workers = 100
+	holdAmount := decimal.NewFromInt(1)
+	var netCapturedCount atomic.Int64
+	var rejectedCount atomic.Int64
+	var errCount atomic.Int64
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	barrier := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-barrier
+
+			refID := uuid.New()
+			refType := "sms"
+			idemp := fmt.Sprintf("h100-%d-%s", idx, refID.String()[:8])
+			hold, err := h.ledgerSvc.PlaceHold(ctx, w.ID, holdAmount, "USD", &refType, &refID, &idemp, time.Now().Add(time.Hour))
+			if err != nil {
+				if errors.Is(err, ledger.ErrInsufficientFunds) {
+					rejectedCount.Add(1)
+					return
+				}
+				errCount.Add(1)
+				return
+			}
+
+			switch idx % 3 {
+			case 0: // capture and keep charge
+				capKey := "cap-" + refID.String()
+				if _, err := h.ledgerSvc.CaptureTx(ctx, nil, hold.ID, holdAmount, &capKey); err != nil {
+					errCount.Add(1)
+					return
+				}
+				netCapturedCount.Add(1)
+			case 1: // release hold cleanly
+				if err := h.ledgerSvc.Release(ctx, hold.ID); err != nil {
+					errCount.Add(1)
+					return
+				}
+			case 2: // capture then refund (tests RefundCaptureTx under contention!)
+				capKey := "cap-" + refID.String()
+				if _, err := h.ledgerSvc.CaptureTx(ctx, nil, hold.ID, holdAmount, &capKey); err != nil {
+					errCount.Add(1)
+					return
+				}
+				refKey := "ref-" + refID.String()
+				if _, err := h.ledgerSvc.RefundCaptureTx(ctx, nil, hold.ID, holdAmount, &refKey, "test refund"); err != nil {
+					errCount.Add(1)
+					return
+				}
+			}
+		}(i)
+	}
+
+	close(barrier)
+	wg.Wait()
+
+	if errCount.Load() != 0 {
+		t.Fatalf("unexpected ledger errors under 100 concurrent workers: %d", errCount.Load())
+	}
+
+	wFinal, err := h.ledgerSvc.GetWallet(ctx, h.e.Override, w.ID)
+	if err != nil {
+		t.Fatalf("get final wallet: %v", err)
+	}
+	wantBalance := decimal.NewFromInt(60).Sub(decimal.NewFromInt(netCapturedCount.Load()))
+	if !wFinal.CachedBalance.Equal(wantBalance) {
+		t.Fatalf("wallet cached_balance=%s != want=%s (captured=%d rejected=%d)",
+			wFinal.CachedBalance.String(), wantBalance.String(), netCapturedCount.Load(), rejectedCount.Load())
+	}
+	if wFinal.AvailableBalance.IsNegative() {
+		t.Fatalf("SECURITY INVARIANT BREACHED: negative available balance %s", wFinal.AvailableBalance.String())
+	}
+
+	reports, err := h.ledgerSvc.ReconcileBalances(ctx, h.e.Override, false)
+	if err != nil {
+		t.Fatalf("reconcile balances: %v", err)
+	}
+	for _, r := range reports {
+		if r.WalletID == w.ID && !r.Difference.IsZero() {
+			t.Fatalf("reconciliation difference found for wallet %s: %s", w.ID, r.Difference.String())
+		}
+	}
+}

@@ -14,6 +14,14 @@ DELETE FROM permissions WHERE code IN (
     'inbound.message.view'
 );
 
+DELETE FROM change_requests WHERE entity_type NOT IN (
+    'country', 'operator', 'prefix', 'number_rule', 'import_job',
+    'provider', 'provider_connection', 'provider_coverage', 'customer_profile', 'sender_id',
+    'rate_card', 'rate', 'rate_assignment',
+    'wallet_topup', 'wallet_adjustment', 'wallet_unfreeze', 'invoice_void',
+    'route_plan_activate', 'route_plan_deactivate', 'route_plan_entry_change', 'route_assignment_change', 'routing_rule_change', 'connection_reenable',
+    'system_setting', 'dlr_mapping'
+);
 ALTER TABLE change_requests DROP CONSTRAINT IF EXISTS change_requests_entity_type_check;
 ALTER TABLE change_requests ADD CONSTRAINT change_requests_entity_type_check
     CHECK (entity_type IN (

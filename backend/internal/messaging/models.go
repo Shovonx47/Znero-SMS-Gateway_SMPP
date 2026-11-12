@@ -70,6 +70,7 @@ var validTransitions = map[string]map[string]bool{
 		StatusUndelivered: true, // DLR UNDELIV
 		StatusExpired:     true, // DLR EXPIRED
 		StatusFailed:      true, // DLR REJECTD
+		StatusUnknown:     true, // No-DLR policy retain_until_resolution awaiting resolution window
 	},
 	StatusUnknown: {
 		StatusDelivered:   true, // Late DLR confirms delivery
@@ -132,41 +133,63 @@ func ValidateTransition(fromStatus, toStatus string) error {
 
 // Message represents a partitioned outbound SMS message record.
 type Message struct {
-	ID                   uuid.UUID        `json:"id"`
-	CreatedAt            time.Time        `json:"created_at"`
-	CustomerOrgID        uuid.UUID        `json:"customer_org_id"`
-	ClientReference      *string          `json:"client_reference,omitempty"`
-	OriginalDestination  string           `json:"original_destination"`
-	Destination          string           `json:"destination"`
-	SenderID             string           `json:"sender_id"`
-	SenderIDType         string           `json:"sender_id_type"`
-	MessageType          string           `json:"message_type"`
-	Encoding             string           `json:"encoding"`
-	EncryptedBody        []byte           `json:"-"`
-	KeyID                string           `json:"key_id"`
-	BodyLength           int              `json:"body_length"`
-	TotalParts           int              `json:"total_parts"`
-	Status               string           `json:"status"`
-	FailureReason        *string          `json:"failure_reason,omitempty"`
-	HoldID               *uuid.UUID       `json:"hold_id,omitempty"`
-	SellPrice            decimal.Decimal  `json:"sell_price"`
-	SellCurrency         string           `json:"sell_currency"`
-	EstimatedBuyCost     *decimal.Decimal `json:"estimated_buy_cost,omitempty"`
-	ActualBuyCost        *decimal.Decimal `json:"actual_buy_cost,omitempty"`
-	BuyCurrency          *string          `json:"buy_currency,omitempty"`
-	RoutePlanID          *uuid.UUID       `json:"route_plan_id,omitempty"`
-	ProviderConnectionID *uuid.UUID       `json:"provider_connection_id,omitempty"`
-	ProviderMessageID    *string          `json:"provider_message_id,omitempty"`
-	RequestFingerprint   *string          `json:"request_fingerprint,omitempty"`
-	IngressChannel       string           `json:"ingress_channel"`
-	IngressAccountID     *uuid.UUID       `json:"ingress_account_id,omitempty"`
-	DLRRequested         bool             `json:"dlr_requested"`
-	Attempts             int              `json:"attempts"`
-	MaxAttempts          int              `json:"max_attempts"`
-	ExpiresAt            time.Time        `json:"expires_at"`
-	SubmittedAt          *time.Time       `json:"submitted_at,omitempty"`
-	DeliveredAt          *time.Time       `json:"delivered_at,omitempty"`
-	UpdatedAt            time.Time        `json:"updated_at"`
+	ID                              uuid.UUID        `json:"id"`
+	CreatedAt                       time.Time        `json:"created_at"`
+	CustomerOrgID                   uuid.UUID        `json:"customer_org_id"`
+	ClientReference                 *string          `json:"client_reference,omitempty"`
+	OriginalDestination             string           `json:"original_destination"`
+	Destination                     string           `json:"destination"`
+	SenderID                        string           `json:"sender_id"`
+	SenderIDType                    string           `json:"sender_id_type"`
+	MessageType                     string           `json:"message_type"`
+	Encoding                        string           `json:"encoding"`
+	EncryptedBody                   []byte           `json:"-"`
+	KeyID                           string           `json:"key_id"`
+	BodyLength                      int              `json:"body_length"`
+	TotalParts                      int              `json:"total_parts"`
+	Status                          string           `json:"status"`
+	FailureReason                   *string          `json:"failure_reason,omitempty"`
+	HoldID                          *uuid.UUID       `json:"hold_id,omitempty"`
+	SellPrice                       decimal.Decimal  `json:"sell_price"`
+	SellCurrency                    string           `json:"sell_currency"`
+	EstimatedBuyCost                *decimal.Decimal `json:"estimated_buy_cost,omitempty"`
+	ActualBuyCost                   *decimal.Decimal `json:"actual_buy_cost,omitempty"`
+	BuyCurrency                     *string          `json:"buy_currency,omitempty"`
+	RoutePlanID                     *uuid.UUID       `json:"route_plan_id,omitempty"`
+	ProviderConnectionID            *uuid.UUID       `json:"provider_connection_id,omitempty"`
+	ProviderMessageID               *string          `json:"provider_message_id,omitempty"`
+	RequestFingerprint              *string          `json:"request_fingerprint,omitempty"`
+	IngressChannel                  string           `json:"ingress_channel"`
+	IngressAccountID                *uuid.UUID       `json:"ingress_account_id,omitempty"`
+	DLRRequested                    bool             `json:"dlr_requested"`
+	BillingModeSnapshot             string           `json:"billing_mode_snapshot"`
+	DLRWaitHoursSnapshot            int              `json:"dlr_wait_hours_snapshot"`
+	NoDLRPolicySnapshot             string           `json:"no_dlr_policy_snapshot"`
+	FailedAfterAcceptPolicySnapshot string           `json:"failed_after_accept_policy_snapshot"`
+	Attempts                        int              `json:"attempts"`
+	MaxAttempts                     int              `json:"max_attempts"`
+	ExpiresAt                       time.Time        `json:"expires_at"`
+	SubmittedAt                     *time.Time       `json:"submitted_at,omitempty"`
+	DeliveredAt                     *time.Time       `json:"delivered_at,omitempty"`
+	UpdatedAt                       time.Time        `json:"updated_at"`
+}
+
+// CustomerBillingTerms holds a customer's billing terms (and snapshot values on a message).
+type CustomerBillingTerms struct {
+	BillingMode             string `json:"billing_mode"`
+	DLRWaitHours            int    `json:"dlr_wait_hours"`
+	NoDLRPolicy             string `json:"no_dlr_policy"`
+	FailedAfterAcceptPolicy string `json:"failed_after_accept_policy"`
+}
+
+// DefaultCustomerBillingTerms returns safe platform defaults.
+func DefaultCustomerBillingTerms() CustomerBillingTerms {
+	return CustomerBillingTerms{
+		BillingMode:             "on_delivery",
+		DLRWaitHours:            24,
+		NoDLRPolicy:             "retain_until_resolution",
+		FailedAfterAcceptPolicy: "keep_charge",
+	}
 }
 
 // MessagePart represents an individual segment of a multi-part concatenated message.

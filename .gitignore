@@ -29,6 +29,7 @@ data/uploads/
 
 # Logs & temporary files
 .run/
+.tmp/
 *.log
 tmp/
 test-results/

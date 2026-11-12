@@ -29,6 +29,7 @@ func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	// Wallets routes
 	wallets := router.Group("/wallets", authMiddleware)
 	wallets.Get("/", rbac.RequirePermission("wallet.wallet.view"), h.ListWallets)
+	wallets.Post("/", rbac.RequirePermission("wallet.topup.create"), h.EnsureWallet)
 	wallets.Get("/my", rbac.RequirePermission("wallet.wallet.view"), h.GetMyWallet)
 	wallets.Post("/transfer", moneyLimiter, h.Transfer)
 	wallets.Post("/holds/expire", rbac.RequirePermission("wallet.override"), h.ExpireHolds)
@@ -68,11 +69,33 @@ func (h *Handler) mapError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, ErrInsufficientFunds), errors.Is(err, ErrWalletFrozen), errors.Is(err, ErrWalletClosed),
 		errors.Is(err, ErrNegativeAmount), errors.Is(err, ErrAmountExceedsMaximum), errors.Is(err, ErrCurrencyMismatch), errors.Is(err, ErrUnbalancedTransaction),
 		errors.Is(err, ErrHoldNotActive), errors.Is(err, ErrHoldExpired), errors.Is(err, ErrHoldCaptureExceeded),
-		errors.Is(err, ErrTransactionAlreadyReversed), errors.Is(err, ErrReversalNotAllowed), errors.Is(err, ErrReasonRequired):
+		errors.Is(err, ErrTransactionAlreadyReversed), errors.Is(err, ErrReversalNotAllowed), errors.Is(err, ErrReasonRequired), errors.Is(err, ErrValidation):
 		return httpx.BadRequest(err.Error())
 	default:
 		return httpx.Internal(err)
 	}
+}
+
+func (h *Handler) EnsureWallet(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("authentication required")
+	}
+
+	var req struct {
+		OrganizationID uuid.UUID `json:"organization_id"`
+		Currency       string    `json:"currency"`
+		AccountType    string    `json:"account_type"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest("invalid request body")
+	}
+
+	w, err := h.svc.EnsureWallet(c.UserContext(), tc, req.OrganizationID, req.Currency, req.AccountType)
+	if err != nil {
+		return h.mapError(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"data": w})
 }
 
 func (h *Handler) ListWallets(c *fiber.Ctx) error {
@@ -557,6 +580,9 @@ func (h *Handler) GetReconciliation(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err)
 	}
+	if reports == nil {
+		reports = []ReconciliationReport{}
+	}
 
 	return c.JSON(fiber.Map{"data": reports})
 }
@@ -575,6 +601,9 @@ func (h *Handler) RunReconciliation(c *fiber.Ctx) error {
 	reports, err := h.svc.ReconcileBalances(c.UserContext(), tc, req.Repair)
 	if err != nil {
 		return h.mapError(c, err)
+	}
+	if reports == nil {
+		reports = []ReconciliationReport{}
 	}
 
 	return c.JSON(fiber.Map{

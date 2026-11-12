@@ -1077,7 +1077,7 @@ func (s *Service) DeactivateAssignment(ctx context.Context, tc *tenant.Context, 
 }
 
 func (s *Service) ListCustomerAssignments(ctx context.Context, tc *tenant.Context, customerOrgID *uuid.UUID) ([]CustomerRateAssignment, error) {
-	if tc == nil {
+	if tc == nil || tc.IsCustomerOrg() || !tc.HasPermission("rate.assignment.read") {
 		return nil, ErrPermissionDenied
 	}
 	if !tc.IsPlatformOrg() {
@@ -1088,7 +1088,7 @@ func (s *Service) ListCustomerAssignments(ctx context.Context, tc *tenant.Contex
 }
 
 func (s *Service) ListResellerCostAssignments(ctx context.Context, tc *tenant.Context, resellerOrgID *uuid.UUID) ([]ResellerCostAssignment, error) {
-	if tc == nil {
+	if tc == nil || tc.IsCustomerOrg() || !tc.HasPermission("rate.assignment.read") {
 		return nil, ErrPermissionDenied
 	}
 	if !tc.IsPlatformOrg() {
@@ -1096,6 +1096,34 @@ func (s *Service) ListResellerCostAssignments(ctx context.Context, tc *tenant.Co
 		resellerOrgID = &tc.ActorOrgID
 	}
 	return s.repo.ListResellerCostAssignments(ctx, resellerOrgID)
+}
+
+func (s *Service) GetAssignmentHistory(ctx context.Context, tc *tenant.Context, id uuid.UUID, isCustomer bool) (any, error) {
+	if tc == nil || tc.IsCustomerOrg() || !tc.HasPermission("rate.assignment.read") {
+		return nil, ErrPermissionDenied
+	}
+	if isCustomer {
+		if !tc.IsPlatformOrg() {
+			assign, err := s.repo.GetCustomerAssignmentByID(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if assign.CustomerOrgID != tc.ActorOrgID {
+				return nil, ErrCrossTenantAccess
+			}
+		}
+		return s.repo.ListCustomerAssignmentHistory(ctx, id)
+	}
+	if !tc.IsPlatformOrg() {
+		assign, err := s.repo.GetResellerCostAssignmentByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if assign.ResellerOrgID != tc.ActorOrgID {
+			return nil, ErrCrossTenantAccess
+		}
+	}
+	return s.repo.ListResellerCostAssignmentHistory(ctx, id)
 }
 
 func (s *Service) GetResellerAssignedCostCard(ctx context.Context, tc *tenant.Context, resellerOrgID uuid.UUID) (*RateCard, error) {

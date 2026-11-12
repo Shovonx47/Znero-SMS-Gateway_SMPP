@@ -32,31 +32,53 @@ var (
 )
 
 type CustomerProfile struct {
-	ID                     uuid.UUID  `json:"id"`
-	OrganizationID         uuid.UUID  `json:"organization_id"`
-	OrganizationName       string     `json:"organization_name,omitempty"`
-	ParentOrganizationID   *uuid.UUID `json:"parent_organization_id,omitempty"`
-	ParentOrganizationName *string    `json:"parent_organization_name,omitempty"`
-	AccountType            string     `json:"account_type"` // prepaid | postpaid
-	BillingCurrency        string     `json:"billing_currency"`
-	Timezone               string     `json:"timezone"`
-	DefaultLanguage        string     `json:"default_language"`
-	TechnicalContact       string     `json:"technical_contact"`
-	BillingContact         string     `json:"billing_contact"`
-	CreditLimit            float64    `json:"credit_limit"`
-	DefaultMaxTPS          int        `json:"default_max_tps"`
-	DailyMessageCap        int64      `json:"daily_message_cap"`
-	MonthlyMessageCap      int64      `json:"monthly_message_cap"`
-	AllowedCountries       []string   `json:"allowed_countries"`
-	DestinationPolicy      string     `json:"destination_policy"` // allow_all | allow_listed | block_listed
-	Status                 string     `json:"status"`             // draft | active | suspended | closed
-	Notes                  string     `json:"notes"`
-	Archived               bool       `json:"archived"`
-	Version                int        `json:"version"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
-	CreatedBy              *uuid.UUID `json:"created_by,omitempty"`
-	UpdatedBy              *uuid.UUID `json:"updated_by,omitempty"`
+	ID                      uuid.UUID  `json:"id"`
+	OrganizationID          uuid.UUID  `json:"organization_id"`
+	OrganizationName        string     `json:"organization_name,omitempty"`
+	ParentOrganizationID    *uuid.UUID `json:"parent_organization_id,omitempty"`
+	ParentOrganizationName  *string    `json:"parent_organization_name,omitempty"`
+	AccountType             string     `json:"account_type"` // prepaid | postpaid
+	BillingCurrency         string     `json:"billing_currency"`
+	Timezone                string     `json:"timezone"`
+	DefaultLanguage         string     `json:"default_language"`
+	TechnicalContact        string     `json:"technical_contact"`
+	BillingContact          string     `json:"billing_contact"`
+	CreditLimit             float64    `json:"credit_limit"`
+	DefaultMaxTPS           int        `json:"default_max_tps"`
+	DailyMessageCap         int64      `json:"daily_message_cap"`
+	MonthlyMessageCap       int64      `json:"monthly_message_cap"`
+	AllowedCountries        []string   `json:"allowed_countries"`
+	DestinationPolicy       string     `json:"destination_policy"`         // allow_all | allow_listed | block_listed
+	BillingMode             string     `json:"billing_mode"`               // on_provider_accept | on_delivery
+	DLRWaitHours            int        `json:"dlr_wait_hours"`             // 1..168
+	NoDLRPolicy             string     `json:"no_dlr_policy"`              // retain_until_resolution | immediate_release | capture_at_ttl
+	FailedAfterAcceptPolicy string     `json:"failed_after_accept_policy"` // keep_charge | refund
+	Status                  string     `json:"status"`                     // draft | active | suspended | closed
+	Notes                   string     `json:"notes"`
+	Archived                bool       `json:"archived"`
+	Version                 int        `json:"version"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	CreatedBy               *uuid.UUID `json:"created_by,omitempty"`
+	UpdatedBy               *uuid.UUID `json:"updated_by,omitempty"`
+}
+
+// BillingTermDefaults defines platform-wide defaults applied to newly created customer profiles.
+type BillingTermDefaults struct {
+	BillingMode             string `json:"billing_mode"`
+	DLRWaitHours            int    `json:"dlr_wait_hours"`
+	NoDLRPolicy             string `json:"no_dlr_policy"`
+	FailedAfterAcceptPolicy string `json:"failed_after_accept_policy"`
+}
+
+// DefaultBillingTerms returns the safe platform defaults.
+func DefaultBillingTerms() BillingTermDefaults {
+	return BillingTermDefaults{
+		BillingMode:             "on_delivery",
+		DLRWaitHours:            24,
+		NoDLRPolicy:             "retain_until_resolution",
+		FailedAfterAcceptPolicy: "keep_charge",
+	}
 }
 
 type CustomerProfileHistory struct {
@@ -70,41 +92,49 @@ type CustomerProfileHistory struct {
 }
 
 type CreateProfileRequest struct {
-	OrganizationID    uuid.UUID `json:"organization_id"`
-	AccountType       string    `json:"account_type"`
-	BillingCurrency   string    `json:"billing_currency"`
-	Timezone          string    `json:"timezone"`
-	DefaultLanguage   string    `json:"default_language"`
-	TechnicalContact  string    `json:"technical_contact"`
-	BillingContact    string    `json:"billing_contact"`
-	CreditLimit       *float64  `json:"credit_limit"`
-	DefaultMaxTPS     *int      `json:"default_max_tps"`
-	DailyMessageCap   *int64    `json:"daily_message_cap"`
-	MonthlyMessageCap *int64    `json:"monthly_message_cap"`
-	AllowedCountries  []string  `json:"allowed_countries"`
-	DestinationPolicy string    `json:"destination_policy"`
-	Status            string    `json:"status"`
-	Notes             string    `json:"notes"`
-	Reason            string    `json:"reason"`
+	OrganizationID          uuid.UUID `json:"organization_id"`
+	AccountType             string    `json:"account_type"`
+	BillingCurrency         string    `json:"billing_currency"`
+	Timezone                string    `json:"timezone"`
+	DefaultLanguage         string    `json:"default_language"`
+	TechnicalContact        string    `json:"technical_contact"`
+	BillingContact          string    `json:"billing_contact"`
+	CreditLimit             *float64  `json:"credit_limit"`
+	DefaultMaxTPS           *int      `json:"default_max_tps"`
+	DailyMessageCap         *int64    `json:"daily_message_cap"`
+	MonthlyMessageCap       *int64    `json:"monthly_message_cap"`
+	AllowedCountries        []string  `json:"allowed_countries"`
+	DestinationPolicy       string    `json:"destination_policy"`
+	BillingMode             string    `json:"billing_mode"`
+	DLRWaitHours            *int      `json:"dlr_wait_hours"`
+	NoDLRPolicy             string    `json:"no_dlr_policy"`
+	FailedAfterAcceptPolicy string    `json:"failed_after_accept_policy"`
+	Status                  string    `json:"status"`
+	Notes                   string    `json:"notes"`
+	Reason                  string    `json:"reason"`
 }
 
 type UpdateProfileRequest struct {
-	AccountType       *string   `json:"account_type"`
-	BillingCurrency   *string   `json:"billing_currency"`
-	Timezone          *string   `json:"timezone"`
-	DefaultLanguage   *string   `json:"default_language"`
-	TechnicalContact  *string   `json:"technical_contact"`
-	BillingContact    *string   `json:"billing_contact"`
-	CreditLimit       *float64  `json:"credit_limit"`
-	DefaultMaxTPS     *int      `json:"default_max_tps"`
-	DailyMessageCap   *int64    `json:"daily_message_cap"`
-	MonthlyMessageCap *int64    `json:"monthly_message_cap"`
-	AllowedCountries  *[]string `json:"allowed_countries"`
-	DestinationPolicy *string   `json:"destination_policy"`
-	Status            *string   `json:"status"`
-	Notes             *string   `json:"notes"`
-	Archived          *bool     `json:"archived"`
-	Reason            string    `json:"reason"`
+	AccountType             *string   `json:"account_type"`
+	BillingCurrency         *string   `json:"billing_currency"`
+	Timezone                *string   `json:"timezone"`
+	DefaultLanguage         *string   `json:"default_language"`
+	TechnicalContact        *string   `json:"technical_contact"`
+	BillingContact          *string   `json:"billing_contact"`
+	CreditLimit             *float64  `json:"credit_limit"`
+	DefaultMaxTPS           *int      `json:"default_max_tps"`
+	DailyMessageCap         *int64    `json:"daily_message_cap"`
+	MonthlyMessageCap       *int64    `json:"monthly_message_cap"`
+	AllowedCountries        *[]string `json:"allowed_countries"`
+	DestinationPolicy       *string   `json:"destination_policy"`
+	BillingMode             *string   `json:"billing_mode"`
+	DLRWaitHours            *int      `json:"dlr_wait_hours"`
+	NoDLRPolicy             *string   `json:"no_dlr_policy"`
+	FailedAfterAcceptPolicy *string   `json:"failed_after_accept_policy"`
+	Status                  *string   `json:"status"`
+	Notes                   *string   `json:"notes"`
+	Archived                *bool     `json:"archived"`
+	Reason                  string    `json:"reason"`
 }
 
 type ProfileListFilter struct {

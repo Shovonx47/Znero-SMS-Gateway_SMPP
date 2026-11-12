@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -32,12 +34,13 @@ const (
 
 // ClientSession manages a single SMPP TCP/TLS client connection.
 type ClientSession struct {
-	ID            uuid.UUID
-	AccountID     uuid.UUID
-	CustomerOrgID uuid.UUID
-	SystemID      string
-	BindType      string
-	RemoteIP      string
+	ID              uuid.UUID
+	AccountID       uuid.UUID
+	CustomerOrgID   uuid.UUID
+	CustomerOrgPath string
+	SystemID        string
+	BindType        string
+	RemoteIP        string
 
 	conn    net.Conn
 	pool    *pgxpool.Pool
@@ -248,7 +251,7 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 	q := `
 		SELECT a.id, a.organization_id, a.password_hash, a.allowed_ips,
 		       a.allowed_bind_types, a.max_binds, a.max_tps, a.status,
-		       o.status, o.type
+		       o.status, o.type, o.path
 		FROM customer_smpp_accounts a
 		JOIN organizations o ON o.id = a.organization_id
 		WHERE a.system_id = $1
@@ -264,12 +267,13 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 		accountStatus string
 		orgStatus     string
 		orgType       string
+		orgPath       string
 	)
 
 	err := s.pool.QueryRow(ctx, q, systemID).Scan(
 		&accountID, &orgID, &dbHash, &allowedIPs,
 		&allowedBinds, &maxBinds, &maxTPS, &accountStatus,
-		&orgStatus, &orgType,
+		&orgStatus, &orgType, &orgPath,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Record failure for this IP+system_id to throttle guessing
@@ -292,10 +296,10 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 		if s.bindLim != nil {
 			s.bindLim.RecordFailure(s.RemoteIP, systemID)
 		}
-		s.logger.Warn("smpp bind failed: invalid password", "system_id", systemID)
+		s.logger.Warn("smpp bind failed: invalid credentials", "system_id", systemID)
 		resp := pdu.NewBindResp(bindCmd|0x80000000, pdu.StatusRInvPaswd, bind.Header.SequenceNumber, s.cfg.SystemID)
 		_ = s.writePDU(resp)
-		return errors.New("invalid smpp password")
+		return errors.New("invalid smpp credentials")
 	}
 
 	// 2. Organization & Account Status Check
@@ -351,6 +355,7 @@ func (s *ClientSession) handleBind(ctx context.Context, bind *pdu.Bind) error {
 	s.mu.Lock()
 	s.AccountID = accountID
 	s.CustomerOrgID = orgID
+	s.CustomerOrgPath = orgPath
 	s.SystemID = systemID
 	s.BindType = bindType
 	s.state = targetState
@@ -418,23 +423,35 @@ func (s *ClientSession) handleSubmitSM(ctx context.Context, submit *pdu.SubmitSM
 		return s.writePDU(resp)
 	}
 
-	// Rate limiting token bucket check
-	allowed, _ := s.limiter.AllowN(s.CustomerOrgID, s.maxTPS, 1)
+	// Rate limiting token bucket check (keyed per SMPP account so accounts with different max_tps stay isolated)
+	limitKey := s.AccountID
+	if limitKey == uuid.Nil {
+		limitKey = s.CustomerOrgID
+	}
+	allowed, _ := s.limiter.AllowN(limitKey, s.maxTPS, 1)
 	if !allowed {
 		resp := pdu.NewSubmitSMResp(pdu.StatusRThrottled, submit.Header.SequenceNumber, "")
 		return s.writePDU(resp)
 	}
 
-	// Decode message text
-	text := string(submit.ShortMessage)
-	if len(text) == 0 {
-		// Check message_payload TLV
+	// Extract raw message payload (ShortMessage or message_payload TLV)
+	rawPayload := submit.ShortMessage
+	if len(rawPayload) == 0 {
 		for _, tlv := range submit.TLVs {
 			if tlv.Tag == pdu.TagMessagePayload {
-				text = string(tlv.Value)
+				rawPayload = tlv.Value
 				break
 			}
 		}
+	}
+	if len(rawPayload) == 0 {
+		resp := pdu.NewSubmitSMResp(pdu.StatusRInvMsgLen, submit.Header.SequenceNumber, "")
+		return s.writePDU(resp)
+	}
+	text, decStatus := decodeSubmitPayload(rawPayload, submit.DataCoding)
+	if decStatus != pdu.StatusROK {
+		resp := pdu.NewSubmitSMResp(decStatus, submit.Header.SequenceNumber, "")
+		return s.writePDU(resp)
 	}
 	if text == "" {
 		resp := pdu.NewSubmitSMResp(pdu.StatusRInvMsgLen, submit.Header.SequenceNumber, "")
@@ -443,10 +460,11 @@ func (s *ClientSession) handleSubmitSM(ctx context.Context, submit *pdu.SubmitSM
 
 	// Synthetic Principal for permission context
 	principal := &customeredge.Principal{
-		CustomerOrgID: s.CustomerOrgID,
-		AccountID:     &s.AccountID,
-		Scopes:        []string{customeredge.ScopeSMSSend},
-		IsActive:      true,
+		CustomerOrgID:   s.CustomerOrgID,
+		CustomerOrgPath: s.CustomerOrgPath,
+		AccountID:       &s.AccountID,
+		Scopes:          []string{customeredge.ScopeSMSSend},
+		IsActive:        true,
 	}
 
 	clientRef := fmt.Sprintf("smpp-%s-%d", s.ID.String()[:8], submit.Header.SequenceNumber)
@@ -599,5 +617,99 @@ func (s *ClientSession) GetSnapshot() messaging.CustomerSessionInfo {
 		Bound:         s.state == stateTransmitter || s.state == stateReceiver || s.state == stateTransceiver,
 		InFlight:      int(s.inFlight),
 		BoundAt:       s.lastActivity,
+	}
+}
+
+var gsm7DefaultTable = [128]rune{
+	'@', '£', '$', '¥', 'è', 'é', 'ù', 'ì', 'ò', 'Ç', '\n', 'Ø', 'ø', '\r', 'Å', 'å',
+	'Δ', '_', 'Φ', 'Γ', 'Λ', 'Ω', 'Π', 'Ψ', 'Σ', 'Θ', 'Ξ', '\x1b', 'Æ', 'æ', 'ß', 'É',
+	' ', '!', '"', '#', '¤', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/',
+	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
+	'¡', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
+	'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ñ', 'Ü', '§',
+	'¿', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
+	'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'ä', 'ö', 'ñ', 'ü', 'à',
+}
+
+var gsm7ExtTable = map[byte]rune{
+	0x0A: '\f',
+	0x14: '^',
+	0x28: '{',
+	0x29: '}',
+	0x2F: '\\',
+	0x3C: '[',
+	0x3D: '~',
+	0x3E: ']',
+	0x40: '|',
+	0x65: '€',
+}
+
+func decodeSubmitPayload(raw []byte, dcs uint8) (string, uint32) {
+	switch dcs {
+	case pdu.DataCodingUCS2:
+		if len(raw)%2 != 0 {
+			return "", pdu.StatusRInvMsgLen
+		}
+		u16 := make([]uint16, len(raw)/2)
+		for i := 0; i < len(u16); i++ {
+			u16[i] = uint16(raw[2*i])<<8 | uint16(raw[2*i+1])
+			if u16[i] == 0 {
+				return "", pdu.StatusRInvMsgLen
+			}
+		}
+		s := string(utf16.Decode(u16))
+		if !utf8.ValidString(s) {
+			return "", pdu.StatusRInvDCS
+		}
+		return s, pdu.StatusROK
+
+	case 0x03: // ISO-8859-1 (Latin-1)
+		runes := make([]rune, len(raw))
+		for i, b := range raw {
+			if b == 0 {
+				return "", pdu.StatusRInvMsgLen
+			}
+			runes[i] = rune(b)
+		}
+		return string(runes), pdu.StatusROK
+
+	case pdu.DataCodingSMSCDefault, pdu.DataCodingASCII:
+		hasGSMCtrl := false
+		for _, b := range raw {
+			if b == 0x00 || b == 0x02 || b == 0x11 || b == 0x1B || b == 0x7F {
+				hasGSMCtrl = true
+				break
+			}
+		}
+		if !hasGSMCtrl && utf8.Valid(raw) {
+			return string(raw), pdu.StatusROK
+		}
+		// Decode GSM 03.38 unpacked bytes (validates high bit clear)
+		var out strings.Builder
+		out.Grow(len(raw))
+		for i := 0; i < len(raw); i++ {
+			b := raw[i]
+			if b > 0x7F {
+				if utf8.Valid(raw) {
+					return string(raw), pdu.StatusROK
+				}
+				return "", pdu.StatusRInvDCS
+			}
+			if b == 0x1B && i+1 < len(raw) {
+				i++
+				if ext, ok := gsm7ExtTable[raw[i]]; ok {
+					out.WriteRune(ext)
+				} else if raw[i] < 128 {
+					out.WriteRune(gsm7DefaultTable[raw[i]])
+				}
+				continue
+			}
+			out.WriteRune(gsm7DefaultTable[b])
+		}
+		return out.String(), pdu.StatusROK
+
+	default:
+		// Binary (0x04) and undefined data coding schemes cannot be safely processed as UTF-8 text.
+		return "", pdu.StatusRInvDCS
 	}
 }

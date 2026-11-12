@@ -178,7 +178,7 @@
 						This secret is shown only once. Store it securely in your application to verify HMAC signatures (<code class="rounded bg-amber-200/50 px-1 dark:bg-amber-900/50">X-Znero-Signature: t=&lt;ts&gt;,v1=&lt;sig&gt;</code>).
 					</p>
 					<div class="mt-3 flex items-center gap-2">
-						<input
+						<input aria-label="Generated webhook secret"
 							type="text"
 							readonly
 							value={createdSecret}

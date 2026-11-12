@@ -76,6 +76,25 @@ func TestSSRFAndConnectionValidation(t *testing.T) {
 	if err := provider.ValidateHostSSRF("sub.localtest.me", "production", "active"); err == nil {
 		t.Fatalf("expected sub.localtest.me resolving to 127.0.0.1 to be rejected by SSRF DNS resolution")
 	}
+
+	// Test-only explicit loopback switch must be ignored in production, allow loopback in test, and ALWAYS reject private/metadata IPs
+	if err := provider.ValidateHostSSRFWithOptions("127.0.0.1", "production", "active", true); err == nil {
+		t.Fatalf("production must still block 127.0.0.1 even when allowLoopback=true")
+	}
+	if err := provider.ValidateHTTPBaseURLWithOptions("http://127.0.0.1:19102/send", "http", "production", "active", true); err == nil {
+		t.Fatalf("production must still block http://127.0.0.1 even when allowLoopback=true")
+	}
+	if err := provider.ValidateHostSSRFWithOptions("127.0.0.1", "test", "active", true); err != nil {
+		t.Fatalf("expected 127.0.0.1 allowed with allowLoopback=true in test: %v", err)
+	}
+	if err := provider.ValidateHTTPBaseURLWithOptions("http://127.0.0.1:19102/send", "http", "test", "active", true); err != nil {
+		t.Fatalf("expected http://127.0.0.1:19102/send allowed with allowLoopback=true in test: %v", err)
+	}
+	for _, stillBlocked := range []string{"169.254.169.254", "10.0.0.1", "192.168.1.1"} {
+		if err := provider.ValidateHostSSRFWithOptions(stillBlocked, "test", "active", true); err == nil {
+			t.Fatalf("private/metadata IP %s must still be blocked when allowLoopback=true", stillBlocked)
+		}
+	}
 }
 
 func TestProviderConnectionCoverageIntegration(t *testing.T) {

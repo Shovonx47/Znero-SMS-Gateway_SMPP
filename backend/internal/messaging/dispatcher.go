@@ -3,14 +3,18 @@ package messaging
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/znero-international/znero/backend/internal/ledger"
 	"github.com/znero-international/znero/backend/internal/routing"
@@ -66,6 +70,12 @@ func (l *RateLimiter) Wait(ctx context.Context) error {
 	}
 }
 
+// PreSendChecker is an optional interface implemented by senders whose sessions
+// are cluster-pinned via advisory locks so peer dispatcher nodes can release outbox items without penalty.
+type PreSendChecker interface {
+	CanSend(ctx context.Context, connID uuid.UUID) bool
+}
+
 // Dispatcher processes messages from message_outbox and dispatches them via the Sender interface.
 type Dispatcher struct {
 	pool          *pgxpool.Pool
@@ -79,6 +89,7 @@ type Dispatcher struct {
 	lockDuration time.Duration
 	pollInterval time.Duration
 	batchSize    int
+	maxWorkers   int
 
 	mu       sync.Mutex
 	limiters map[uuid.UUID]*RateLimiter
@@ -99,6 +110,18 @@ func NewDispatcher(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	batchSize := 128
+	if v := os.Getenv("DISPATCHER_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			batchSize = n
+		}
+	}
+	maxWorkers := 32
+	if v := os.Getenv("DISPATCHER_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 256 {
+			maxWorkers = n
+		}
+	}
 	return &Dispatcher{
 		pool:          pool,
 		repo:          repo,
@@ -107,9 +130,10 @@ func NewDispatcher(
 		sender:        sender,
 		logger:        logger,
 		workerID:      fmt.Sprintf("worker-%s", uuid.NewString()[:8]),
-		lockDuration:  30 * time.Second,
-		pollInterval:  50 * time.Millisecond,
-		batchSize:     20,
+		lockDuration:  15 * time.Second,
+		pollInterval:  10 * time.Millisecond,
+		batchSize:     batchSize,
+		maxWorkers:    maxWorkers,
 		limiters:      make(map[uuid.UUID]*RateLimiter),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
@@ -137,7 +161,15 @@ func (d *Dispatcher) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = d.ProcessBatch(ctx)
+				for d.ProcessBatch(ctx) >= d.batchSize {
+					select {
+					case <-d.stopCh:
+						return
+					case <-ctx.Done():
+						return
+					default:
+					}
+				}
 			}
 		}
 	}()
@@ -149,17 +181,35 @@ func (d *Dispatcher) Stop() {
 	<-d.doneCh
 }
 
-// ProcessBatch fetches a batch of pending outbox rows and processes them synchronously.
+// ProcessBatch fetches a batch of pending outbox rows and dispatches them across a bounded worker pool.
 func (d *Dispatcher) ProcessBatch(ctx context.Context) int {
 	items, err := d.repo.FetchOutboxPending(ctx, d.batchSize, d.workerID, d.lockDuration)
 	if err != nil {
 		d.logger.Error("fetch outbox pending failed", "err", err)
 		return 0
 	}
-
-	for _, item := range items {
-		d.DispatchOne(ctx, item)
+	if len(items) == 0 {
+		return 0
 	}
+
+	maxWorkers := d.maxWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = 32
+	}
+	sem := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	for _, item := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(it MessageOutbox) {
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+			d.DispatchOne(ctx, it)
+		}(item)
+	}
+	wg.Wait()
 
 	return len(items)
 }
@@ -197,6 +247,19 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, item MessageOutbox) {
 		return
 	}
 	currentConnID := cand.ConnectionID
+
+	// 1a. Multi-dispatcher cluster safety: if a peer dispatcher holds an exclusive SMPP advisory lock
+	// on currentConnID, release this outbox row immediately back to pending without penalty.
+	if checker, ok := d.sender.(PreSendChecker); ok && !checker.CanSend(ctx, currentConnID) {
+		_ = d.repo.ReleaseOutboxPending(ctx, item.ID, 25*time.Millisecond)
+		return
+	}
+
+	// 1b. Durable at-most-once pre-send checkpoint: record 'submitting' BEFORE touching the wire.
+	// If a previous crashed worker already persisted 'submitting' for this exact AttemptNumber, abort re-send!
+	if !d.beginAttemptTx(ctx, item.ID, payload, currentConnID) {
+		return
+	}
 
 	// 2. Per-connection rate limiting
 	d.mu.Lock()
@@ -266,7 +329,8 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, item MessageOutbox) {
 	}
 }
 
-// handleAccepted transitions message to submitted (PROVIDER_ACCEPTED) and saves provider lookup.
+// handleAccepted transitions message to submitted (PROVIDER_ACCEPTED), captures the hold
+// immediately if the message's billing_mode_snapshot == 'on_provider_accept', and saves provider lookup.
 func (d *Dispatcher) handleAccepted(
 	ctx context.Context,
 	outboxID uuid.UUID,
@@ -288,19 +352,58 @@ func (d *Dispatcher) handleAccepted(
 		return
 	}
 
-	// Update message status to submitted
+	// Lock message row to inspect current status and snapshotted billing terms
+	var (
+		currentStatus string
+		holdID        *uuid.UUID
+		sellPrice     decimal.Decimal
+		billingMode   string
+		custOrgID     uuid.UUID
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT status, hold_id, sell_price, billing_mode_snapshot, customer_org_id
+		FROM messages
+		WHERE id = $1 AND created_at = $2
+		FOR UPDATE
+	`, payload.MessageID, payload.MessageCreatedAt).Scan(&currentStatus, &holdID, &sellPrice, &billingMode, &custOrgID); err != nil {
+		d.logger.Error("lock message in handleAccepted failed", "msg_id", payload.MessageID, "err", err)
+		return
+	}
+
+	// Update message status to submitted (PROVIDER_ACCEPTED)
 	reason := "provider accepted submission"
-	if err := d.repo.UpdateMessageStatus(ctx, tx,
-		payload.MessageID, payload.MessageCreatedAt,
-		StatusAccepted, StatusSubmitted,
-		&reason, &res.BuyCost, &connID, &res.ProviderMessageID,
-	); err != nil {
-		// Try from queued or submitting if already transitioned
-		_ = d.repo.UpdateMessageStatus(ctx, tx,
+	if currentStatus == StatusAccepted || currentStatus == StatusQueued || currentStatus == StatusSubmitting {
+		if err := d.repo.UpdateMessageStatus(ctx, tx,
 			payload.MessageID, payload.MessageCreatedAt,
-			StatusSubmitting, StatusSubmitted,
+			currentStatus, StatusSubmitted,
 			&reason, &res.BuyCost, &connID, &res.ProviderMessageID,
-		)
+		); err != nil {
+			d.logger.Error("update message status to submitted failed", "msg_id", payload.MessageID, "err", err)
+		}
+	}
+
+	// Settlement for on_provider_accept: capture hold in the SAME transaction as PROVIDER_ACCEPTED.
+	if billingMode == "on_provider_accept" && holdID != nil && d.ledgerSvc != nil {
+		idempKey := fmt.Sprintf("capture-%s", payload.MessageID.String())
+		if _, capErr := d.ledgerSvc.CaptureTx(ctx, tx, *holdID, sellPrice, &idempKey); capErr != nil && !errors.Is(capErr, ledger.ErrHoldNotActive) {
+			d.logger.Error("capture hold on_provider_accept failed; recording critical exception",
+				"msg_id", payload.MessageID, "hold_id", *holdID, "err", capErr)
+			details, _ := json.Marshal(map[string]interface{}{
+				"error":        capErr.Error(),
+				"amount":       sellPrice.String(),
+				"hold_id":      holdID.String(),
+				"billing_mode": billingMode,
+			})
+			_ = d.repo.RecordSettlementExceptionTx(ctx, tx, SettlementException{
+				MessageID:        payload.MessageID,
+				MessageCreatedAt: payload.MessageCreatedAt,
+				CustomerOrgID:    &custOrgID,
+				HoldID:           holdID,
+				ExceptionType:    "capture_on_accept_failed",
+				Severity:         "critical",
+				Details:          details,
+			})
+		}
 	}
 
 	// Write unpartitioned provider lookup row
@@ -316,10 +419,11 @@ func (d *Dispatcher) handleAccepted(
 		return
 	}
 
-	d.logger.Info("message accepted by upstream carrier",
+	d.logger.Debug("message accepted by upstream carrier",
 		"msg_id", payload.MessageID,
 		"conn_id", connID,
 		"provider_msg_id", res.ProviderMessageID,
+		"billing_mode", billingMode,
 	)
 }
 
@@ -452,16 +556,138 @@ func (d *Dispatcher) handleAmbiguousUnknown(
 
 	_ = d.repo.RecordAttempt(ctx, tx, attempt)
 
+	var currentStatus string
+	if scanErr := tx.QueryRow(ctx, `
+		SELECT status FROM messages WHERE id = $1 AND created_at = $2 FOR UPDATE
+	`, payload.MessageID, payload.MessageCreatedAt).Scan(&currentStatus); scanErr != nil {
+		currentStatus = StatusSubmitting
+	}
+
 	reason := fmt.Sprintf("ambiguous carrier outcome: %s; delivery unconfirmed", res.ErrorMessage)
 	_ = d.repo.UpdateMessageStatus(ctx, tx,
 		payload.MessageID, payload.MessageCreatedAt,
-		StatusAccepted, StatusUnknown,
+		currentStatus, StatusUnknown,
 		&reason, nil, &connID, nil,
 	)
 
 	// Hold is RETAINED. Outbox finalized so it is NEVER resent.
 	_ = d.repo.UpdateOutboxStatus(ctx, tx, outboxID, "published", nil)
 	_ = tx.Commit(ctx)
+}
+
+// beginAttemptTx enforces at-most-once upstream transmission across process crashes (BUG-035):
+//   - If the message already left pre-submitted states, it finalizes the outbox item cleanly.
+//   - If this exact AttemptNumber already has a durable attempt row from a crashed worker, it aborts re-send,
+//     moves the message safely to StatusUnknown (retaining hold), and logs a critical settlement exception.
+//   - Otherwise it transitions the message to StatusSubmitting and inserts the durable 'submitting' attempt checkpoint.
+func (d *Dispatcher) beginAttemptTx(ctx context.Context, outboxID uuid.UUID, payload OutboxPayload, connID uuid.UUID) bool {
+	if d.pool == nil {
+		return true
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		d.logger.Error("begin pre-send checkpoint tx failed", "msg_id", payload.MessageID, "err", err)
+		return false
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		currentStatus string
+		holdID        *uuid.UUID
+		custOrgID     uuid.UUID
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT status, hold_id, customer_org_id
+		FROM messages
+		WHERE id = $1 AND created_at = $2
+		FOR UPDATE
+	`, payload.MessageID, payload.MessageCreatedAt).Scan(&currentStatus, &holdID, &custOrgID); err != nil {
+		d.logger.Error("lock message in beginAttemptTx failed", "msg_id", payload.MessageID, "err", err)
+		return false
+	}
+
+	if currentStatus != StatusAccepted && currentStatus != StatusQueued && currentStatus != StatusSubmitting {
+		_ = d.repo.UpdateOutboxStatus(ctx, tx, outboxID, "published", nil)
+		_ = tx.Commit(ctx)
+		return false
+	}
+
+	var existingStatus string
+	attErr := tx.QueryRow(ctx, `
+		SELECT status FROM message_attempts
+		WHERE message_id = $1 AND message_created_at = $2 AND attempt_number = $3
+		ORDER BY started_at DESC
+		LIMIT 1
+		FOR UPDATE
+	`, payload.MessageID, payload.MessageCreatedAt, payload.AttemptNumber).Scan(&existingStatus)
+	if attErr == nil {
+		d.logger.Error("detected crashed prior dispatch attempt; blocking duplicate upstream send",
+			"msg_id", payload.MessageID,
+			"attempt_number", payload.AttemptNumber,
+			"prior_attempt_status", existingStatus,
+		)
+		crashMsg := "worker crashed during in-flight dispatch attempt; outcome ambiguous"
+		_, _ = tx.Exec(ctx, `
+			UPDATE message_attempts
+			SET status = 'unknown',
+			    error_message = COALESCE(error_message, $1),
+			    finished_at = COALESCE(finished_at, now())
+			WHERE message_id = $2 AND message_created_at = $3 AND attempt_number = $4 AND status = 'submitting'
+		`, crashMsg, payload.MessageID, payload.MessageCreatedAt, payload.AttemptNumber)
+
+		_ = d.repo.UpdateMessageStatus(ctx, tx,
+			payload.MessageID, payload.MessageCreatedAt,
+			currentStatus, StatusUnknown,
+			&crashMsg, nil, &connID, nil,
+		)
+		details, _ := json.Marshal(map[string]any{
+			"attempt_number":       payload.AttemptNumber,
+			"prior_attempt_status": existingStatus,
+			"connection_id":        connID.String(),
+		})
+		_ = d.repo.RecordSettlementExceptionTx(ctx, tx, SettlementException{
+			MessageID:        payload.MessageID,
+			MessageCreatedAt: payload.MessageCreatedAt,
+			CustomerOrgID:    &custOrgID,
+			HoldID:           holdID,
+			ExceptionType:    "crash_during_dispatch",
+			Severity:         "critical",
+			Details:          details,
+		})
+		_ = d.repo.UpdateOutboxStatus(ctx, tx, outboxID, "published", nil)
+		_ = tx.Commit(ctx)
+		return false
+	}
+
+	reason := "dispatching attempt to upstream carrier"
+	if err := d.repo.UpdateMessageStatus(ctx, tx,
+		payload.MessageID, payload.MessageCreatedAt,
+		currentStatus, StatusSubmitting,
+		&reason, nil, &connID, nil,
+	); err != nil {
+		d.logger.Error("transition message to submitting failed", "msg_id", payload.MessageID, "err", err)
+		return false
+	}
+
+	currency := payload.SellCurrency
+	if err := d.repo.RecordAttempt(ctx, tx, MessageAttempt{
+		MessageID:        payload.MessageID,
+		MessageCreatedAt: payload.MessageCreatedAt,
+		AttemptNumber:    payload.AttemptNumber,
+		ConnectionID:     connID,
+		Status:           "submitting",
+		BuyCurrency:      &currency,
+		StartedAt:        time.Now().UTC(),
+	}); err != nil {
+		d.logger.Error("insert pre-send submitting attempt failed", "msg_id", payload.MessageID, "err", err)
+		return false
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		d.logger.Error("commit beginAttemptTx failed", "msg_id", payload.MessageID, "err", err)
+		return false
+	}
+	return true
 }
 
 func (d *Dispatcher) finalizeFailed(ctx context.Context, outboxID uuid.UUID, payload OutboxPayload, reason string) {

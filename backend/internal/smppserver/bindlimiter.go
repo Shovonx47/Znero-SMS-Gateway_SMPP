@@ -37,14 +37,19 @@ func (l *BindLimiter) IsLockedOut(remoteIP, systemID string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rec, exists := l.failures[k]
-	if !exists {
+	if !exists || rec.lockoutUntl.IsZero() {
 		return false
 	}
 	if time.Now().Before(rec.lockoutUntl) {
 		return true
 	}
-	// Lockout expired — reset.
-	delete(l.failures, k)
+	// If the 5-minute (>=10 failures) lockout expired, clear completely; after the 30s (5-failure)
+	// backoff, keep count so continued brute-force attempts escalate to 5 minutes at 10 failures.
+	if rec.count >= 10 {
+		delete(l.failures, k)
+	} else {
+		rec.lockoutUntl = time.Time{}
+	}
 	return false
 }
 

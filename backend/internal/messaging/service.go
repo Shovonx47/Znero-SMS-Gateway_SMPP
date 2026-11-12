@@ -48,6 +48,8 @@ func NewService(
 	sender Sender,
 	logger *slog.Logger,
 ) (*Service, error) {
+	// Populate defaults for omitted zero values (preserving invalid negative values so Validate rejects them).
+	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("messaging service config validation failed: %w", err)
 	}
@@ -195,27 +197,7 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 
 	// Pre-Hold Exclusion Handling: Store REJECTED message without placing hold
 	if len(decision.Candidates) == 0 {
-		reasonCode := ReasonNoRouteAvailable
-		var reasonDetail string
-		if len(decision.Excluded) > 0 {
-			firstEx := decision.Excluded[0]
-			reasonDetail = firstEx.Detail
-			switch firstEx.ReasonCode {
-			case routing.ReasonNoSellRate:
-				reasonCode = ReasonMissingSellRate
-			case routing.ReasonSenderIDNotApproved:
-				reasonCode = ReasonInvalidSenderID
-			case routing.ReasonCustomerSuspended:
-				reasonCode = ReasonCustomerSuspended
-			case routing.ReasonDestinationNotAllowed:
-				reasonCode = ReasonDestinationBarred
-			case routing.ReasonInvalidNumber:
-				reasonCode = ReasonInvalidDestination
-			default:
-				reasonCode = ReasonNoRouteAvailable
-			}
-		}
-
+		reasonCode, reasonDetail := mapRoutingExclusion(decision)
 		s.logger.Warn("message submission rejected by routing policy",
 			"dest", MaskPhone(cleanDest),
 			"reason", reasonCode,
@@ -235,8 +217,17 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		currency = "USD"
 	}
 
-	// 6. Pre-funding Hold via PlaceHoldTx sharing the SAME database transaction
-	wallet, err := s.ledgerSvc.GetWalletByOrgID(ctx, tc, tc.ActorOrgID)
+	// 6. Snapshot per-customer billing terms on authorization & place pre-funding hold in SAME tx
+	terms, err := s.repo.GetCustomerBillingTerms(ctx, tc.ActorOrgID, s.config.DefaultBillingTerms)
+	if err != nil {
+		s.logger.Warn("lookup customer billing terms failed, using defaults", "org", tc.ActorOrgID, "err", err)
+		terms = s.config.DefaultBillingTerms
+	}
+	if terms.BillingMode == "" {
+		terms = DefaultCustomerBillingTerms()
+	}
+
+	wallet, err := s.ledgerSvc.GetWalletByOrgIDInternal(ctx, tc.ActorOrgID)
 	if err != nil {
 		s.logger.Error("customer wallet lookup failed", "org", tc.ActorOrgID, "err", err)
 		return nil, fmt.Errorf("%w: customer wallet not found", errors.New(ReasonWalletNotFound))
@@ -251,7 +242,12 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		}
 	}
 	expiresAt := now.Add(ttl)
-	holdExpiry := now.Add(s.config.HoldExpiry)
+	holdDur := s.config.HoldExpiry
+	minHoldForCustomer := time.Duration(terms.DLRWaitHours)*time.Hour + s.config.UnknownResolutionWindow + time.Hour
+	if minHoldForCustomer > holdDur {
+		holdDur = minHoldForCustomer
+	}
+	holdExpiry := now.Add(holdDur)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -286,33 +282,47 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		candidateIDs[i] = c.ConnectionID
 	}
 
+	var reqFingerprint *string
+	if strings.TrimSpace(req.RequestFingerprint) != "" {
+		fp := strings.TrimSpace(req.RequestFingerprint)
+		reqFingerprint = &fp
+	}
+
 	msg := &Message{
-		ID:                   msgID,
-		CreatedAt:            now,
-		CustomerOrgID:        tc.ActorOrgID,
-		ClientReference:      clientRef,
-		OriginalDestination:  rawDest,
-		Destination:          cleanDest,
-		SenderID:             senderID,
-		SenderIDType:         decision.Request.SenderIDType,
-		MessageType:          "sms",
-		Encoding:             encoding,
-		EncryptedBody:        []byte(envelope),
-		KeyID:                keyID,
-		BodyLength:           bodyLength,
-		TotalParts:           totalParts,
-		Status:               StatusAccepted,
-		HoldID:               &hold.ID,
-		SellPrice:            totalSellPrice,
-		SellCurrency:         currency,
-		EstimatedBuyCost:     &primaryCandidate.EstimatedBuyRate,
-		BuyCurrency:          &primaryCandidate.CurrencyCode,
-		RoutePlanID:          decision.PlanID,
-		ProviderConnectionID: &primaryCandidate.ConnectionID,
-		Attempts:             0,
-		MaxAttempts:          3,
-		ExpiresAt:            expiresAt,
-		UpdatedAt:            now,
+		ID:                              msgID,
+		CreatedAt:                       now,
+		CustomerOrgID:                   tc.ActorOrgID,
+		ClientReference:                 clientRef,
+		OriginalDestination:             rawDest,
+		Destination:                     cleanDest,
+		SenderID:                        senderID,
+		SenderIDType:                    decision.Request.SenderIDType,
+		MessageType:                     "sms",
+		Encoding:                        encoding,
+		EncryptedBody:                   []byte(envelope),
+		KeyID:                           keyID,
+		BodyLength:                      bodyLength,
+		TotalParts:                      totalParts,
+		Status:                          StatusAccepted,
+		HoldID:                          &hold.ID,
+		SellPrice:                       totalSellPrice,
+		SellCurrency:                    currency,
+		EstimatedBuyCost:                &primaryCandidate.EstimatedBuyRate,
+		BuyCurrency:                     &primaryCandidate.CurrencyCode,
+		RoutePlanID:                     decision.PlanID,
+		ProviderConnectionID:            &primaryCandidate.ConnectionID,
+		RequestFingerprint:              reqFingerprint,
+		IngressChannel:                  req.IngressChannel,
+		IngressAccountID:                req.IngressAccountID,
+		DLRRequested:                    req.DLRRequested,
+		BillingModeSnapshot:             terms.BillingMode,
+		DLRWaitHoursSnapshot:            terms.DLRWaitHours,
+		NoDLRPolicySnapshot:             terms.NoDLRPolicy,
+		FailedAfterAcceptPolicySnapshot: terms.FailedAfterAcceptPolicy,
+		Attempts:                        0,
+		MaxAttempts:                     3,
+		ExpiresAt:                       expiresAt,
+		UpdatedAt:                       now,
 	}
 
 	partBodies, udhs := SplitMessageParts(bodyText, encoding)
@@ -387,7 +397,7 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		return nil, fmt.Errorf("commit message transaction: %w", err)
 	}
 
-	s.logger.Info("outbound message accepted",
+	s.logger.Debug("outbound message accepted",
 		"msg_id", msgID,
 		"dest", MaskPhone(cleanDest),
 		"parts", totalParts,
@@ -405,6 +415,475 @@ func (s *Service) Submit(ctx context.Context, tc *tenant.Context, req SubmitRequ
 		ClientReference: clientRef,
 		CreatedAt:       now,
 	}, nil
+}
+
+// BulkItemOutcome represents the per-item result of SubmitBulk.
+type BulkItemOutcome struct {
+	Response *SubmitResponse
+	Err      error
+}
+
+// SubmitBulk processes up to N messages from a single customer in one wallet lock and one
+// atomic PostgreSQL batch transaction while preserving per-message idempotency and partial failures.
+func (s *Service) SubmitBulk(ctx context.Context, tc *tenant.Context, reqs []SubmitRequest) ([]BulkItemOutcome, error) {
+	if tc == nil {
+		return nil, tenant.ErrNoTenantContext
+	}
+	if !tc.HasPermission("message.send") {
+		return nil, tenant.ErrUnauthorizedTenant
+	}
+	n := len(reqs)
+	outcomes := make([]BulkItemOutcome, n)
+	if n == 0 {
+		return outcomes, nil
+	}
+
+	// 1. Collect unique client references for a single batched idempotency lookup
+	var refs []string
+	seenRefSet := make(map[string]struct{}, n)
+	for _, r := range reqs {
+		if r.ClientReference != nil {
+			tr := strings.TrimSpace(*r.ClientReference)
+			if tr != "" {
+				if _, ok := seenRefSet[tr]; !ok {
+					seenRefSet[tr] = struct{}{}
+					refs = append(refs, tr)
+				}
+			}
+		}
+	}
+	var existingMap map[string]MessageLocator
+	if len(refs) > 0 {
+		var err error
+		existingMap, err = s.repo.CheckIdempotencyBatch(ctx, tc.ActorOrgID, refs)
+		if err != nil {
+			return nil, fmt.Errorf("check idempotency batch: %w", err)
+		}
+	}
+
+	// 2. Single lookup for billing terms & wallet per customer batch
+	terms, err := s.repo.GetCustomerBillingTerms(ctx, tc.ActorOrgID, s.config.DefaultBillingTerms)
+	if err != nil {
+		s.logger.Warn("lookup customer billing terms failed, using defaults", "org", tc.ActorOrgID, "err", err)
+		terms = s.config.DefaultBillingTerms
+	}
+	if terms.BillingMode == "" {
+		terms = DefaultCustomerBillingTerms()
+	}
+
+	wallet, err := s.ledgerSvc.GetWalletByOrgIDInternal(ctx, tc.ActorOrgID)
+	if err != nil {
+		s.logger.Error("customer wallet lookup failed", "org", tc.ActorOrgID, "err", err)
+		wallet = nil
+	}
+
+	type bulkPrep struct {
+		idx        int
+		req        SubmitRequest
+		cleanDest  string
+		senderID   string
+		clientRef  *string
+		encoding   string
+		bodyLength int
+		totalParts int
+		sellPrice  decimal.Decimal
+		currency   string
+		primary    routing.Candidate
+		decision   *routing.ResolveResult
+		msg        *Message
+		parts      []MessagePart
+		outbox     *MessageOutbox
+		event      *MessageEvent
+		holdReq    ledger.BatchHoldRequest
+	}
+
+	now := time.Now().UTC()
+	inBatchOwner := make(map[string]int, n) // clientRef -> first outcome idx in this call
+	var pending []bulkPrep
+	var rejectedItems []BulkInsertItem
+
+	for i, req := range reqs {
+		rawDest := strings.TrimSpace(req.Destination)
+		if rawDest == "" {
+			outcomes[i].Err = fmt.Errorf("%w: destination is required", ErrInvalidDestination)
+			continue
+		}
+		senderID := strings.TrimSpace(req.SenderID)
+		if senderID == "" {
+			outcomes[i].Err = fmt.Errorf("%w: sender_id is required", ErrSenderIDNotApproved)
+			continue
+		}
+		if len(req.Text) == 0 {
+			outcomes[i].Err = errors.New("message text cannot be empty")
+			continue
+		}
+		cleanDest := rawDest
+		if !strings.HasPrefix(cleanDest, "+") {
+			cleanDest = "+" + cleanDest
+		}
+		if !e164Regex.MatchString(cleanDest) {
+			outcomes[i].Err = fmt.Errorf("%w: %s is not valid international E.164", ErrInvalidDestination, MaskPhone(rawDest))
+			continue
+		}
+
+		var clientRef *string
+		if req.ClientReference != nil && strings.TrimSpace(*req.ClientReference) != "" {
+			tr := strings.TrimSpace(*req.ClientReference)
+			clientRef = &tr
+			if loc, hit := existingMap[tr]; hit {
+				existingMsg, err := s.repo.GetMessageHeader(ctx, loc.MessageID, loc.CreatedAt)
+				if err == nil && existingMsg != nil {
+					outcomes[i].Response = &SubmitResponse{
+						MessageID:       existingMsg.ID,
+						Status:          existingMsg.Status,
+						Destination:     existingMsg.Destination,
+						SenderID:        existingMsg.SenderID,
+						Parts:           existingMsg.TotalParts,
+						Currency:        existingMsg.SellCurrency,
+						Price:           existingMsg.SellPrice,
+						ClientReference: existingMsg.ClientReference,
+						CreatedAt:       existingMsg.CreatedAt,
+					}
+					continue
+				}
+			}
+			if ownerIdx, dupInBatch := inBatchOwner[tr]; dupInBatch {
+				// Will mirror outcomes[ownerIdx] after DB commit
+				inBatchOwner[fmt.Sprintf("__dup_%d", i)] = ownerIdx
+				continue
+			}
+			inBatchOwner[tr] = i
+		}
+
+		encoding, totalParts, bodyLength, err := CalculateSegments(req.Text, s.config.MaxSegmentsLimit)
+		if err != nil {
+			outcomes[i].Err = err
+			continue
+		}
+
+		decision, err := s.routingEngine.Resolve(ctx, routing.ResolveRequest{
+			CustomerOrgID:   tc.ActorOrgID,
+			DestinationE164: cleanDest,
+			SenderID:        senderID,
+			SenderIDValue:   senderID,
+			TrafficProfile:  req.TrafficProfile,
+			Timestamp:       &now,
+		})
+		if err != nil {
+			outcomes[i].Err = fmt.Errorf("routing resolution failed: %w", err)
+			continue
+		}
+
+		if len(decision.Candidates) == 0 {
+			reasonCode, reasonDetail := mapRoutingExclusion(decision)
+			rejectedItems = append(rejectedItems, s.buildRejectedBulkItem(tc.ActorOrgID, clientRef, rawDest, cleanDest, senderID, encoding, bodyLength, totalParts, reasonCode, now))
+			outcomes[i].Err = fmt.Errorf("%w: %s (%s)", ErrNoRouteAvailable, reasonCode, reasonDetail)
+			continue
+		}
+
+		if wallet == nil {
+			outcomes[i].Err = fmt.Errorf("%w: customer wallet not found", errors.New(ReasonWalletNotFound))
+			continue
+		}
+
+		primary := decision.Candidates[0]
+		totalSellPrice := primary.EstimatedSellRate.Mul(decimal.NewFromInt(int64(totalParts)))
+		currency := primary.CurrencyCode
+		if currency == "" {
+			currency = "USD"
+		}
+
+		envelope, err := s.keyring.Encrypt(req.Text)
+		if err != nil {
+			outcomes[i].Err = fmt.Errorf("encrypt message body: %w", err)
+			continue
+		}
+		keyID := s.keyring.ActiveKeyID()
+
+		candidateIDs := make([]uuid.UUID, len(decision.Candidates))
+		for j, c := range decision.Candidates {
+			candidateIDs[j] = c.ConnectionID
+		}
+		var reqFP *string
+		if strings.TrimSpace(req.RequestFingerprint) != "" {
+			fp := strings.TrimSpace(req.RequestFingerprint)
+			reqFP = &fp
+		}
+
+		msgID := uuid.New()
+		ttl := s.config.MessageTTL
+		if req.ValiditySeconds != nil && *req.ValiditySeconds > 0 {
+			if customTTL := time.Duration(*req.ValiditySeconds) * time.Second; customTTL < ttl {
+				ttl = customTTL
+			}
+		}
+		expiresAt := now.Add(ttl)
+		holdDur := s.config.HoldExpiry
+		if minHold := time.Duration(terms.DLRWaitHours)*time.Hour + s.config.UnknownResolutionWindow + time.Hour; minHold > holdDur {
+			holdDur = minHold
+		}
+		holdExpiry := now.Add(holdDur)
+
+		msg := &Message{
+			ID:                              msgID,
+			CreatedAt:                       now,
+			CustomerOrgID:                   tc.ActorOrgID,
+			ClientReference:                 clientRef,
+			OriginalDestination:             rawDest,
+			Destination:                     cleanDest,
+			SenderID:                        senderID,
+			SenderIDType:                    decision.Request.SenderIDType,
+			MessageType:                     "sms",
+			Encoding:                        encoding,
+			EncryptedBody:                   []byte(envelope),
+			KeyID:                           keyID,
+			BodyLength:                      bodyLength,
+			TotalParts:                      totalParts,
+			Status:                          StatusAccepted,
+			SellPrice:                       totalSellPrice,
+			SellCurrency:                    currency,
+			EstimatedBuyCost:                &primary.EstimatedBuyRate,
+			BuyCurrency:                     &primary.CurrencyCode,
+			RoutePlanID:                     decision.PlanID,
+			ProviderConnectionID:            &primary.ConnectionID,
+			RequestFingerprint:              reqFP,
+			IngressChannel:                  req.IngressChannel,
+			IngressAccountID:                req.IngressAccountID,
+			DLRRequested:                    req.DLRRequested,
+			BillingModeSnapshot:             terms.BillingMode,
+			DLRWaitHoursSnapshot:            terms.DLRWaitHours,
+			NoDLRPolicySnapshot:             terms.NoDLRPolicy,
+			FailedAfterAcceptPolicySnapshot: terms.FailedAfterAcceptPolicy,
+			Attempts:                        0,
+			MaxAttempts:                     3,
+			ExpiresAt:                       expiresAt,
+			UpdatedAt:                       now,
+		}
+
+		partBodies, udhs := SplitMessageParts(req.Text, encoding)
+		parts := make([]MessagePart, len(partBodies))
+		for k := range partBodies {
+			partEnvelope, _ := s.keyring.Encrypt(partBodies[k])
+			parts[k] = MessagePart{
+				ID:                uuid.New(),
+				MessageID:         msgID,
+				CreatedAt:         now,
+				PartNumber:        k + 1,
+				TotalParts:        totalParts,
+				UDH:               udhs[k],
+				EncryptedPartBody: []byte(partEnvelope),
+				KeyID:             keyID,
+				Status:            StatusAccepted,
+				UpdatedAt:         now,
+			}
+		}
+
+		payloadJSON, _ := json.Marshal(OutboxPayload{
+			MessageID:              msgID,
+			MessageCreatedAt:       now,
+			CustomerOrgID:          tc.ActorOrgID,
+			Destination:            cleanDest,
+			SenderID:               senderID,
+			SenderIDType:           msg.SenderIDType,
+			Encoding:               encoding,
+			TotalParts:             totalParts,
+			SellPrice:              totalSellPrice,
+			SellCurrency:           currency,
+			CandidateConnectionIDs: candidateIDs,
+			CurrentConnectionID:    primary.ConnectionID,
+			AttemptNumber:          1,
+			MaxAttempts:            msg.MaxAttempts,
+			Body:                   req.Text,
+		})
+
+		refType := "message"
+		idempKey := fmt.Sprintf("hold:msg:%s", msgID.String())
+		pending = append(pending, bulkPrep{
+			idx:        i,
+			req:        req,
+			cleanDest:  cleanDest,
+			senderID:   senderID,
+			clientRef:  clientRef,
+			encoding:   encoding,
+			bodyLength: bodyLength,
+			totalParts: totalParts,
+			sellPrice:  totalSellPrice,
+			currency:   currency,
+			primary:    primary,
+			decision:   decision,
+			msg:        msg,
+			parts:      parts,
+			outbox: &MessageOutbox{
+				ID:               uuid.New(),
+				MessageID:        msgID,
+				MessageCreatedAt: now,
+				CustomerOrgID:    tc.ActorOrgID,
+				Payload:          payloadJSON,
+				Status:           "pending",
+				Attempts:         0,
+				NextAttemptAt:    now,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			},
+			event: &MessageEvent{
+				ID:               uuid.New(),
+				MessageID:        msgID,
+				MessageCreatedAt: now,
+				EventType:        "submitted",
+				ToStatus:         StatusAccepted,
+				ActorType:        "customer",
+				CreatedAt:        now,
+			},
+			holdReq: ledger.BatchHoldRequest{
+				Amount:         totalSellPrice,
+				Expiry:         holdExpiry,
+				ReferenceType:  &refType,
+				ReferenceID:    &msgID,
+				IdempotencyKey: &idempKey,
+			},
+		})
+	}
+
+	// 3. Atomic single-wallet transaction for all valid pending items
+	if len(pending) > 0 {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin bulk message transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		holdReqs := make([]ledger.BatchHoldRequest, len(pending))
+		for k := range pending {
+			holdReqs[k] = pending[k].holdReq
+		}
+		holds, holdErrs, err := s.ledgerSvc.PlaceHoldsBatchTx(ctx, tx, wallet.ID, pending[0].currency, holdReqs)
+		if err != nil {
+			for _, p := range pending {
+				outcomes[p.idx].Err = fmt.Errorf("%w: unable to reserve funds (%v)", ErrInsufficientBalance, err)
+			}
+		} else {
+			var bulkInserts []BulkInsertItem
+			var committed []bulkPrep
+			for k, p := range pending {
+				if holdErrs[k] != nil || holds[k] == nil {
+					rejectedItems = append(rejectedItems, s.buildRejectedBulkItem(tc.ActorOrgID, p.clientRef, strings.TrimSpace(p.req.Destination), p.cleanDest, p.senderID, p.encoding, p.bodyLength, p.totalParts, ReasonInsufficientFunds, now))
+					outcomes[p.idx].Err = fmt.Errorf("%w: unable to reserve funds (%v)", ErrInsufficientBalance, holdErrs[k])
+					continue
+				}
+				p.msg.HoldID = &holds[k].ID
+				bulkInserts = append(bulkInserts, BulkInsertItem{
+					Msg:    p.msg,
+					Parts:  p.parts,
+					Outbox: p.outbox,
+					Event:  p.event,
+				})
+				committed = append(committed, p)
+			}
+			if len(bulkInserts) > 0 {
+				if err := s.repo.InsertMessagesBulkAtomic(ctx, tx, bulkInserts); err != nil {
+					return nil, fmt.Errorf("insert bulk messages atomic: %w", err)
+				}
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit bulk message transaction: %w", err)
+			}
+			for _, p := range committed {
+				outcomes[p.idx].Response = &SubmitResponse{
+					MessageID:       p.msg.ID,
+					Status:          StatusAccepted,
+					Destination:     p.cleanDest,
+					SenderID:        p.senderID,
+					Parts:           p.totalParts,
+					Currency:        p.currency,
+					Price:           p.sellPrice,
+					ClientReference: p.clientRef,
+					CreatedAt:       now,
+				}
+			}
+		}
+	}
+
+	// 4. Persist any rejected audit items in one batch transaction (best-effort)
+	if len(rejectedItems) > 0 {
+		if tx, err := s.pool.Begin(ctx); err == nil {
+			if err := s.repo.InsertMessagesBulkAtomic(ctx, tx, rejectedItems); err == nil {
+				_ = tx.Commit(ctx)
+			} else {
+				_ = tx.Rollback(ctx)
+			}
+		}
+	}
+
+	// 5. Fill outcomes for any in-batch duplicate client_reference items
+	for i := range reqs {
+		if ownerIdx, ok := inBatchOwner[fmt.Sprintf("__dup_%d", i)]; ok {
+			outcomes[i] = outcomes[ownerIdx]
+		}
+	}
+	return outcomes, nil
+}
+
+func mapRoutingExclusion(decision *routing.ResolveResult) (string, string) {
+	reasonCode := ReasonNoRouteAvailable
+	var reasonDetail string
+	if len(decision.Excluded) > 0 {
+		firstEx := decision.Excluded[0]
+		reasonDetail = firstEx.Detail
+		switch firstEx.ReasonCode {
+		case routing.ReasonNoSellRate:
+			reasonCode = ReasonMissingSellRate
+		case routing.ReasonSenderIDNotApproved:
+			reasonCode = ReasonInvalidSenderID
+		case routing.ReasonCustomerSuspended:
+			reasonCode = ReasonCustomerSuspended
+		case routing.ReasonDestinationNotAllowed:
+			reasonCode = ReasonDestinationBarred
+		case routing.ReasonInvalidNumber:
+			reasonCode = ReasonInvalidDestination
+		default:
+			reasonCode = ReasonNoRouteAvailable
+		}
+	}
+	return reasonCode, reasonDetail
+}
+
+func (s *Service) buildRejectedBulkItem(
+	customerOrgID uuid.UUID,
+	clientRef *string,
+	origDest, dest, senderID, encoding string,
+	bodyLen, parts int,
+	reason string,
+	now time.Time,
+) BulkInsertItem {
+	msg := &Message{
+		ID:                  uuid.New(),
+		CreatedAt:           now,
+		CustomerOrgID:       customerOrgID,
+		ClientReference:     clientRef,
+		OriginalDestination: origDest,
+		Destination:         dest,
+		SenderID:            senderID,
+		MessageType:         "sms",
+		Encoding:            encoding,
+		EncryptedBody:       []byte{},
+		KeyID:               s.keyring.ActiveKeyID(),
+		BodyLength:          bodyLen,
+		TotalParts:          parts,
+		Status:              StatusRejected,
+		FailureReason:       &reason,
+		ExpiresAt:           now,
+		UpdatedAt:           now,
+	}
+	event := &MessageEvent{
+		ID:               uuid.New(),
+		MessageID:        msg.ID,
+		MessageCreatedAt: now,
+		EventType:        "rejected",
+		ToStatus:         StatusRejected,
+		ActorType:        "system",
+		CreatedAt:        now,
+	}
+	return BulkInsertItem{Msg: msg, Event: event}
 }
 
 // storeRejectedMessage records a pre-hold rejected message for audit and analytics without holding funds.

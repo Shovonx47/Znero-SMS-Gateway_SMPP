@@ -1,0 +1,65 @@
+groups:
+  - name: znero_core_alerts
+    rules:
+      - alert: ZneroProcessDown
+        expr: znero_process_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Znero service process down (role: {{ $labels.role }})"
+          description: "Service process for role {{ $labels.role }} has stopped reporting heartbeat."
+
+      - alert: ZneroReconciliationDiscrepancy
+        expr: znero_reconciliation_discrepancies_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger reconciliation discrepancy detected"
+          description: "One or more ledger balance discrepancies detected between wallet cached balance and journal entries."
+
+      - alert: ZneroOutboxOldestAgeHigh
+        expr: znero_outbox_oldest_age_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox oldest pending message age exceeds 60 seconds"
+          description: "Outbox processing is delayed; oldest message age is {{ $value }}s."
+
+      - alert: ZneroHighMessageFailureRate
+        expr: sum(rate(znero_messages_status_total{status=~"failed|undelivered"}[5m])) / sum(rate(znero_messages_submitted_total[5m])) > 0.10
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message failure rate (>10%)"
+          description: "Carrier or routing failures exceed 10% over the last 5 minutes."
+
+      - alert: ZneroWebhookDeliveryBacklog
+        expr: znero_webhook_deliveries_pending_count > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Customer webhook delivery backlog high (>1000)"
+          description: "Pending customer webhook deliveries count is {{ $value }}."
+
+      - alert: ZneroSMPPDLRBacklog
+        expr: znero_smpp_dlr_queue_pending_count > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SMPP customer DLR queue backlog high (>1000)"
+          description: "Queued SMPP deliver_sm receipts count is {{ $value }}."
+
+      - alert: ZneroSettlementExceptionsDetected
+        expr: rate(znero_settlement_exceptions_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Settlement exceptions detected"
+          description: "Financial settlement exceptions are occurring on message DLRs."

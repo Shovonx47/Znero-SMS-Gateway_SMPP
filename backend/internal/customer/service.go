@@ -24,7 +24,7 @@ import (
 var (
 	reCurrencyCode = regexp.MustCompile(`^[A-Z]{3}$`)
 	reISO2         = regexp.MustCompile(`^[A-Z]{2}$`)
-	reSystemID     = regexp.MustCompile(`^[a-zA-Z0-9_]{4,16}$`)
+	reSystemID     = regexp.MustCompile(`^[a-zA-Z0-9_]{4,15}$`)
 
 	validAccountTypes = map[string]bool{
 		"prepaid":  true,
@@ -51,6 +51,19 @@ var (
 		"transmitter": true,
 		"receiver":    true,
 	}
+	validBillingModes = map[string]bool{
+		"on_provider_accept": true,
+		"on_delivery":        true,
+	}
+	validNoDLRPolicies = map[string]bool{
+		"retain_until_resolution": true,
+		"immediate_release":       true,
+		"capture_at_ttl":          true,
+	}
+	validFailedAfterAcceptPolicies = map[string]bool{
+		"keep_charge": true,
+		"refund":      true,
+	}
 )
 
 type applierFunc func(ctx context.Context, tx pgx.Tx, cr *approval.ChangeRequest) error
@@ -63,6 +76,7 @@ type Service struct {
 	repo        Repository
 	auditSvc    *audit.Service
 	approvalSvc *approval.Service
+	defaults    BillingTermDefaults
 }
 
 func NewService(repo Repository, auditSvc *audit.Service, approvalSvc *approval.Service) *Service {
@@ -70,12 +84,29 @@ func NewService(repo Repository, auditSvc *audit.Service, approvalSvc *approval.
 		repo:        repo,
 		auditSvc:    auditSvc,
 		approvalSvc: approvalSvc,
+		defaults:    DefaultBillingTerms(),
 	}
 	if approvalSvc != nil {
 		approvalSvc.RegisterApplier("customer_profile", applierFunc(svc.applyProfileChange))
 		approvalSvc.RegisterApprovePermission("customer_profile", "customer.profile.approve")
 	}
 	return svc
+}
+
+// SetBillingTermDefaults overrides the default billing terms applied to newly created customers.
+func (s *Service) SetBillingTermDefaults(d BillingTermDefaults) {
+	if validBillingModes[d.BillingMode] {
+		s.defaults.BillingMode = d.BillingMode
+	}
+	if d.DLRWaitHours >= 1 && d.DLRWaitHours <= 168 {
+		s.defaults.DLRWaitHours = d.DLRWaitHours
+	}
+	if validNoDLRPolicies[d.NoDLRPolicy] {
+		s.defaults.NoDLRPolicy = d.NoDLRPolicy
+	}
+	if validFailedAfterAcceptPolicies[d.FailedAfterAcceptPolicy] {
+		s.defaults.FailedAfterAcceptPolicy = d.FailedAfterAcceptPolicy
+	}
 }
 
 func (s *Service) authorizeOrgAccess(ctx context.Context, tc *tenant.Context, targetOrgID uuid.UUID, perm string, isProfileWrite bool) (*OrgInfo, error) {
@@ -218,6 +249,30 @@ func validateProfileFields(p *CustomerProfile) error {
 	if !validProfileStatuses[p.Status] {
 		return fmt.Errorf("%w: invalid profile status %q", ErrValidation, p.Status)
 	}
+	if p.BillingMode == "" {
+		p.BillingMode = "on_delivery"
+	}
+	if !validBillingModes[p.BillingMode] {
+		return fmt.Errorf("%w: invalid billing_mode %q (must be on_provider_accept or on_delivery)", ErrValidation, p.BillingMode)
+	}
+	if p.DLRWaitHours == 0 {
+		p.DLRWaitHours = 24
+	}
+	if p.DLRWaitHours < 1 || p.DLRWaitHours > 168 {
+		return fmt.Errorf("%w: dlr_wait_hours must be between 1 and 168", ErrValidation)
+	}
+	if p.NoDLRPolicy == "" {
+		p.NoDLRPolicy = "retain_until_resolution"
+	}
+	if !validNoDLRPolicies[p.NoDLRPolicy] {
+		return fmt.Errorf("%w: invalid no_dlr_policy %q", ErrValidation, p.NoDLRPolicy)
+	}
+	if p.FailedAfterAcceptPolicy == "" {
+		p.FailedAfterAcceptPolicy = "keep_charge"
+	}
+	if !validFailedAfterAcceptPolicies[p.FailedAfterAcceptPolicy] {
+		return fmt.Errorf("%w: invalid failed_after_accept_policy %q (must be keep_charge or refund)", ErrValidation, p.FailedAfterAcceptPolicy)
+	}
 	countries, err := normalizeCountries(p.AllowedCountries)
 	if err != nil {
 		return err
@@ -309,24 +364,54 @@ func (s *Service) CreateProfile(ctx context.Context, tc *tenant.Context, req Cre
 		return nil, ErrProfileAlreadyExists
 	}
 
+	// Billing terms are strictly platform-only; resellers cannot specify or customize them.
+	if tc.ActorOrgType == "reseller" && (strings.TrimSpace(req.BillingMode) != "" || req.DLRWaitHours != nil || strings.TrimSpace(req.NoDLRPolicy) != "" || strings.TrimSpace(req.FailedAfterAcceptPolicy) != "") {
+		return nil, fmt.Errorf("%w: billing terms can only be configured by platform administrators", ErrPlatformOnlyField)
+	}
+
+	def := s.defaults
+	if def.BillingMode == "" {
+		def = DefaultBillingTerms()
+	}
+	billingMode := strings.TrimSpace(req.BillingMode)
+	if billingMode == "" {
+		billingMode = def.BillingMode
+	}
+	dlrWaitHours := def.DLRWaitHours
+	if req.DLRWaitHours != nil {
+		dlrWaitHours = *req.DLRWaitHours
+	}
+	noDLRPolicy := strings.TrimSpace(req.NoDLRPolicy)
+	if noDLRPolicy == "" {
+		noDLRPolicy = def.NoDLRPolicy
+	}
+	failedAfterAccept := strings.TrimSpace(req.FailedAfterAcceptPolicy)
+	if failedAfterAccept == "" {
+		failedAfterAccept = def.FailedAfterAcceptPolicy
+	}
+
 	p := &CustomerProfile{
-		OrganizationID:    req.OrganizationID,
-		AccountType:       req.AccountType,
-		BillingCurrency:   req.BillingCurrency,
-		Timezone:          req.Timezone,
-		DefaultLanguage:   req.DefaultLanguage,
-		TechnicalContact:  strings.TrimSpace(req.TechnicalContact),
-		BillingContact:    strings.TrimSpace(req.BillingContact),
-		CreditLimit:       floatOrDefault(req.CreditLimit, 0),
-		DefaultMaxTPS:     intOrDefault(req.DefaultMaxTPS, 10),
-		DailyMessageCap:   int64OrDefault(req.DailyMessageCap, 10000),
-		MonthlyMessageCap: int64OrDefault(req.MonthlyMessageCap, 300000),
-		AllowedCountries:  req.AllowedCountries,
-		DestinationPolicy: req.DestinationPolicy,
-		Status:            req.Status,
-		Notes:             strings.TrimSpace(req.Notes),
-		CreatedBy:         &tc.ActorUserID,
-		UpdatedBy:         &tc.ActorUserID,
+		OrganizationID:          req.OrganizationID,
+		AccountType:             req.AccountType,
+		BillingCurrency:         req.BillingCurrency,
+		Timezone:                req.Timezone,
+		DefaultLanguage:         req.DefaultLanguage,
+		TechnicalContact:        strings.TrimSpace(req.TechnicalContact),
+		BillingContact:          strings.TrimSpace(req.BillingContact),
+		CreditLimit:             floatOrDefault(req.CreditLimit, 0),
+		DefaultMaxTPS:           intOrDefault(req.DefaultMaxTPS, 10),
+		DailyMessageCap:         int64OrDefault(req.DailyMessageCap, 10000),
+		MonthlyMessageCap:       int64OrDefault(req.MonthlyMessageCap, 300000),
+		AllowedCountries:        req.AllowedCountries,
+		DestinationPolicy:       req.DestinationPolicy,
+		BillingMode:             billingMode,
+		DLRWaitHours:            dlrWaitHours,
+		NoDLRPolicy:             noDLRPolicy,
+		FailedAfterAcceptPolicy: failedAfterAccept,
+		Status:                  req.Status,
+		Notes:                   strings.TrimSpace(req.Notes),
+		CreatedBy:               &tc.ActorUserID,
+		UpdatedBy:               &tc.ActorUserID,
 	}
 
 	if err := validateProfileFields(p); err != nil {
@@ -341,7 +426,8 @@ func (s *Service) CreateProfile(ctx context.Context, tc *tenant.Context, req Cre
 		reason = "Create customer commercial profile"
 	}
 
-	isSensitive := p.Status == "active" || p.Status == "suspended" || p.Status == "closed" || p.CreditLimit > 0 || p.DestinationPolicy != "allow_all"
+	customBilling := p.BillingMode != def.BillingMode || p.DLRWaitHours != def.DLRWaitHours || p.NoDLRPolicy != def.NoDLRPolicy || p.FailedAfterAcceptPolicy != def.FailedAfterAcceptPolicy
+	isSensitive := p.Status == "active" || p.Status == "suspended" || p.Status == "closed" || p.CreditLimit > 0 || p.DestinationPolicy != "allow_all" || customBilling
 	if isSensitive && !hasProfileOverride(tc) && s.approvalSvc != nil {
 		cr, err := s.submitProfileChange(ctx, tc, nil, nil, "create", nil, p, reason)
 		if err != nil {
@@ -445,6 +531,34 @@ func (s *Service) UpdateProfile(ctx context.Context, tc *tenant.Context, id uuid
 	}
 	if req.DestinationPolicy != nil && *req.DestinationPolicy != current.DestinationPolicy {
 		updated.DestinationPolicy = *req.DestinationPolicy
+		sensitiveChange = true
+	}
+	if req.BillingMode != nil && *req.BillingMode != current.BillingMode {
+		if tc.ActorOrgType != "platform" {
+			return nil, fmt.Errorf("%w: billing terms can only be modified by platform users", ErrPlatformOnlyField)
+		}
+		updated.BillingMode = *req.BillingMode
+		sensitiveChange = true
+	}
+	if req.DLRWaitHours != nil && *req.DLRWaitHours != current.DLRWaitHours {
+		if tc.ActorOrgType != "platform" {
+			return nil, fmt.Errorf("%w: billing terms can only be modified by platform users", ErrPlatformOnlyField)
+		}
+		updated.DLRWaitHours = *req.DLRWaitHours
+		sensitiveChange = true
+	}
+	if req.NoDLRPolicy != nil && *req.NoDLRPolicy != current.NoDLRPolicy {
+		if tc.ActorOrgType != "platform" {
+			return nil, fmt.Errorf("%w: billing terms can only be modified by platform users", ErrPlatformOnlyField)
+		}
+		updated.NoDLRPolicy = *req.NoDLRPolicy
+		sensitiveChange = true
+	}
+	if req.FailedAfterAcceptPolicy != nil && *req.FailedAfterAcceptPolicy != current.FailedAfterAcceptPolicy {
+		if tc.ActorOrgType != "platform" {
+			return nil, fmt.Errorf("%w: billing terms can only be modified by platform users", ErrPlatformOnlyField)
+		}
+		updated.FailedAfterAcceptPolicy = *req.FailedAfterAcceptPolicy
 		sensitiveChange = true
 	}
 	if req.Status != nil && *req.Status != current.Status {
@@ -554,6 +668,12 @@ func (s *Service) RollbackProfile(ctx context.Context, tc *tenant.Context, id uu
 	restored.OrganizationID = current.OrganizationID
 	restored.UpdatedBy = &tc.ActorUserID
 
+	if err := validateProfileFields(&restored); err != nil {
+		return nil, err
+	}
+	if tc.ActorOrgType != "platform" && (restored.BillingMode != current.BillingMode || restored.DLRWaitHours != current.DLRWaitHours || restored.NoDLRPolicy != current.NoDLRPolicy || restored.FailedAfterAcceptPolicy != current.FailedAfterAcceptPolicy) {
+		return nil, fmt.Errorf("%w: only platform administrators can modify billing terms via rollback", ErrPlatformOnlyField)
+	}
 	if err := enforceResellerProfileCaps(tc, &restored); err != nil {
 		return nil, err
 	}
@@ -848,7 +968,7 @@ func (s *Service) CreateSMPPAccount(ctx context.Context, tc *tenant.Context, req
 
 	sysID := strings.TrimSpace(req.SystemID)
 	if !reSystemID.MatchString(sysID) {
-		return nil, fmt.Errorf("%w: system_id must be 4..16 alphanumeric or underscore characters", ErrValidation)
+		return nil, fmt.Errorf("%w: system_id must be 4..15 alphanumeric or underscore characters (SMPP v3.4 C-Octet max 16)", ErrValidation)
 	}
 
 	allowIPs, err := validateIPAllowlist(req.AllowedIPs)
@@ -892,11 +1012,11 @@ func (s *Service) CreateSMPPAccount(ctx context.Context, tc *tenant.Context, req
 		return nil, fmt.Errorf("%w: invalid SMPP account status %q", ErrValidation, status)
 	}
 
-	plainPass, err := secrets.GenerateRandomPassword(18)
+	plainPass, err := secrets.GenerateSMPPPassword()
 	if err != nil {
 		return nil, err
 	}
-	hash, err := password.Hash(plainPass)
+	hash, err := password.HashRaw(plainPass)
 	if err != nil {
 		return nil, err
 	}
@@ -1054,11 +1174,11 @@ func (s *Service) ResetSMPPPassword(ctx context.Context, tc *tenant.Context, id 
 		return nil, err
 	}
 
-	plainPass, err := secrets.GenerateRandomPassword(18)
+	plainPass, err := secrets.GenerateSMPPPassword()
 	if err != nil {
 		return nil, err
 	}
-	hash, err := password.Hash(plainPass)
+	hash, err := password.HashRaw(plainPass)
 	if err != nil {
 		return nil, err
 	}
@@ -1174,7 +1294,7 @@ func (s *Service) ExportProfiles(ctx context.Context, tc *tenant.Context, filter
 	}
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"id", "organization_id", "organization_name", "account_type", "billing_currency", "credit_limit", "default_max_tps", "daily_message_cap", "monthly_message_cap", "destination_policy", "status"})
+	_ = w.Write([]string{"id", "organization_id", "organization_name", "account_type", "billing_currency", "credit_limit", "default_max_tps", "daily_message_cap", "monthly_message_cap", "destination_policy", "billing_mode", "dlr_wait_hours", "no_dlr_policy", "failed_after_accept_policy", "status"})
 	for _, p := range items {
 		_ = w.Write([]string{
 			p.ID.String(),
@@ -1187,6 +1307,10 @@ func (s *Service) ExportProfiles(ctx context.Context, tc *tenant.Context, filter
 			fmt.Sprintf("%d", p.DailyMessageCap),
 			fmt.Sprintf("%d", p.MonthlyMessageCap),
 			sanitizeCSVCell(p.DestinationPolicy),
+			sanitizeCSVCell(p.BillingMode),
+			fmt.Sprintf("%d", p.DLRWaitHours),
+			sanitizeCSVCell(p.NoDLRPolicy),
+			sanitizeCSVCell(p.FailedAfterAcceptPolicy),
 			sanitizeCSVCell(p.Status),
 		})
 	}

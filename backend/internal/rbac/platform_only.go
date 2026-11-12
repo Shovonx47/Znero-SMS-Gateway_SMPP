@@ -12,10 +12,13 @@ var platformOnlyPrefixes = []string{
 	"number.prefix.", // only "view" is allowed for non-platform orgs (see below)
 	"country.country.",
 	"operator.operator.",
-	"rate.buycard.", // provider buy rate cards (Phase 5)
-	"rate.buyrate.", // provider buy rates (Phase 5)
-	"rate.margin.",  // margin analysis & override (Phase 5)
-	"routing.",      // routing plans, entries, rules, simulator, kill switch (Phase 7)
+	"rate.buycard.",         // provider buy rate cards (Phase 5)
+	"rate.buyrate.",         // provider buy rates (Phase 5)
+	"rate.margin.",          // margin analysis & override (Phase 5)
+	"routing.",              // routing plans, entries, rules, simulator, kill switch (Phase 7)
+	"message.platform.",     // provider identity, buy cost, outbox/reaper mgmt (Phase 8A)
+	"customer.smppsession.", // platform live SMPP session view & force disconnect (Phase 8B)
+	"inbound.number.",       // virtual longcode/shortcode inventory management (Phase 8B)
 }
 
 // readOnlyForNonPlatform lists the namespaces where non-platform organizations may hold the
@@ -46,6 +49,10 @@ var platformOnlyExact = map[string]bool{
 	"billing.invoice.void":       true,
 	"billing.invoice.creditnote": true,
 	"ledger.reconcile":           true,
+	"message.dlr_mapping.manage": true,
+	"message.queue.view":         true,
+	"message.reconcile":          true,
+	"system.info.view":           true,
 }
 
 // customerForbiddenCodes lists permissions that a customer organization (orgType == "customer")

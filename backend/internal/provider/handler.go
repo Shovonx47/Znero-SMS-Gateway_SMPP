@@ -44,6 +44,7 @@ func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	p.Post("/:id/connections/:connId/status", rbac.RequirePermission("provider.connection.status"), h.changeConnectionStatus)
 	p.Get("/:id/connections/:connId/history", rbac.RequirePermission("provider.connection.view"), h.connectionHistory)
 	p.Post("/:id/connections/:connId/rollback", rbac.RequirePermission("provider.connection.edit"), h.rollbackConnection)
+	p.Post("/:id/connections/:connId/test-send", rbac.RequirePermission("provider.connection.edit"), h.testConnectionSend)
 
 	// Coverage under /provider-coverage
 	cov := router.Group("/provider-coverage", authMiddleware)
@@ -388,6 +389,28 @@ func (h *Handler) changeConnectionStatus(c *fiber.Ctx) error {
 		return httpx.OK(c, fiber.Map{"pending_approval": true, "change_request": res.PendingChange})
 	}
 	return httpx.OK(c, res.Connection)
+}
+
+func (h *Handler) testConnectionSend(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+	connID, err := uuid.Parse(c.Params("connId"))
+	if err != nil {
+		return httpx.BadRequest("Invalid connection ID")
+	}
+	var req TestSendRequest
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return httpx.BadRequest("Invalid JSON body")
+		}
+	}
+	res, err := h.svc.TestConnectionSend(c.UserContext(), tc, connID, req)
+	if err != nil {
+		return mapErr(err)
+	}
+	return httpx.OK(c, res)
 }
 
 func (h *Handler) connectionHistory(c *fiber.Ctx) error {

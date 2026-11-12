@@ -66,7 +66,7 @@
 				page,
 				pageSize
 			});
-			countries = res.data.items;
+			countries = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -316,7 +316,7 @@
 			</div>
 
 			<div class="flex flex-wrap items-center gap-2">
-				<select
+				<select aria-label="Filter by continent"
 					bind:value={continentFilter}
 					onchange={() => { page = 1; loadCountries(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -330,7 +330,7 @@
 					<option value="South America">South America</option>
 				</select>
 
-				<select
+				<select aria-label="Filter by verification"
 					bind:value={verificationFilter}
 					onchange={() => { page = 1; loadCountries(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -340,7 +340,7 @@
 					<option value="unverified">Unverified</option>
 				</select>
 
-				<select
+				<select aria-label="Filter by status"
 					bind:value={statusFilter}
 					onchange={() => { page = 1; loadCountries(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

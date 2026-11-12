@@ -1530,6 +1530,7 @@ func (s *Service) SnapshotStatus(ctx context.Context, tc *tenant.Context) (map[s
 		"status":      "ready",
 		"built_at":    snap.BuildAt,
 		"age_seconds": time.Since(snap.BuildAt).Seconds(),
+		"age_ms":      time.Since(snap.BuildAt).Milliseconds(),
 		"plans_count": len(snap.Plans),
 		"rules_count": len(snap.Rules),
 		"overrides":   len(snap.Overrides),

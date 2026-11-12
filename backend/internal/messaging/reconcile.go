@@ -106,12 +106,19 @@ func (s *ReconciliationService) RunReconciliation(ctx context.Context, initiated
 	}
 
 	// 3. Invariant Check: Non-delivered terminal messages must NOT have captured holds
+	// UNLESS permitted by snapshotted billing terms:
+	//   - no_dlr_policy_snapshot = 'capture_at_ttl' on expired no-DLR messages, OR
+	//   - billing_mode_snapshot = 'on_provider_accept' AND failed_after_accept_policy_snapshot = 'keep_charge' after submission
 	capturedRows, err := s.pool.Query(ctx, `
 		SELECT m.id, m.customer_org_id, m.status, h.id, h.status, h.amount
 		FROM messages m
 		JOIN holds h ON h.id = m.hold_id
 		WHERE m.status IN ('undelivered', 'failed', 'expired', 'rejected')
 		  AND h.status = 'captured'
+		  AND NOT (
+		      (m.status = 'expired' AND m.no_dlr_policy_snapshot = 'capture_at_ttl' AND COALESCE(m.failure_reason, '') LIKE 'no DLR received%')
+		      OR (m.billing_mode_snapshot = 'on_provider_accept' AND m.failed_after_accept_policy_snapshot = 'keep_charge' AND m.submitted_at IS NOT NULL)
+		  )
 		LIMIT 100
 	`)
 	if err == nil {
@@ -135,13 +142,19 @@ func (s *ReconciliationService) RunReconciliation(ctx context.Context, initiated
 		}
 	}
 
-	// 4. Invariant Check: Captured totals vs Delivered totals
-	var deliveredTotal, capturedTotal decimal.Decimal
+	// 4. Invariant Check: Captured hold totals vs expected chargeable messages
+	var expectedCapturedTotal, capturedTotal decimal.Decimal
 	_ = s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(sell_price), 0)
 		FROM messages
-		WHERE status = 'delivered'
-	`).Scan(&deliveredTotal)
+		WHERE hold_id IS NOT NULL
+		  AND (
+		      status = 'delivered'
+		      OR (status IN ('submitted', 'unknown') AND billing_mode_snapshot = 'on_provider_accept' AND submitted_at IS NOT NULL)
+		      OR (status = 'expired' AND no_dlr_policy_snapshot = 'capture_at_ttl' AND billing_mode_snapshot = 'on_delivery' AND COALESCE(failure_reason, '') LIKE 'no DLR received%')
+		      OR (status IN ('undelivered', 'failed', 'expired') AND billing_mode_snapshot = 'on_provider_accept' AND failed_after_accept_policy_snapshot = 'keep_charge' AND submitted_at IS NOT NULL)
+		  )
+	`).Scan(&expectedCapturedTotal)
 
 	_ = s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(h.amount), 0)
@@ -150,16 +163,16 @@ func (s *ReconciliationService) RunReconciliation(ctx context.Context, initiated
 		WHERE h.status = 'captured'
 	`).Scan(&capturedTotal)
 
-	diff := deliveredTotal.Sub(capturedTotal).Abs()
+	diff := expectedCapturedTotal.Sub(capturedTotal).Abs()
 	if diff.GreaterThan(decimal.NewFromFloat(0.01)) {
 		report.LedgerMatches = false
 		report.Discrepancies = append(report.Discrepancies, map[string]interface{}{
 			"type":            "ledger_totals_mismatch",
 			"severity":        "warning",
-			"delivered_total": deliveredTotal.String(),
+			"delivered_total": expectedCapturedTotal.String(),
 			"captured_total":  capturedTotal.String(),
 			"difference":      diff.String(),
-			"detail":          "Total delivered message value does not match total captured ledger amount",
+			"detail":          "Total expected captured message value does not match total captured ledger amount",
 		})
 	}
 

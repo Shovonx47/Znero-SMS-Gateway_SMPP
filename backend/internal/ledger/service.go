@@ -96,8 +96,30 @@ func (s *Service) authorizeWalletAccess(ctx context.Context, tc *tenant.Context,
 // -------------------------------------------------------------------------
 
 func (s *Service) EnsureWallet(ctx context.Context, tc *tenant.Context, orgID uuid.UUID, currency, accountType string) (*Wallet, error) {
-	if tc != nil && !tc.IsPlatformAdmin && !tc.IsPlatformOrg() {
+	if tc == nil || (!tc.IsPlatformAdmin && !tc.IsPlatformOrg()) {
 		return nil, ErrPermissionDenied
+	}
+	if orgID == uuid.Nil {
+		return nil, fmt.Errorf("%w: organization_id is required", ErrValidation)
+	}
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if currency == "" {
+		currency = "USD"
+	}
+	if len(currency) != 3 {
+		return nil, fmt.Errorf("%w: currency must be a 3-letter code", ErrValidation)
+	}
+	accountType = strings.ToLower(strings.TrimSpace(accountType))
+	if accountType == "" {
+		accountType = "prepaid"
+	}
+	if accountType != "prepaid" && accountType != "postpaid" {
+		return nil, fmt.Errorf("%w: account_type must be prepaid or postpaid", ErrValidation)
+	}
+	if s.orgRepo != nil {
+		if target, err := s.orgRepo.GetByID(ctx, orgID); err != nil || target == nil {
+			return nil, ErrWalletNotFound
+		}
 	}
 	return s.repo.EnsureWalletForOrg(ctx, nil, orgID, currency, accountType)
 }
@@ -124,6 +146,12 @@ func (s *Service) GetWalletByOrgID(ctx context.Context, tc *tenant.Context, orgI
 		}
 	}
 
+	return s.repo.GetWalletByOrgID(ctx, orgID)
+}
+
+// GetWalletByOrgIDInternal retrieves a wallet for internal trusted backend services (e.g. messaging hold
+// placement after message.send authorization has already been verified). Never expose to untrusted callers.
+func (s *Service) GetWalletByOrgIDInternal(ctx context.Context, orgID uuid.UUID) (*Wallet, error) {
 	return s.repo.GetWalletByOrgID(ctx, orgID)
 }
 
@@ -1271,6 +1299,105 @@ func (s *Service) PlaceHoldTx(
 	return hold, nil
 }
 
+// BatchHoldRequest describes one item in a single-wallet batch hold placement.
+type BatchHoldRequest struct {
+	Amount         decimal.Decimal
+	Expiry         time.Time
+	ReferenceType  *string
+	ReferenceID    *uuid.UUID
+	IdempotencyKey *string
+}
+
+// PlaceHoldsBatchTx validates and creates holds for multiple items on a single wallet in one
+// FOR UPDATE lock and one batched SQL roundtrip inside caller tx dbTx.
+// Returns per-index hold pointer and per-index validation/funds error alongside any fatal error.
+func (s *Service) PlaceHoldsBatchTx(
+	ctx context.Context,
+	dbTx pgx.Tx,
+	walletID uuid.UUID,
+	currency string,
+	reqs []BatchHoldRequest,
+) ([]*Hold, []error, error) {
+	if len(reqs) == 0 {
+		return nil, nil, nil
+	}
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, walletID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if w.Status != "active" {
+		if w.Status == "frozen" {
+			return nil, nil, ErrWalletFrozen
+		}
+		return nil, nil, ErrWalletClosed
+	}
+	if currency != "" && w.Currency != currency {
+		return nil, nil, ErrCurrencyMismatch
+	}
+
+	remaining := w.AvailableBalance
+	now := time.Now()
+	holds := make([]*Hold, len(reqs))
+	itemErrs := make([]error, len(reqs))
+
+	var toCreate []Hold
+	var createIdx []int
+	for i, req := range reqs {
+		amt := req.Amount.Truncate(MoneyScale)
+		if amt.LessThanOrEqual(decimal.Zero) {
+			itemErrs[i] = ErrNegativeAmount
+			continue
+		}
+		if remaining.LessThan(amt) {
+			itemErrs[i] = ErrInsufficientFunds
+			continue
+		}
+		remaining = remaining.Sub(amt)
+		exp := req.Expiry
+		if exp.IsZero() {
+			exp = now.Add(15 * time.Minute)
+		}
+		toCreate = append(toCreate, Hold{
+			WalletID:       walletID,
+			Amount:         amt,
+			Currency:       w.Currency,
+			ExpiresAt:      exp,
+			ReferenceType:  req.ReferenceType,
+			ReferenceID:    req.ReferenceID,
+			IdempotencyKey: req.IdempotencyKey,
+		})
+		createIdx = append(createIdx, i)
+	}
+
+	if len(toCreate) > 0 {
+		created, err := s.repo.CreateHoldsBatch(ctx, tx, toCreate)
+		if err != nil {
+			return nil, nil, err
+		}
+		for j, origIdx := range createIdx {
+			h := created[j]
+			holds[origIdx] = &h
+		}
+	}
+
+	if dbTx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, nil, fmt.Errorf("commit batch holds: %w", err)
+		}
+	}
+	return holds, itemErrs, nil
+}
+
 func (s *Service) Capture(
 	ctx context.Context,
 	holdID uuid.UUID,
@@ -1362,46 +1489,31 @@ func (s *Service) CaptureTx(
 	}
 
 	desc := fmt.Sprintf("Hold capture of %s %s", captureAmount.StringFixed(MoneyScale), w.Currency)
-	lt, err := s.repo.CreateTransaction(ctx, tx, LedgerTransaction{
+	entries := []LedgerEntry{
+		{
+			AccountID: walletAcc.ID,
+			Direction: "debit",
+			Amount:    captureAmount,
+			Currency:  w.Currency,
+		},
+		{
+			AccountID: revAcc.ID,
+			Direction: "credit",
+			Amount:    captureAmount,
+			Currency:  w.Currency,
+		},
+	}
+
+	newBal := w.CachedBalance.Sub(captureAmount)
+	lt, err := s.repo.FinalizeHoldCapture(ctx, tx, LedgerTransaction{
 		Type:           "hold_capture",
 		ReferenceType:  hold.ReferenceType,
 		ReferenceID:    hold.ReferenceID,
 		IdempotencyKey: idempKey,
 		Description:    desc,
 		TenantOrgID:    &w.OrganizationID,
-	})
+	}, entries, w.ID, newBal, w.Version, hold.ID, captureAmount, hold.Version)
 	if err != nil {
-		return nil, err
-	}
-
-	entries := []LedgerEntry{
-		{
-			TransactionID: lt.ID,
-			AccountID:     walletAcc.ID,
-			Direction:     "debit",
-			Amount:        captureAmount,
-			Currency:      w.Currency,
-		},
-		{
-			TransactionID: lt.ID,
-			AccountID:     revAcc.ID,
-			Direction:     "credit",
-			Amount:        captureAmount,
-			Currency:      w.Currency,
-		},
-	}
-	if err := s.repo.CreateEntries(ctx, tx, entries); err != nil {
-		return nil, err
-	}
-
-	// Update wallet cached balance
-	newBal := w.CachedBalance.Sub(captureAmount)
-	if err := s.repo.UpdateWalletCachedBalance(ctx, tx, w.ID, newBal, w.Version); err != nil {
-		return nil, err
-	}
-
-	// Mark hold as captured
-	if err := s.repo.UpdateHoldStatus(ctx, tx, hold.ID, "captured", captureAmount, hold.Version); err != nil {
 		return nil, err
 	}
 
@@ -1411,7 +1523,6 @@ func (s *Service) CaptureTx(
 		}
 	}
 
-	lt.Entries = entries
 	return lt, nil
 }
 
@@ -1452,6 +1563,130 @@ func (s *Service) ReleaseTx(ctx context.Context, dbTx pgx.Tx, holdID uuid.UUID) 
 		return tx.Commit(ctx)
 	}
 	return nil
+}
+
+// RefundCaptureTx refunds a previously captured hold (used when billing_mode = on_provider_accept
+// with failed_after_accept_policy = refund). It posts a balanced 'refund' transaction (debit
+// revenue, credit wallet), updates cached_balance, and marks the hold status as 'refunded'.
+// Calling RefundCaptureTx again for an already-refunded hold or matching idempotency key is idempotent.
+func (s *Service) RefundCaptureTx(
+	ctx context.Context,
+	dbTx pgx.Tx,
+	holdID uuid.UUID,
+	refundAmount decimal.Decimal,
+	idempKey *string,
+	reason string,
+) (*LedgerTransaction, error) {
+	refundAmount = refundAmount.Truncate(MoneyScale)
+	if refundAmount.LessThanOrEqual(decimal.Zero) {
+		return nil, ErrNegativeAmount
+	}
+
+	tx := dbTx
+	var err error
+	if tx == nil {
+		tx, err = s.pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
+	}
+
+	hold, err := s.repo.GetHoldByIDForUpdate(ctx, tx, holdID)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.repo.GetWalletByIDForUpdate(ctx, tx, hold.WalletID)
+	if err != nil {
+		return nil, err
+	}
+
+	if idempKey != nil && *idempKey != "" {
+		existing, err := s.repo.GetTransactionByIdempotency(ctx, tx, &w.OrganizationID, "refund", *idempKey)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return existing, nil
+		}
+	}
+
+	if hold.Status == "refunded" {
+		return nil, nil
+	}
+	if hold.Status != "captured" {
+		return nil, fmt.Errorf("%w: cannot refund hold with status %s (must be captured)", ErrHoldNotActive, hold.Status)
+	}
+	if refundAmount.GreaterThan(hold.CapturedAmount) {
+		return nil, fmt.Errorf("%w: refund %s exceeds captured %s", ErrHoldCaptureExceeded, refundAmount.StringFixed(MoneyScale), hold.CapturedAmount.StringFixed(MoneyScale))
+	}
+
+	revAccCode := "PLATFORM_REVENUE"
+	if w.Currency == "EUR" {
+		revAccCode = "PLATFORM_REVENUE_EUR"
+	}
+	revAcc, err := s.repo.GetSystemAccount(ctx, tx, revAccCode)
+	if err != nil {
+		return nil, err
+	}
+	walletAcc, err := s.repo.GetAccountByWalletID(ctx, tx, w.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(reason) == "" {
+		reason = fmt.Sprintf("Refund captured hold of %s %s", refundAmount.StringFixed(MoneyScale), w.Currency)
+	}
+	lt, err := s.repo.CreateTransaction(ctx, tx, LedgerTransaction{
+		Type:           "refund",
+		ReferenceType:  hold.ReferenceType,
+		ReferenceID:    hold.ReferenceID,
+		IdempotencyKey: idempKey,
+		Description:    reason,
+		Reason:         &reason,
+		TenantOrgID:    &w.OrganizationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	entries := []LedgerEntry{
+		{
+			TransactionID: lt.ID,
+			AccountID:     revAcc.ID,
+			Direction:     "debit",
+			Amount:        refundAmount,
+			Currency:      w.Currency,
+		},
+		{
+			TransactionID: lt.ID,
+			AccountID:     walletAcc.ID,
+			Direction:     "credit",
+			Amount:        refundAmount,
+			Currency:      w.Currency,
+		},
+	}
+	if err := s.repo.CreateEntries(ctx, tx, entries); err != nil {
+		return nil, err
+	}
+
+	newBal := w.CachedBalance.Add(refundAmount)
+	if err := s.repo.UpdateWalletCachedBalance(ctx, tx, w.ID, newBal, w.Version); err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.UpdateHoldStatus(ctx, tx, hold.ID, "refunded", decimal.Zero, hold.Version); err != nil {
+		return nil, err
+	}
+
+	if dbTx == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit refund capture: %w", err)
+		}
+	}
+
+	lt.Entries = entries
+	return lt, nil
 }
 
 func (s *Service) ExpireOldHolds(ctx context.Context) (int64, error) {

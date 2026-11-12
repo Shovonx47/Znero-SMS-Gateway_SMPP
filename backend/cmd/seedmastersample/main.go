@@ -167,9 +167,10 @@ func ensureAuthoritativeCountriesCSV(samplesDir, sourcesDir string) (string, err
 			}
 		}
 
+		currencyCode := defaultCurrencyForISO2(iso2)
 		_ = w.Write([]string{
 			iso2, iso3, numCode, name, callingCode,
-			continent, subRegion, "", "",
+			continent, subRegion, currencyCode, "",
 			strconv.Itoa(minLen), strconv.Itoa(maxLen), isoDataSource,
 		})
 	}
@@ -178,6 +179,33 @@ func ensureAuthoritativeCountriesCSV(samplesDir, sourcesDir string) (string, err
 		return "", fmt.Errorf("write countries_sample.csv: %w", err)
 	}
 	return countriesPath, nil
+}
+
+func defaultCurrencyForISO2(iso2 string) string {
+	switch iso2 {
+	case "US":
+		return "USD"
+	case "GB":
+		return "GBP"
+	case "DE", "FR", "ES", "IT", "NL", "BE", "AT", "IE", "PT", "FI":
+		return "EUR"
+	case "CA":
+		return "CAD"
+	case "AU":
+		return "AUD"
+	case "SG":
+		return "SGD"
+	case "BD":
+		return "BDT"
+	case "IN":
+		return "INR"
+	case "AE":
+		return "AED"
+	case "JP":
+		return "JPY"
+	default:
+		return ""
+	}
 }
 
 // backfillMissingHistory ensures every existing row in countries, operators, and number_prefixes

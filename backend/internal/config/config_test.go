@@ -202,6 +202,35 @@ func TestFindEnvFileNone(t *testing.T) {
 	}
 }
 
+func TestAllowLoopbackSwitch(t *testing.T) {
+	// Default must remain false even in development/test.
+	e := validEnv()
+	cfg, err := Parse(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AllowLoopback() {
+		t.Fatal("AllowLoopback() must default to false")
+	}
+
+	// Explicit test-only switch enables it outside production.
+	e["APP_ENV"] = "test"
+	e["ALLOW_LOOPBACK_IN_TEST"] = "true"
+	cfg, err = Parse(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowLoopback() {
+		t.Fatal("AllowLoopback() should be true when ALLOW_LOOPBACK_IN_TEST=true in test")
+	}
+
+	// Production must refuse to boot with ALLOW_LOOPBACK_IN_TEST=true.
+	e["APP_ENV"] = "production"
+	if _, err := Parse(env(e)); err == nil || !strings.Contains(err.Error(), "ALLOW_LOOPBACK_IN_TEST") {
+		t.Fatalf("expected production failure for ALLOW_LOOPBACK_IN_TEST=true, got err=%v", err)
+	}
+}
+
 // chdir changes the working directory for one test (t.Chdir needs Go 1.24+).
 func chdir(t *testing.T, dir string) {
 	t.Helper()

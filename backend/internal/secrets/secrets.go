@@ -350,8 +350,8 @@ func VerifyAPIKey(plaintextKey, expectedHashHex string) bool {
 	return subtle.ConstantTimeCompare([]byte(actual), []byte(strings.ToLower(strings.TrimSpace(expectedHashHex)))) == 1
 }
 
-// GenerateRandomPassword creates a high-entropy URL-safe password (for SMPP account provisioning,
-// where the password is shown once to the customer and stored hashed with Argon2id).
+// GenerateRandomPassword creates a high-entropy URL-safe password (for webhook signing
+// secrets and general credentials stored encrypted or hashed).
 func GenerateRandomPassword(byteLen int) (string, error) {
 	if byteLen < 16 {
 		byteLen = 18
@@ -361,4 +361,30 @@ func GenerateRandomPassword(byteLen int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+const smppPasswordAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// GenerateSMPPPassword creates a cryptographically random 8-character alphanumeric
+// password compliant with SMPP v3.4 section 4.1.1 (C-Octet String max 9 octets incl. NUL).
+func GenerateSMPPPassword() (string, error) {
+	const pwLen = 8
+	const maxValid = 248 // 256 - (256 % 62), unbiased rejection sampling threshold
+	out := make([]byte, 0, pwLen)
+	buf := make([]byte, 16)
+	for len(out) < pwLen {
+		if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+			return "", err
+		}
+		for _, b := range buf {
+			if int(b) >= maxValid {
+				continue
+			}
+			out = append(out, smppPasswordAlphabet[int(b)%len(smppPasswordAlphabet)])
+			if len(out) == pwLen {
+				break
+			}
+		}
+	}
+	return string(out), nil
 }

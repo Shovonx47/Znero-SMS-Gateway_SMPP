@@ -21,6 +21,9 @@ type Config struct {
 
 	// PartitionPrecreateMonths is the number of upcoming monthly partitions to keep pre-created.
 	PartitionPrecreateMonths int
+
+	// DefaultBillingTerms are used if a customer has no profile row yet.
+	DefaultBillingTerms CustomerBillingTerms
 }
 
 // DefaultConfig provides the production default parameters.
@@ -31,7 +34,32 @@ func DefaultConfig() Config {
 		HoldExpiry:               72 * time.Hour,
 		MaxSegmentsLimit:         10,
 		PartitionPrecreateMonths: 3,
+		DefaultBillingTerms:      DefaultCustomerBillingTerms(),
 	}
+}
+
+// WithDefaults returns a copy of c with any zero-valued fields populated from DefaultConfig().
+func (c Config) WithDefaults() Config {
+	def := DefaultConfig()
+	if c.MessageTTL == 0 {
+		c.MessageTTL = def.MessageTTL
+	}
+	if c.UnknownResolutionWindow == 0 {
+		c.UnknownResolutionWindow = def.UnknownResolutionWindow
+	}
+	if c.HoldExpiry == 0 {
+		c.HoldExpiry = def.HoldExpiry
+	}
+	if c.MaxSegmentsLimit == 0 {
+		c.MaxSegmentsLimit = def.MaxSegmentsLimit
+	}
+	if c.PartitionPrecreateMonths == 0 {
+		c.PartitionPrecreateMonths = def.PartitionPrecreateMonths
+	}
+	if c.DefaultBillingTerms.BillingMode == "" {
+		c.DefaultBillingTerms = def.DefaultBillingTerms
+	}
+	return c
 }
 
 // Validate enforces all startup invariants, strictly refusing invalid configurations.

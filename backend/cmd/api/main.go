@@ -4,11 +4,15 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +27,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/diagnostics"
 	"github.com/znero-international/znero/backend/internal/health"
+	"github.com/znero-international/znero/backend/internal/httpprovider"
 	"github.com/znero-international/znero/backend/internal/ledger"
 	"github.com/znero-international/znero/backend/internal/masterdata/approval"
 	"github.com/znero-international/znero/backend/internal/masterdata/country"
@@ -30,6 +35,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/operator"
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
 	"github.com/znero-international/znero/backend/internal/messaging"
+	"github.com/znero-international/znero/backend/internal/metrics"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
@@ -56,21 +62,82 @@ func main() {
 	}
 }
 
+func isLoopbackBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func run() error {
+	roleFlag := flag.String("role", "", "Process role: all|api|smpp|dispatcher|reaper|webhook|poller (or ZNERO_ROLE)")
+	pprofFlag := flag.String("pprof-addr", "", "Optional loopback-only pprof bind address (e.g. 127.0.0.1:6060)")
+	flag.Parse()
+
+	role := strings.ToLower(strings.TrimSpace(*roleFlag))
+	if role == "" {
+		role = strings.ToLower(strings.TrimSpace(os.Getenv("ZNERO_ROLE")))
+	}
+	if role == "" {
+		role = "all"
+	}
+	switch role {
+	case "all", "api", "smpp", "dispatcher", "reaper", "webhook", "poller":
+	default:
+		return fmt.Errorf("invalid -role %q (allowed: all, api, smpp, dispatcher, reaper, webhook, poller)", role)
+	}
+
+	pprofAddr := strings.TrimSpace(*pprofFlag)
+	if pprofAddr == "" {
+		pprofAddr = strings.TrimSpace(os.Getenv("ZNERO_PPROF_ADDR"))
+	}
+	if pprofAddr != "" && !isLoopbackBindAddr(pprofAddr) {
+		return fmt.Errorf("security violation: -pprof-addr %q must bind strictly to loopback", pprofAddr)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	logger, err := logx.New(os.Stdout, cfg.Log.Level, cfg.Log.Format)
+	asyncOut := logx.NewAsyncWriter(os.Stdout, 16384)
+	defer asyncOut.Close()
+	logger, err := logx.New(asyncOut, cfg.Log.Level, cfg.Log.Format)
 	if err != nil {
 		return err
 	}
 	slog.SetDefault(logger)
 	logger.Info("starting znero backend", slog.String("version", app.Version), slog.Any("config", cfg))
+	logger.Info("starting znero backend", slog.String("version", app.Version), slog.String("role", role), slog.Any("config", cfg))
+	metrics.DefaultRegistry.SetRole(role)
+	http.Handle("/metrics", metrics.DefaultRegistry.HTTPHandler())
 
 	// ctx is cancelled on Ctrl+C / SIGTERM and drives graceful shutdown of everything below.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	var pprofSrv *http.Server
+	if pprofAddr != "" {
+		pprofSrv = &http.Server{
+			Addr:              pprofAddr,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Info("pprof listening (loopback-only)", slog.String("addr", pprofAddr))
+			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("pprof server stopped", slog.String("error", err.Error()))
+			}
+		}()
+		defer func() {
+			sCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = pprofSrv.Shutdown(sCtx)
+		}()
+	}
 
 	// PostgreSQL is required: fail fast (with a password-free error) if it is unreachable.
 	pool, err := database.Connect(ctx, database.Config{
@@ -188,10 +255,32 @@ func run() error {
 
 	providerRepo := provider.NewRepository(pool)
 	providerSvc := provider.NewService(providerRepo, auditSvc, approvalSvc, keyRing, cfg.Env)
+	providerSvc.SetAllowLoopback(cfg.AllowLoopback())
 	providerHandler := provider.NewHandler(providerSvc)
 
 	customerRepo := customer.NewRepository(pool)
 	customerSvc := customer.NewService(customerRepo, auditSvc, approvalSvc)
+	// Load platform global defaults for new customer billing terms
+	globBillingMode := "on_delivery"
+	var settingRaw string
+	if err := pool.QueryRow(ctx, `SELECT trim(both '"' FROM value::text) FROM system_settings WHERE key = 'billing.sms.customer_trigger'`).Scan(&settingRaw); err == nil {
+		if settingRaw == "on_provider_accept" || settingRaw == "on_delivery" {
+			globBillingMode = settingRaw
+		}
+	}
+	globNoDLRPolicy := strings.TrimSpace(os.Getenv("MESSAGING_NO_DLR_HOLD_POLICY"))
+	if globNoDLRPolicy == "" {
+		globNoDLRPolicy = strings.TrimSpace(os.Getenv("NO_DLR_HOLD_POLICY"))
+	}
+	if globNoDLRPolicy != "retain_until_resolution" && globNoDLRPolicy != "immediate_release" && globNoDLRPolicy != "capture_at_ttl" {
+		globNoDLRPolicy = "retain_until_resolution"
+	}
+	customerSvc.SetBillingTermDefaults(customer.BillingTermDefaults{
+		BillingMode:             globBillingMode,
+		DLRWaitHours:            24,
+		NoDLRPolicy:             globNoDLRPolicy,
+		FailedAfterAcceptPolicy: "keep_charge",
+	})
 	customerHandler := customer.NewHandler(customerSvc)
 
 	senderIDRepo := senderid.NewRepository(pool)
@@ -231,7 +320,7 @@ func run() error {
 	smppMgr := smpp.NewConnectionManager(smpp.ManagerConfig{
 		DB:            pool,
 		Decrypter:     keyRing,
-		AllowLoopback: cfg.IsDevelopment(),
+		AllowLoopback: cfg.AllowLoopback(),
 		Logger:        logger,
 		DLRHandler: func(dCtx context.Context, connectionID uuid.UUID, deliver *pdu.DeliverSM) error {
 			if dlrProcRef != nil {
@@ -240,169 +329,265 @@ func run() error {
 			return nil
 		},
 	})
-	smppMgr.StartMetricsPersister(ctx, 5*time.Second)
+	runHTTP := role == "all" || role == "api"
+	runSMPP := role == "all" || role == "smpp"
+	runDispatcher := role == "all" || role == "dispatcher"
+	runReaper := role == "all" || role == "reaper"
+	runWebhook := role == "all" || role == "webhook"
+	runPoller := role == "all" || role == "poller"
+
+	if runDispatcher {
+		smppMgr.StartMetricsPersister(ctx, 5*time.Second)
+		defer func() { _ = smppMgr.Close() }()
+	}
 
 	smppClient := smpp.NewClient(smpp.ClientConfig{
 		Manager: smppMgr,
 		DB:      pool,
 		Logger:  logger,
 	})
-	msgSvc, err := messaging.NewService(pool, msgRepo, messaging.Config{}, routingEngine, ledgerSvc, keyRing, auditSvc, smppClient, logger)
+	httpProvClient := httpprovider.NewClient(httpprovider.ClientConfig{
+		Pool:          pool,
+		Decrypter:     keyRing,
+		AllowLoopback: cfg.AllowLoopback(),
+		CacheTTL:      5 * time.Second,
+		Logger:        logger,
+	})
+	providerSvc.SetHTTPTestSender(httpProvClient)
+	compositeSender := messaging.NewCompositeSender(pool, map[string]messaging.Sender{
+		"smpp": smppClient,
+		"http": httpProvClient,
+	}, 5*time.Second)
+
+	msgCfg := messaging.DefaultConfig()
+	msgCfg.DefaultBillingTerms = messaging.CustomerBillingTerms{
+		BillingMode:             globBillingMode,
+		DLRWaitHours:            24,
+		NoDLRPolicy:             globNoDLRPolicy,
+		FailedAfterAcceptPolicy: "keep_charge",
+	}
+	msgSvc, err := messaging.NewService(pool, msgRepo, msgCfg, routingEngine, ledgerSvc, keyRing, auditSvc, compositeSender, logger)
 	if err != nil {
 		return fmt.Errorf("messaging service: %w", err)
 	}
 
-	dlrProc := messaging.NewDLRProcessor(msgRepo, ledgerSvc, "on_delivery", logger)
+	dlrProc := messaging.NewDLRProcessor(msgRepo, ledgerSvc, globBillingMode, logger)
 	dlrProcRef = dlrProc
+	httpCallbackHandler := httpprovider.NewCallbackHandler(httpProvClient, dlrProc, logger)
 
 	reconcileSvc := messaging.NewReconciliationService(pool, msgRepo, ledgerSvc, logger)
 	messagingHandler := messaging.NewHandler(msgSvc, reconcileSvc, &smppStatsAdapter{mgr: smppMgr}, msgRepo)
 
-	// Background Outbox Dispatcher
-	dispatcher := messaging.NewDispatcher(pool, msgRepo, routingEngine, ledgerSvc, smppClient, logger)
-	dispatcher.Start(ctx)
+	var dispatcher *messaging.Dispatcher
+	if runDispatcher {
+		dispatcher = messaging.NewDispatcher(pool, msgRepo, routingEngine, ledgerSvc, compositeSender, logger)
+		dispatcher.Start(ctx)
+	}
 
-	// Background Safety Reaper
-	reaper := messaging.NewReaper(pool, msgRepo, ledgerSvc, dlrProc, messaging.ReaperConfig{}, logger)
-	reaper.Start(ctx)
+	var httpDLRPoller *httpprovider.DLRPoller
+	if runPoller {
+		httpDLRPoller = httpprovider.NewDLRPoller(pool, httpProvClient, dlrProc, httpprovider.PollerConfig{}, logger)
+		httpDLRPoller.Start(ctx)
+	}
+
+	var reaper *messaging.Reaper
+	if runReaper {
+		reaperPoll := 30 * time.Second
+		if cfg.Env == "development" || cfg.Env == "test" {
+			reaperPoll = 2 * time.Second
+		}
+		reaper = messaging.NewReaper(pool, msgRepo, ledgerSvc, dlrProc, messaging.ReaperConfig{
+			PollInterval:    reaperPoll,
+			NoDLRHoldPolicy: messaging.NoDLRHoldPolicy(globNoDLRPolicy),
+		}, logger)
+		reaper.Start(ctx)
+	}
 
 	// Phase 8B: Customer Edge, SMPP Server, Webhook Dispatcher & Inbound Pipeline
 	edgeAuth := customeredge.NewEdgeAuthenticator(pool, nil, logger)
 	edgeLimiter := customeredge.NewCustomerLimiter()
 	edgeHandler := customeredge.NewEdgeHandler(edgeAuth, edgeLimiter, msgSvc, msgRepo, ledgerSvc, ratingSvc, keyRing, pool)
+	edgeHandler.SetAllowLoopback(string(cfg.Env), cfg.AllowLoopback())
 
-	// Customer SMPP Server
 	var wg sync.WaitGroup
+	var smppServer *smppserver.Server
+	var customerDLRDispatcher *smppserver.DLRDispatcher
+	var smppErrCh chan error
+
 	smppAddr := os.Getenv("CUSTOMER_SMPP_ADDR")
 	if smppAddr == "" {
-		smppAddr = ":2776"
+		smppAddr = net.JoinHostPort(cfg.Server.Host, "2776")
 	}
-	smppServer := smppserver.NewServer(smppserver.ServerConfig{
-		Addr:            smppAddr,
-		SystemID:        "ZNERO",
-		IdleTimeout:     60 * time.Second,
-		EnquireInterval: 30 * time.Second,
-		DefaultWindow:   16,
-	}, pool, msgSvc, msgRepo, edgeLimiter, logger)
-	messagingHandler.SetCustomerSessionProvider(smppServer)
+	if runSMPP {
+		smppServer = smppserver.NewServer(smppserver.ServerConfig{
+			Addr:            smppAddr,
+			SystemID:        "ZNERO",
+			IdleTimeout:     60 * time.Second,
+			EnquireInterval: 30 * time.Second,
+			DefaultWindow:   16,
+		}, pool, msgSvc, msgRepo, edgeLimiter, logger)
+		messagingHandler.SetCustomerSessionProvider(smppServer)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := smppServer.Start(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Error("customer smpp server stopped with error", slog.String("error", err.Error()))
-		}
-	}()
-
-	// Customer DLR Dispatcher
-	customerDLRDispatcher := smppserver.NewDLRDispatcher(smppserver.DLRDispatcherConfig{
-		PollInterval: 1 * time.Second,
-		BatchSize:    50,
-	}, pool, msgRepo, smppServer.Tracker(), logger)
-	customerDLRDispatcher.Start(ctx)
-
-	// Inbound MO Handler & DLRProcessor Link
-	inboundHandler := messaging.NewInboundHandler(msgRepo, keyRing, smppServer, logger)
-	dlrProc.SetInboundHandler(inboundHandler)
-
-	// Customer Webhook Dispatcher
-	whDispatcher := webhook.NewDispatcher(msgRepo, keyRing, webhook.DefaultConfig(cfg.IsDevelopment()), logger)
-	whDispatcher.Start(ctx)
-
-	modules := app.Modules{
-		Health:         health.NewHandler(healthSvc),
-		System:         system.NewHandler(system.NewService(system.NewRepository(pool), app.Version, cfg.Env)),
-		Auth:           authHandler,
-		Org:            orgHandler,
-		RBAC:           rbacHandler,
-		Audit:          auditHandler,
-		Country:        countryHandler,
-		Operator:       operatorHandler,
-		Prefix:         prefixHandler,
-		Approval:       approvalHandler,
-		ImportJob:      importHandler,
-		Number:         numberHandler,
-		Provider:       providerHandler,
-		Customer:       customerHandler,
-		SenderID:       senderIDHandler,
-		Rating:         ratingHandler,
-		Ledger:         ledgerHandler,
-		Billing:        billingHandler,
-		Routing:        routingHandler,
-		Messaging:      messagingHandler,
-		CustomerEdge:   edgeHandler,
-		AuthMiddleware: authMiddleware,
-	}
-	diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
-	if cfg.IsDevelopment() {
-		modules.Diagnostics = diagnostics.NewHandler(diagSvc)
-	}
-
-	// Background Kafka work (topic creation + logging consumer).
-	if cfg.IsDevelopment() {
+		smppErrCh = make(chan error, 1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ensureTopic(ctx, kc, cfg.Kafka.TestTopic, logger)
-		}()
-	}
-	if cfg.Kafka.ConsumerEnabled {
-		consumer, err := kafkaclient.NewConsumer(kcfg, cfg.Kafka.ConsumerGroup, cfg.Kafka.TestTopic, diagSvc.LogMessage, logger)
-		if err != nil {
-			return err
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer consumer.Close()
-			consumer.Run(ctx)
-		}()
-	}
-
-	// Background routing snapshot periodic refresh (every 60s)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				routing.TryReload(ctx, pool)
+			if err := smppServer.Start(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("customer smpp server stopped with error", slog.String("error", err.Error()))
+				smppErrCh <- err
 			}
+		}()
+
+		customerDLRDispatcher = smppserver.NewDLRDispatcher(smppserver.DLRDispatcherConfig{
+			PollInterval: 50 * time.Millisecond,
+			BatchSize:    200,
+		}, pool, msgRepo, smppServer.Tracker(), logger)
+		customerDLRDispatcher.Start(ctx)
+
+		inboundHandler := messaging.NewInboundHandler(msgRepo, keyRing, smppServer, logger)
+		dlrProc.SetInboundHandler(inboundHandler)
+	} else {
+		inboundHandler := messaging.NewInboundHandler(msgRepo, keyRing, nil, logger)
+		dlrProc.SetInboundHandler(inboundHandler)
+	}
+
+	var whDispatcher *webhook.Dispatcher
+	if runWebhook {
+		whDispatcher = webhook.NewDispatcher(msgRepo, keyRing, webhook.DefaultConfig(cfg.AllowLoopback()), logger)
+		whDispatcher.Start(ctx)
+	}
+
+	// Keep routing/rating caches synchronized across multi-process deployments.
+	if runHTTP || runSMPP || runDispatcher {
+		reloadInterval := 60 * time.Second
+		if cfg.IsDevelopment() || cfg.Env == config.EnvTest {
+			reloadInterval = 5 * time.Second
 		}
-	}()
-
-	server := app.NewHTTP(cfg, logger, modules)
-	listenErr := make(chan error, 1)
-	go func() {
-		logger.Info("http server listening", slog.String("addr", cfg.Server.Addr()))
-		listenErr <- server.Listen(cfg.Server.Addr())
-	}()
-
-	select {
-	case err := <-listenErr:
-		stop()
-		wg.Wait()
-		return fmt.Errorf("http server: %w", err)
-	case <-ctx.Done():
-		logger.Info("shutdown signal received; draining")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(reloadInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					routing.TryReload(ctx, pool)
+					_ = ratingEngine.Reload(ctx)
+				}
+			}
+		}()
 	}
 
-	// Graceful shutdown: stop accepting requests and drain, then stop background workers, then
-	// (deferred) close Kafka and the database pool.
-	if err := server.ShutdownWithTimeout(cfg.Server.ShutdownTimeout); err != nil {
-		logger.Error("http shutdown did not complete cleanly", slog.String("error", err.Error()))
+	if runHTTP {
+		modules := app.Modules{
+			Health:               health.NewHandler(healthSvc),
+			System:               system.NewHandler(system.NewService(system.NewRepository(pool), app.Version, cfg.Env)),
+			Auth:                 authHandler,
+			Org:                  orgHandler,
+			RBAC:                 rbacHandler,
+			Audit:                auditHandler,
+			Country:              countryHandler,
+			Operator:             operatorHandler,
+			Prefix:               prefixHandler,
+			Approval:             approvalHandler,
+			ImportJob:            importHandler,
+			Number:               numberHandler,
+			Provider:             providerHandler,
+			Customer:             customerHandler,
+			SenderID:             senderIDHandler,
+			Rating:               ratingHandler,
+			Ledger:               ledgerHandler,
+			Billing:              billingHandler,
+			Routing:              routingHandler,
+			Messaging:            messagingHandler,
+			CustomerEdge:         edgeHandler,
+			HTTPProviderCallback: httpCallbackHandler,
+			AuthMiddleware:       authMiddleware,
+		}
+		diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
+		if cfg.IsDevelopment() {
+			modules.Diagnostics = diagnostics.NewHandler(diagSvc)
+		}
+
+		if cfg.IsDevelopment() {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ensureTopic(ctx, kc, cfg.Kafka.TestTopic, logger)
+			}()
+		}
+		if cfg.Kafka.ConsumerEnabled {
+			consumer, err := kafkaclient.NewConsumer(kcfg, cfg.Kafka.ConsumerGroup, cfg.Kafka.TestTopic, diagSvc.LogMessage, logger)
+			if err != nil {
+				return err
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer consumer.Close()
+				consumer.Run(ctx)
+			}()
+		}
+
+		server := app.NewHTTP(cfg, logger, modules)
+		listenErr := make(chan error, 1)
+		go func() {
+			logger.Info("http server listening", slog.String("addr", cfg.Server.Addr()), slog.String("role", role))
+			listenErr <- server.Listen(cfg.Server.Addr())
+		}()
+
+		select {
+		case err := <-listenErr:
+			stop()
+			wg.Wait()
+			return fmt.Errorf("http server: %w", err)
+		case <-ctx.Done():
+			logger.Info("shutdown signal received; draining", slog.String("role", role))
+		}
+
+		if err := server.ShutdownWithTimeout(cfg.Server.ShutdownTimeout); err != nil {
+			logger.Error("http shutdown did not complete cleanly", slog.String("error", err.Error()))
+		}
+	} else {
+		logger.Info("component process running", slog.String("role", role), slog.String("smpp_addr", smppAddr))
+		if smppErrCh != nil {
+			select {
+			case err := <-smppErrCh:
+				stop()
+				return fmt.Errorf("smpp server: %w", err)
+			case <-ctx.Done():
+				logger.Info("shutdown signal received; draining", slog.String("role", role))
+			}
+		} else {
+			<-ctx.Done()
+			logger.Info("shutdown signal received; draining", slog.String("role", role))
+		}
 	}
-	customerDLRDispatcher.Stop()
-	whDispatcher.Stop()
-	smppServer.Stop()
+
+	if dispatcher != nil {
+		dispatcher.Stop()
+	}
+	if httpDLRPoller != nil {
+		httpDLRPoller.Stop()
+	}
+	if reaper != nil {
+		reaper.Stop()
+	}
+	if customerDLRDispatcher != nil {
+		customerDLRDispatcher.Stop()
+	}
+	if whDispatcher != nil {
+		whDispatcher.Stop()
+	}
+	if smppServer != nil {
+		smppServer.Stop()
+	}
 	if !waitTimeout(&wg, cfg.Server.ShutdownTimeout) {
 		logger.Warn("background workers did not stop in time")
 	}
-	logger.Info("shutdown complete")
+	logger.Info("shutdown complete", slog.String("role", role))
 	return nil
 }
 

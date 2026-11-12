@@ -484,3 +484,64 @@ When a message reaches `submitted` state but no DLR arrives before the message T
 
 Configure via `MESSAGING_NO_DLR_HOLD_POLICY` environment variable (default: `retain_until_resolution`).
 
+---
+
+## 17. Per-Customer Billing Terms & Message Snapshot Rule
+
+Per business requirements (Migration `000013`), SMS billing terms are configured **per customer** on `customer_profiles` rather than fixed globally across the entire platform:
+
+| Field | Allowed Values / Range | Default (from Global) | Purpose |
+| :--- | :--- | :--- | :--- |
+| `billing_mode` | `on_provider_accept` \| `on_delivery` | `billing.sms.customer_trigger` (`on_delivery`) | Determines when the customer's wallet hold is captured. |
+| `dlr_wait_hours` | `1..168` integer hours | `24` | Wait window for `on_delivery` messages before reaper no-DLR policy triggers. Separate from upstream SMPP `validity_period`. |
+| `no_dlr_policy` | `retain_until_resolution` \| `immediate_release` \| `capture_at_ttl` | `NO_DLR_HOLD_POLICY` (`retain_until_resolution`) | Controls hold handling when `dlr_wait_hours` elapses without a DLR (`on_delivery` only). |
+| `failed_after_accept_policy` | `keep_charge` \| `refund` | `keep_charge` | Applies only to `on_provider_accept` when an already-accepted/captured message later receives a `FAILED` / `UNDELIV` / `REJECTD` / `EXPIRED` DLR. |
+
+### Access Control & Governance
+- **Platform-Only**: Only platform users with permission may view, create, edit, or roll back billing terms; reseller and customer roles receive `403 Forbidden` if attempting to specify or modify billing terms. Customers can read their own terms read-only via `GET /customer/account` and the portal profile.
+- **Maker-Checker, Versioning & Audit**: Modifying billing terms routes through Maker-Checker approval (`sensitiveChange = true`), increments `customer_profiles.version`, snapshots into `customer_profiles_history`, and records audited before/after JSON deltas.
+
+### Immutable Message Snapshot Rule
+When a message is authorized in `messaging.Service.Submit`, the customer's active billing terms are snapshotted onto the `messages` row (`billing_mode_snapshot`, `dlr_wait_hours_snapshot`, `no_dlr_policy_snapshot`, `failed_after_accept_policy_snapshot`), and hold expiry is extended past `dlr_wait_hours_snapshot + UnknownResolutionWindow`. All downstream settlement (`Dispatcher.handleAccepted`, `DLRProcessor`, `Reaper`, `ReconciliationService`) reads **only** from these immutable message snapshot columns — never from live `customer_profiles` — ensuring mid-flight billing changes never corrupt active messages.
+
+- **`on_provider_accept`**:
+  - Dispatcher calls `ledgerSvc.CaptureTx` inside the **same database transaction** that marks the message `submitted` (`PROVIDER_ACCEPTED`) with idempotency key `capture-<msg_id>`.
+  - Permanent provider reject releases the hold immediately.
+  - Later `FAILED` / `UNDELIV` / `EXPIRED` DLR checks `failed_after_accept_policy_snapshot`: `keep_charge` retains the captured revenue (standard wholesale transit), while `refund` invokes `ledgerSvc.RefundCaptureTx` (posting a balanced `refund` entry debiting `PLATFORM_REVENUE` and crediting the customer wallet, marking the hold `'refunded'`).
+- **`on_delivery`**:
+  - Capture occurs atomically on `DELIVRD`; release occurs atomically on `FAILED` / `UNDELIV` / `REJECTD`.
+  - When `submitted_at + dlr_wait_hours_snapshot` elapses with no receipt:
+    - `retain_until_resolution` transitions the message `submitted -> unknown`, retains the hold for late DLRs, and records a `no_dlr_retained_exposure` settlement exception until `UnknownResolutionWindow` elapses.
+    - `immediate_release` transitions to `expired` and releases the hold immediately.
+    - `capture_at_ttl` transitions to `expired`, captures the hold, and logs a `capture_at_ttl` settlement exception.
+
+---
+
+## 18. Unified Egress & Generic HTTP Provider Connector
+
+All outbound SMS traffic (whether accepted via Customer HTTP API or Customer SMPP Server) is unified behind `messaging.Sender`, wired through `messaging.CompositeSender` (`internal/messaging/composite_sender.go`), which resolves the route connection's `protocol` (`smpp` or `http`) and delegates seamlessly.
+
+### HTTP Provider Architecture (`internal/httpprovider`, Migration `000014`)
+1. **Template Engine (`template.go`)**:
+   - Configurable method (`POST`, `PUT`, `GET`), optional relative/absolute URL template, custom static headers, and body formats (`json`, `form`, `none`).
+   - Placeholders: `{{destination}}`, `{{destination_no_plus}}`, `{{sender}}`, `{{text}}`, `{{message_id}}`, `{{encoding}}`, `{{udh}}`, `{{part_number}}`, `{{total_parts}}`.
+   - Escaping: JSON templates strictly JSON-string-escape all string placeholders (validated with `json.Valid`); form templates and URL templates strictly `url.QueryEscape` all placeholders.
+2. **Authentication & Secret Protection**:
+   - Supports `none`, `basic`, `bearer`, `api_key_header` (+ header name), `api_key_query` (+ param name), and legacy aliases `header_token`/`query_token`.
+   - Encrypted at rest with AES-256-GCM via `secrets.KeyRing` (`http_credentials_encrypted` and optional `http_dlr_secret_encrypted`), omitted from JSON snapshots, redacted (`***`) in UI test-send debug URLs, and never written to structured logs.
+3. **Response Classification (`response.go`)**:
+   - Dot-path JSON extraction (`data.id`, `messages.0.id`) plus regex fallback.
+   - Classifies into 4 outcomes matching `messaging.Sender`:
+     - `accepted` (2xx + optional JSON predicate) -> `PROVIDER_ACCEPTED`
+     - `retryable_reject` (HTTP 429 or configured throttle error codes) -> failover allowed
+     - `fatal_reject` (4xx permanent, 3xx redirect blocked, SSRF failure, failed condition) -> immediate permanent rejection & hold release
+     - `unknown` (**5xx responses**, timeouts/EOF after HTTP request written on wire tracked via `httptrace.ClientTrace`) -> **`UNKNOWN` state, NEVER auto-resent**.
+4. **Hardened Network Safety (`smpp.SafeDialer`)**:
+   - Dial-time IP validation inside `net.Dialer.Control` (rejecting RFC1918, loopback in production, link-local/cloud metadata `169.254.0.0/16`, carrier-NAT, documentation CIDRs).
+   - Redirects strictly disabled (`http.ErrUseLastResponse`).
+   - Bounded response reading (`io.LimitReader`) up to `max_response_bytes` (default 64 KB) and strict per-request timeout.
+5. **Delivery Reports (`callback` / `polling` / `none`)**:
+   - **`callback`**: Public versioned endpoint `POST|GET /api/v1/provider-callbacks/dlr/:connectionId`, protected by optional constant-time HMAC-SHA256 or shared secret verification, feeding parsed receipts into `DLRProcessor.ProcessParsedDLR`. Unmatched receipts are buffered in `unmatched_dlrs` and raw DLRs persisted durably.
+   - **`polling`**: Bounded background `DLRPoller` querying submitted non-terminal HTTP messages via partition-pruned `created_at >= now() - 8 days` scans and extracting provider statuses through `PollURLTemplate`.
+
+

@@ -155,7 +155,7 @@
 	<div class="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
 		<div class="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
 			<div class="relative flex-1">
-				<input
+				<input aria-label="Select search"
 					type="text"
 					bind:value={search}
 					onkeydown={(e) => e.key === 'Enter' && handleSearch()}
@@ -167,7 +167,7 @@
 				</svg>
 			</div>
 
-			<select
+			<select aria-label="Filter by status"
 				bind:value={statusFilter}
 				onchange={handleSearch}
 				class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white"
@@ -179,7 +179,7 @@
 				<option value="archived">Archived</option>
 			</select>
 
-			<select
+			<select aria-label="Filter by strategy"
 				bind:value={strategyFilter}
 				onchange={handleSearch}
 				class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white"

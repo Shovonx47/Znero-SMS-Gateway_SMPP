@@ -34,9 +34,9 @@ type Config struct {
 // DefaultConfig provides sensible production defaults for the webhook dispatcher.
 func DefaultConfig(allowLoopback bool) Config {
 	return Config{
-		WorkerCount:   10,
-		PollInterval:  1 * time.Second,
-		BatchSize:     50,
+		WorkerCount:   32,
+		PollInterval:  50 * time.Millisecond,
+		BatchSize:     200,
 		Timeout:       8 * time.Second,
 		MaxPayloadLen: 4096, // 4KB response snippet cap
 		AllowLoopback: allowLoopback,
@@ -131,20 +131,33 @@ func (d *Dispatcher) pollLoop(ctx context.Context) {
 		case <-d.stopChan:
 			return
 		case <-ticker.C:
-			d.dispatchPending(ctx)
+			for d.dispatchPending(ctx) >= d.cfg.BatchSize {
+				select {
+				case <-ctx.Done():
+					return
+				case <-d.stopChan:
+					return
+				default:
+				}
+			}
 		}
 	}
 }
 
-func (d *Dispatcher) dispatchPending(ctx context.Context) {
+// DispatchPending runs a single poll-and-dispatch pass deterministically (useful in tests).
+func (d *Dispatcher) DispatchPending(ctx context.Context) {
+	d.dispatchPending(ctx)
+}
+
+func (d *Dispatcher) dispatchPending(ctx context.Context) int {
 	leaseDuration := 30 * time.Second
 	deliveries, err := d.repo.FetchPendingWebhookDeliveries(ctx, d.cfg.BatchSize, d.workerID, leaseDuration)
 	if err != nil {
 		d.logger.Error("failed to fetch pending webhook deliveries", "err", err)
-		return
+		return 0
 	}
 	if len(deliveries) == 0 {
-		return
+		return 0
 	}
 
 	sem := make(chan struct{}, d.cfg.WorkerCount)
@@ -164,6 +177,7 @@ func (d *Dispatcher) dispatchPending(ctx context.Context) {
 	}
 
 	batchWg.Wait()
+	return len(deliveries)
 }
 
 func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.CustomerWebhookDelivery) {
@@ -185,8 +199,8 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 	if d.keyring != nil && wh.SecretEncrypted != "" {
 		dec, err := d.keyring.Decrypt(wh.SecretEncrypted)
 		if err != nil {
-			d.logger.Error("failed to decrypt webhook secret", "webhook_id", wh.ID, "err", err)
-			d.recordFailure(reqCtx, item, nil, 0, "crypto_error", "Failed to decrypt signing secret")
+			d.logger.Error("failed to decrypt webhook signing key", "webhook_id", wh.ID)
+			d.recordFailure(reqCtx, item, nil, 0, "crypto_error", "Failed to decrypt signing key")
 			return
 		}
 		secret = dec
@@ -201,7 +215,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, wh.URL, bytes.NewReader(item.Payload))
 	if err != nil {
-		d.recordFailure(reqCtx, item, nil, 0, "invalid_request", err.Error())
+		d.recordFailure(ctx, item, nil, 0, "invalid_request", err.Error())
 		return
 	}
 
@@ -223,7 +237,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 		} else if strings.Contains(err.Error(), "ssrf") || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "loopback") {
 			errClass = "ssrf_blocked"
 		}
-		d.recordFailure(reqCtx, item, nil, latencyMs, errClass, err.Error())
+		d.recordFailure(ctx, item, nil, latencyMs, errClass, err.Error())
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -243,7 +257,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 			ResponseSnippet: &snippet,
 			CreatedAt:       time.Now().UTC(),
 		}
-		if err := d.repo.RecordWebhookAttempt(reqCtx, attempt, "success", nil); err != nil {
+		if err := d.repo.RecordWebhookAttempt(ctx, attempt, "success", nil); err != nil {
 			d.logger.Error("failed to record successful webhook attempt", "delivery_id", item.ID, "err", err)
 		}
 		return
@@ -256,7 +270,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, item messaging.Custome
 	} else if statusCode >= 500 {
 		errClass = "server_error"
 	}
-	d.recordFailure(reqCtx, item, &statusCode, latencyMs, errClass, snippet)
+	d.recordFailure(ctx, item, &statusCode, latencyMs, errClass, snippet)
 }
 
 func (d *Dispatcher) recordFailure(
@@ -286,9 +300,17 @@ func (d *Dispatcher) recordFailure(
 	var nextAttempt *time.Time
 
 	if item.Attempts < item.MaxAttempts {
-		nextStatus = "retry"
+		// Keep status='pending' to satisfy chk_webhook_delivery_status and idx_webhook_deliveries_pending;
+		// next_attempt_at controls the exponential retry schedule.
+		nextStatus = "pending"
 		// Exponential backoff: 30s, 60s, 120s, 240s... capped at 15m
-		backoffSeconds := (1 << (item.Attempts - 1)) * 30
+		shift := item.Attempts - 1
+		if shift < 0 {
+			shift = 0
+		} else if shift > 5 {
+			shift = 5
+		}
+		backoffSeconds := (1 << shift) * 30
 		if backoffSeconds > 900 {
 			backoffSeconds = 900
 		}

@@ -196,7 +196,7 @@
 				/>
 			</div>
 
-			<select
+			<select aria-label="Select rate card"
 				bind:value={selectedCardId}
 				onchange={loadReport}
 				class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:text-white"
@@ -207,7 +207,7 @@
 				{/each}
 			</select>
 
-			<select
+			<select aria-label="Select currency"
 				bind:value={selectedCurrency}
 				onchange={loadReport}
 				class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:text-white"

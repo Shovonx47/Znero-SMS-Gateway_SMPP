@@ -45,4 +45,16 @@ func TestHashAndVerify(t *testing.T) {
 	if err != nil || wrong {
 		t.Fatalf("Verify() expected false for wrong password, got %v, err=%v", wrong, err)
 	}
+
+	// Human Hash still strictly rejects <12 char passwords, while HashRaw handles 8-char SMPP wire secrets.
+	if _, err := password.Hash("Ab3dEf7H"); err == nil {
+		t.Fatal("expected password.Hash to reject 8-char human password")
+	}
+	rawHash, err := password.HashRaw("Ab3dEf7H")
+	if err != nil {
+		t.Fatalf("HashRaw unexpected err: %v", err)
+	}
+	if ok, err := password.Verify("Ab3dEf7H", rawHash); err != nil || !ok {
+		t.Fatalf("Verify(HashRaw) failed: ok=%v err=%v", ok, err)
+	}
 }

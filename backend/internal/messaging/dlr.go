@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -208,31 +209,71 @@ func (p *DLRProcessor) ProcessDeliverSM(ctx context.Context, connectionID uuid.U
 			RawReceipt:        &rawText,
 			ReceivedAt:        time.Now().UTC(),
 		})
-		_ = p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
+		if insErr := p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
 			ConnectionID:      &connectionID,
 			ProviderMessageID: "UNKNOWN",
 			Status:            "unparsed",
 			RawReceipt:        &rawText,
 			MatchStatus:       "unmatched",
-		})
+		}); insErr != nil {
+			p.logger.Error("insert unparsed unmatched DLR failed", "conn_id", connectionID, "err", insErr)
+		}
 		return nil
 	}
 
-	// 1. Try finding message via provider lookups using candidate normalizations
+	// 1-4: Match, store raw receipt, buffer if unmatched, and apply state transition.
+	return p.ProcessParsedDLR(ctx, connectionID, receipt)
+}
+
+// ProcessParsedDLR processes a pre-parsed delivery receipt (from SMPP DeliverSM, HTTP DLR callback, or HTTP DLR poller),
+// persists the raw DLR row, buffers unmatched receipts, and drives settlement/customer notifications.
+func (p *DLRProcessor) ProcessParsedDLR(ctx context.Context, connectionID uuid.UUID, receipt *DLRReceipt) error {
+	if receipt == nil || strings.TrimSpace(receipt.ProviderMessageID) == "" {
+		rawText := ""
+		if receipt != nil {
+			rawText = receipt.RawReceipt
+		}
+		_ = p.repo.RecordRawDLR(ctx, nil, MessageDLR{
+			ConnectionID:      &connectionID,
+			ProviderMessageID: "UNKNOWN",
+			Status:            "unparsed",
+			RawReceipt:        &rawText,
+			ReceivedAt:        time.Now().UTC(),
+		})
+		if insErr := p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
+			ConnectionID:      &connectionID,
+			ProviderMessageID: "UNKNOWN",
+			Status:            "unparsed",
+			RawReceipt:        &rawText,
+			MatchStatus:       "unmatched",
+		}); insErr != nil {
+			p.logger.Error("insert unparsed unmatched DLR failed", "conn_id", connectionID, "err", insErr)
+		}
+		return fmt.Errorf("missing provider_message_id in DLR receipt")
+	}
+
+	// 1. Try finding message via provider lookups using candidate normalizations.
+	// Immediate DLRs can race slightly ahead of provider_lookups persistence; retry briefly before buffering unmatched.
 	candidates := CandidateProviderMessageIDs(receipt.ProviderMessageID)
 	var matchedMsgID *uuid.UUID
 	var matchedCreatedAt *time.Time
 
-	for _, cand := range candidates {
-		msgID, createdAt, lookupErr := p.repo.GetProviderLookup(ctx, connectionID, cand)
-		if lookupErr == nil && msgID != nil {
-			matchedMsgID = msgID
-			matchedCreatedAt = createdAt
+	for attempt := 0; attempt < 8 && matchedMsgID == nil; attempt++ {
+		for _, cand := range candidates {
+			msgID, createdAt, lookupErr := p.repo.GetProviderLookup(ctx, connectionID, cand)
+			if lookupErr == nil && msgID != nil {
+				matchedMsgID = msgID
+				matchedCreatedAt = createdAt
+				break
+			}
+		}
+		if matchedMsgID != nil || !waitDLRRetryDelay(ctx, 15*time.Millisecond) {
 			break
 		}
 	}
 
-	// 2. Durably store raw deliver_sm receipt BEFORE returning
+	// 2. Defer raw DLR persistence into the atomic state-transition tx on matched valid paths
+	// to halve PostgreSQL WAL fsync commits per DLR; fall back to standalone durable write if unmatched/conflict/invalid.
 	rawDLR := MessageDLR{
 		MessageID:         matchedMsgID,
 		MessageCreatedAt:  matchedCreatedAt,
@@ -243,30 +284,43 @@ func (p *DLRProcessor) ProcessDeliverSM(ctx context.Context, connectionID uuid.U
 		RawReceipt:        &receipt.RawReceipt,
 		ReceivedAt:        time.Now().UTC(),
 	}
-	if err := p.repo.RecordRawDLR(ctx, nil, rawDLR); err != nil {
-		p.logger.Error("durable storage of raw DLR failed", "err", err)
-	}
 
-	// 3. If unmatched, buffer for retry window
+	// 3. If unmatched, store raw DLR durably and buffer for retry window
 	if matchedMsgID == nil {
+		if err := p.repo.RecordRawDLR(ctx, nil, rawDLR); err != nil {
+			p.logger.Error("durable storage of raw DLR failed", "err", err)
+		}
 		p.logger.Info("DLR provider message ID unmatched; buffering in unmatched_dlrs",
 			"conn_id", connectionID,
 			"prov_msg_id", receipt.ProviderMessageID,
 			"stat", receipt.Stat,
 		)
-		_ = p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
+		if insErr := p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
 			ConnectionID:      &connectionID,
 			ProviderMessageID: receipt.ProviderMessageID,
 			Status:            receipt.Stat,
 			ErrorCode:         &receipt.ErrCode,
 			RawReceipt:        &receipt.RawReceipt,
 			MatchStatus:       "unmatched",
-		})
+		}); insErr != nil {
+			p.logger.Error("insert unmatched DLR failed", "conn_id", connectionID, "prov_msg_id", receipt.ProviderMessageID, "err", insErr)
+		}
 		return nil
 	}
 
-	// 4. Message matched: apply state transition and settlement
-	return p.applyDLRTransition(ctx, connectionID, *matchedMsgID, *matchedCreatedAt, receipt)
+	// 4. Message matched: apply state transition, raw DLR storage, and settlement atomically
+	return p.applyDLRTransitionWithRaw(ctx, connectionID, *matchedMsgID, *matchedCreatedAt, receipt, &rawDLR)
+}
+
+func waitDLRRetryDelay(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (p *DLRProcessor) applyDLRTransition(
@@ -276,12 +330,44 @@ func (p *DLRProcessor) applyDLRTransition(
 	createdAt time.Time,
 	receipt *DLRReceipt,
 ) error {
-	msg, _, err := p.repo.GetMessage(ctx, msgID, createdAt)
+	return p.applyDLRTransitionWithRaw(ctx, connID, msgID, createdAt, receipt, nil)
+}
+
+func (p *DLRProcessor) applyDLRTransitionWithRaw(
+	ctx context.Context,
+	connID uuid.UUID,
+	msgID uuid.UUID,
+	createdAt time.Time,
+	receipt *DLRReceipt,
+	rawDLR *MessageDLR,
+) error {
+	saveRawStandalone := func() {
+		if rawDLR != nil {
+			if rErr := p.repo.RecordRawDLR(ctx, nil, *rawDLR); rErr != nil {
+				p.logger.Error("durable storage of raw DLR failed", "err", rErr)
+			}
+		}
+	}
+
+	msg, err := p.repo.GetMessageHeader(ctx, msgID, createdAt)
 	if err != nil {
+		saveRawStandalone()
 		return fmt.Errorf("fetch matched message %s: %w", msgID, err)
 	}
 	if msg == nil {
+		saveRawStandalone()
 		return fmt.Errorf("message %s not found", msgID)
+	}
+
+	// Handle immediate-DLR carriers racing ahead of Dispatcher's StatusAccepted->StatusSubmitted commit:
+	// Wait briefly for in-flight dispatch tx to commit; if still pre-submitted, buffer into unmatched_dlrs for Reaper.
+	for attempt := 0; attempt < 8 && (msg.Status == StatusAccepted || msg.Status == StatusQueued || msg.Status == StatusSubmitting); attempt++ {
+		if !waitDLRRetryDelay(ctx, 15*time.Millisecond) {
+			break
+		}
+		if refreshed, rErr := p.repo.GetMessageHeader(ctx, msgID, createdAt); rErr == nil && refreshed != nil {
+			msg = refreshed
+		}
 	}
 
 	// Determine mapped status: check connection overrides first, then fallback to standard map
@@ -290,6 +376,7 @@ func (p *DLRProcessor) applyDLRTransition(
 	// MONOTONIC STATE GUARANTEE: Final states can never be overwritten
 	switch msg.Status {
 	case StatusDelivered, StatusUndelivered, StatusExpired, StatusFailed, StatusRejected:
+		saveRawStandalone()
 		if msg.Status != mappedStatus {
 			p.logger.Warn("conflicting DLR received for already finalized message; retaining final state",
 				"msg_id", msgID,
@@ -321,6 +408,23 @@ func (p *DLRProcessor) applyDLRTransition(
 
 	// Check valid transition from current state (e.g. submitted -> delivered, unknown -> delivered)
 	if !validTransitions[msg.Status][mappedStatus] {
+		saveRawStandalone()
+		if msg.Status == StatusAccepted || msg.Status == StatusQueued || msg.Status == StatusSubmitting {
+			p.logger.Info("DLR arrived before dispatcher finished committing submitted state; buffering for reaper retry",
+				"msg_id", msgID,
+				"from", msg.Status,
+				"to", mappedStatus,
+			)
+			_ = p.repo.InsertUnmatchedDLR(ctx, nil, UnmatchedDLR{
+				ConnectionID:      &connID,
+				ProviderMessageID: receipt.ProviderMessageID,
+				Status:            receipt.Stat,
+				ErrorCode:         &receipt.ErrCode,
+				RawReceipt:        &receipt.RawReceipt,
+				MatchStatus:       "unmatched",
+			})
+			return nil
+		}
 		p.logger.Warn("invalid state transition attempted by DLR",
 			"msg_id", msgID,
 			"from", msg.Status,
@@ -329,29 +433,41 @@ func (p *DLRProcessor) applyDLRTransition(
 		return nil
 	}
 
-	// Execute state transition & settlement inside one atomic transaction
+	// Execute raw DLR storage, state transition & settlement inside one atomic transaction
 	tx, err := p.repo.(*pgRepository).pool.Begin(ctx)
 	if err != nil {
+		saveRawStandalone()
 		return fmt.Errorf("begin DLR transition tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
+	if rawDLR != nil {
+		if err := p.repo.RecordRawDLR(ctx, tx, *rawDLR); err != nil {
+			p.logger.Error("durable storage of raw DLR in tx failed", "err", err)
+		}
+	}
+
 	reason := fmt.Sprintf("DLR receipt: stat=%s err=%s", receipt.Stat, receipt.ErrCode)
+	billingMode := msg.BillingModeSnapshot
+	if billingMode == "" {
+		billingMode = p.billingTrig
+	}
 
 	switch mappedStatus {
 	case StatusDelivered:
-		// Customer billing trigger evaluation
-		if p.billingTrig == "on_delivery" && msg.HoldID != nil {
-			idempotencyKey := fmt.Sprintf("dlr_cap_%s", msg.ID.String())
-			if _, err := p.ledgerSvc.CaptureTx(ctx, tx, *msg.HoldID, msg.SellPrice, &idempotencyKey); err != nil {
-				p.logger.Error("ledger CaptureTx on delivery failed", "msg_id", msgID, "err", err)
-				// Do not drop DLR; record settlement exception
+		// Capture hold on delivery if billing_mode == on_delivery (or fallback if somehow uncaptured for on_provider_accept)
+		if msg.HoldID != nil {
+			idempotencyKey := fmt.Sprintf("capture-%s", msg.ID.String())
+			_, capErr := p.ledgerSvc.CaptureTx(ctx, tx, *msg.HoldID, msg.SellPrice, &idempotencyKey)
+			if capErr != nil && !(billingMode == "on_provider_accept" && errors.Is(capErr, ledger.ErrHoldNotActive)) {
+				p.logger.Error("ledger CaptureTx on delivery failed", "msg_id", msgID, "err", capErr)
 				details, _ := json.Marshal(map[string]interface{}{
-					"error":   err.Error(),
-					"amount":  msg.SellPrice.String(),
-					"hold_id": msg.HoldID.String(),
+					"error":        capErr.Error(),
+					"amount":       msg.SellPrice.String(),
+					"hold_id":      msg.HoldID.String(),
+					"billing_mode": billingMode,
 				})
-				_ = p.repo.RecordSettlementException(ctx, SettlementException{
+				_ = p.repo.RecordSettlementExceptionTx(ctx, tx, SettlementException{
 					MessageID:        msgID,
 					MessageCreatedAt: createdAt,
 					CustomerOrgID:    &msg.CustomerOrgID,
@@ -367,31 +483,60 @@ func (p *DLRProcessor) applyDLRTransition(
 			msgID, createdAt, msg.Status, StatusDelivered,
 			&reason, nil, nil, nil,
 		); err != nil {
+			if errors.Is(err, ErrInvalidStateTransition) {
+				if latest, lErr := p.repo.GetMessageHeader(ctx, msgID, createdAt); lErr == nil && latest != nil && IsTerminalStatus(latest.Status) {
+					p.logger.Info("concurrent finalization of message during DLR processing; retaining final state", "msg_id", msgID, "status", latest.Status)
+					return nil
+				}
+			}
 			return fmt.Errorf("update message status to delivered: %w", err)
 		}
 
-	case StatusUndelivered, StatusFailed:
-		// Terminal failure: release hold
+	case StatusUndelivered, StatusFailed, StatusExpired:
 		if msg.HoldID != nil {
-			_ = p.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+			if billingMode == "on_provider_accept" {
+				// Message was already accepted & captured; check customer's failed_after_accept_policy snapshot.
+				if msg.FailedAfterAcceptPolicySnapshot == "refund" {
+					refundKey := fmt.Sprintf("refund-%s", msg.ID.String())
+					_, refErr := p.ledgerSvc.RefundCaptureTx(ctx, tx, *msg.HoldID, msg.SellPrice, &refundKey, reason)
+					if errors.Is(refErr, ledger.ErrHoldNotActive) {
+						// Edge case: hold wasn't captured yet, release cleanly
+						_ = p.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+					} else if refErr != nil {
+						p.logger.Error("ledger RefundCaptureTx failed", "msg_id", msgID, "err", refErr)
+						details, _ := json.Marshal(map[string]interface{}{
+							"error":   refErr.Error(),
+							"amount":  msg.SellPrice.String(),
+							"hold_id": msg.HoldID.String(),
+						})
+						_ = p.repo.RecordSettlementExceptionTx(ctx, tx, SettlementException{
+							MessageID:        msgID,
+							MessageCreatedAt: createdAt,
+							CustomerOrgID:    &msg.CustomerOrgID,
+							HoldID:           msg.HoldID,
+							ExceptionType:    "refund_failed",
+							Severity:         "critical",
+							Details:          details,
+						})
+					}
+				}
+				// Default 'keep_charge': retain the charge taken on provider acceptance.
+			} else {
+				// on_delivery: release active hold on terminal non-delivery
+				_ = p.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
+			}
 		}
 		if err := p.repo.UpdateMessageStatus(ctx, tx,
 			msgID, createdAt, msg.Status, mappedStatus,
 			&reason, nil, nil, nil,
 		); err != nil {
+			if errors.Is(err, ErrInvalidStateTransition) {
+				if latest, lErr := p.repo.GetMessageHeader(ctx, msgID, createdAt); lErr == nil && latest != nil && IsTerminalStatus(latest.Status) {
+					p.logger.Info("concurrent finalization of message during DLR processing; retaining final state", "msg_id", msgID, "status", latest.Status)
+					return nil
+				}
+			}
 			return fmt.Errorf("update message status to %s: %w", mappedStatus, err)
-		}
-
-	case StatusExpired:
-		// Expired: release hold
-		if msg.HoldID != nil {
-			_ = p.ledgerSvc.ReleaseTx(ctx, tx, *msg.HoldID)
-		}
-		if err := p.repo.UpdateMessageStatus(ctx, tx,
-			msgID, createdAt, msg.Status, StatusExpired,
-			&reason, nil, nil, nil,
-		); err != nil {
-			return fmt.Errorf("update message status to expired: %w", err)
 		}
 
 	default:
@@ -426,7 +571,7 @@ func (p *DLRProcessor) applyDLRTransition(
 		return fmt.Errorf("commit DLR transition: %w", err)
 	}
 
-	p.logger.Info("message status transitioned via DLR",
+	p.logger.Debug("message status transitioned via DLR",
 		"msg_id", msgID,
 		"from", msg.Status,
 		"to", mappedStatus,

@@ -19,15 +19,16 @@ const (
 // Principal represents an authenticated public edge caller (API Key or SMPP account).
 // Public edge callers are NOT JWT user identities; they represent a narrow credential identity.
 type Principal struct {
-	CustomerOrgID uuid.UUID
-	AccountID     *uuid.UUID // Set if SMPP account
-	APIKeyID      *uuid.UUID // Set if HTTP API key
-	Label         string
-	KeyPrefix     string
-	Scopes        []string
-	AllowedIPs    []string
-	MaxTPS        int
-	IsActive      bool
+	CustomerOrgID   uuid.UUID
+	CustomerOrgPath string
+	AccountID       *uuid.UUID // Set if SMPP account
+	APIKeyID        *uuid.UUID // Set if HTTP API key
+	Label           string
+	KeyPrefix       string
+	Scopes          []string
+	AllowedIPs      []string
+	MaxTPS          int
+	IsActive        bool
 }
 
 // HasScope checks whether the principal possesses the requested permission scope.
@@ -53,10 +54,18 @@ func (p *Principal) ToTenantContext() *tenant.Context {
 		switch s {
 		case ScopeSMSSend, "*":
 			perms["message.send"] = true
+			if s == "*" {
+				perms["message.view"] = true
+				perms["wallet.wallet.view"] = true
+				perms["inbound.view"] = true
+			}
 		case ScopeSMSRead:
 			perms["message.view"] = true
+		case ScopeSMSReadContent:
+			perms["message.content.view"] = true
 		case ScopeAccountRead:
 			perms["balance.view"] = true
+			perms["wallet.wallet.view"] = true
 		case ScopeInboundRead:
 			perms["inbound.view"] = true
 		}
@@ -65,6 +74,7 @@ func (p *Principal) ToTenantContext() *tenant.Context {
 		ActorUserID:  uuid.Nil,
 		ActorOrgID:   p.CustomerOrgID,
 		ActorOrgType: "customer",
+		ActorOrgPath: p.CustomerOrgPath,
 		Permissions:  perms,
 	}
 }

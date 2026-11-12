@@ -216,3 +216,28 @@ func TestCustomerAPIKeyGenerationAndConstantTimeVerification(t *testing.T) {
 		t.Fatal("VerifyAPIKey succeeded for wrong key")
 	}
 }
+
+func TestGenerateSMPPPassword_WireCompliance(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]bool, 32)
+	for i := 0; i < 32; i++ {
+		pw, err := secrets.GenerateSMPPPassword()
+		if err != nil {
+			t.Fatalf("GenerateSMPPPassword: %v", err)
+		}
+		if len(pw) != 8 {
+			t.Fatalf("SMPP v3.4 password must be <= 8 usable ASCII chars (9 octets incl. NUL), got %d (%q)", len(pw), pw)
+		}
+		for _, ch := range pw {
+			isAlphaNum := (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+			if !isAlphaNum {
+				t.Fatalf("unexpected char %q in SMPP password %q", ch, pw)
+			}
+		}
+		seen[pw] = true
+	}
+	if len(seen) != 32 {
+		t.Fatalf("expected 32 distinct passwords, got %d", len(seen))
+	}
+}

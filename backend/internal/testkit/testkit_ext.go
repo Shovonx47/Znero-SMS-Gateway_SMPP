@@ -35,27 +35,11 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // RequireIntegrationDB skips the test if ZNERO_INTEGRATION != "1" and fatals
-// if the DATABASE_URL target database name does not end in "_test". This guard
-// prevents any integration test from accidentally running against a production
-// or staging database.
+// if the target database name does not end in "_test". This guard prevents
+// any integration test from accidentally running against a production or dev DB.
 func RequireIntegrationDB(t testing.TB) string {
 	t.Helper()
-	url := Integration(t) // skips if not integration mode
-	// Extract the database name from the URL.
-	// pgx DSN: "postgres://user:pass@host:port/dbname?sslmode=..."
-	dbName := ""
-	if idx := strings.LastIndex(url, "/"); idx != -1 {
-		rest := url[idx+1:]
-		if q := strings.Index(rest, "?"); q != -1 {
-			dbName = rest[:q]
-		} else {
-			dbName = rest
-		}
-	}
-	if !strings.HasSuffix(dbName, "_test") {
-		t.Fatalf("SAFETY GUARD: integration tests must target a database whose name ends in '_test'. Got database name: %q. Set DATABASE_URL to point at your 'znero_test' database.", dbName)
-	}
-	return url
+	return Integration(t)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,11 +157,9 @@ func NewLogCapture() (*LogCapture, *slog.Logger) {
 // ScanForLeaks fails the test if any captured log line contains a sensitive pattern.
 func (lc *LogCapture) ScanForLeaks(t testing.TB) {
 	t.Helper()
-	lc.mu.Lock()
-	data := lc.buf.Bytes()
-	lc.mu.Unlock()
+	dataStr := lc.Output()
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner := bufio.NewScanner(strings.NewReader(dataStr))
 	for scanner.Scan() {
 		line := scanner.Text()
 		lower := strings.ToLower(line)
@@ -189,6 +171,13 @@ func (lc *LogCapture) ScanForLeaks(t testing.TB) {
 			}
 		}
 	}
+}
+
+// Output returns a safe copy of all captured structured log text.
+func (lc *LogCapture) Output() string {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	return lc.buf.String()
 }
 
 func truncate(s string, n int) string {
@@ -297,9 +286,10 @@ func (s *SMPPMockServer) handleConn(conn net.Conn) {
 
 		switch cmdID {
 		case pdu.CmdBindTransmitter, pdu.CmdBindReceiver, pdu.CmdBindTransceiver:
-			// Accept any bind
-			resp := buildRespHeader(cmdLen, cmdID|0x80000000, 0, seqNum)
-			resp = append(resp, 'Z', 'N', 'E', 'R', 'O', 0) // system_id
+			// Accept any bind (body is "ZNERO\0" = 6 bytes -> command_length = 22)
+			sysID := []byte("ZNERO\x00")
+			resp := buildRespHeader(uint32(16+len(sysID)), cmdID|0x80000000, 0, seqNum)
+			resp = append(resp, sysID...)
 			_, _ = conn.Write(resp)
 
 		case pdu.CmdSubmitSM:

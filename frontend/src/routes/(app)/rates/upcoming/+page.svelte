@@ -77,7 +77,7 @@
 		<!-- Window Selector -->
 		<div class="flex items-center gap-2">
 			<span class="text-xs font-semibold text-slate-500">Window:</span>
-			<select
+			<select aria-label="Select lookahead days"
 				bind:value={days}
 				onchange={loadUpcoming}
 				class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"

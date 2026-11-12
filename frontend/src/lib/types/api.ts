@@ -597,6 +597,65 @@ export interface ProviderMutationResponse {
 	pending_approval: boolean;
 }
 
+export interface HTTPConnectorConfig {
+	method?: string;
+	url_template?: string;
+	headers?: Record<string, string>;
+	auth_header_name?: string;
+	auth_query_param?: string;
+	body_format?: 'json' | 'form' | 'none';
+	body_template?: string;
+	request_timeout_ms?: number;
+	max_response_bytes?: number;
+	success_http_min?: number;
+	success_http_max?: number;
+	success_json_path?: string;
+	success_equals?: string;
+	provider_msg_id_path?: string;
+	provider_msg_id_regex?: string;
+	error_code_path?: string;
+	error_msg_path?: string;
+	permanent_http_codes?: number[];
+	permanent_error_codes?: string[];
+	throttle_http_codes?: number[];
+	throttle_error_codes?: string[];
+	callback_signature_header?: string;
+	callback_signature_algo?: 'hmac_sha256' | 'shared_secret' | 'none';
+	callback_msg_id_path?: string;
+	callback_status_path?: string;
+	callback_error_code_path?: string;
+	callback_status_map?: Record<string, string>;
+	poll_method?: 'GET' | 'POST';
+	poll_url_template?: string;
+	poll_interval_sec?: number;
+	poll_status_path?: string;
+	poll_error_code_path?: string;
+	poll_status_map?: Record<string, string>;
+}
+
+export interface HTTPTestSendRequest {
+	destination?: string;
+	sender_id?: string;
+	text?: string;
+	encoding?: string;
+	simulate_mode?: '' | 'accept' | 'reject' | 'throttle' | 'server_err';
+}
+
+export interface HTTPTestSendResult {
+	success: boolean;
+	status: string;
+	http_status_code?: number;
+	provider_message_id?: string;
+	error_code?: string;
+	error_message?: string;
+	latency_ms: number;
+	method: string;
+	redacted_url: string;
+	redacted_body?: string;
+	response_snippet?: string;
+	simulated: boolean;
+}
+
 export interface ProviderConnection {
 	id: string;
 	provider_id: string;
@@ -623,11 +682,15 @@ export interface ProviderConnection {
 	smpp_charset: string;
 	ip_allowlist_notes: string;
 	http_base_url: string;
-	http_auth_type: 'none' | 'basic' | 'header_token' | 'query_token';
+	http_auth_type: 'none' | 'basic' | 'bearer' | 'header_token' | 'api_key_header' | 'query_token' | 'api_key_query';
 	http_credentials?: SecretMeta;
 	http_credentials_meta?: SecretMeta;
 	http_format_notes: string;
 	http_dlr_callback_notes: string;
+	http_config?: HTTPConnectorConfig;
+	http_dlr_mode?: 'none' | 'callback' | 'polling';
+	http_dlr_secret?: SecretMeta;
+	http_dlr_callback_path?: string;
 	version: number;
 	created_at: string;
 	updated_at: string;
@@ -705,6 +768,10 @@ export interface CustomerProfile {
 	monthly_message_cap?: number;
 	allowed_countries: string[];
 	destination_policy: 'allow_all' | 'allow_listed' | 'block_listed';
+	billing_mode: 'on_provider_accept' | 'on_delivery';
+	dlr_wait_hours: number;
+	no_dlr_policy: 'retain_until_resolution' | 'immediate_release' | 'capture_at_ttl';
+	failed_after_accept_policy: 'keep_charge' | 'refund';
 	status: 'draft' | 'active' | 'suspended' | 'closed';
 	notes: string;
 	archived: boolean;

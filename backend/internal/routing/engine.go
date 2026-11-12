@@ -181,7 +181,9 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 
 	// 3. Apply routing rules (block → return early; force → pin; avoid/prefer → affect ordering)
 	ruleAction, rulesApplied, forcedConn, preferredConn, avoidedConn, blockedReason := e.applyRules(snap, req, plan, destCountryID, destOperatorID, evalTime)
-	result.RulesApplied = rulesApplied
+	if rulesApplied != nil {
+		result.RulesApplied = rulesApplied
+	}
 
 	if ruleAction == "block" {
 		result.Excluded = append(result.Excluded, ExclusionReason{
@@ -450,6 +452,12 @@ func (e *Engine) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResul
 		}
 	}
 
+	if candidates == nil {
+		candidates = make([]Candidate, 0)
+	}
+	if result.Excluded == nil {
+		result.Excluded = make([]ExclusionReason, 0)
+	}
 	result.Candidates = candidates
 	result.AllCandidates = candidates
 	result.Exclusions = result.Excluded

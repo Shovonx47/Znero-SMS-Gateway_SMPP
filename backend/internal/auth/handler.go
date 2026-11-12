@@ -412,6 +412,9 @@ func (h *Handler) SuspendUser(c *fiber.Ctx) error {
 	_ = c.BodyParser(&body)
 
 	if err := h.svc.SuspendUser(c.UserContext(), tc, id, body.Reason); err != nil {
+		if err.Error() == "user not found" {
+			return httpx.NotFound("User not found")
+		}
 		return httpx.BadRequest(err.Error())
 	}
 	return httpx.OK(c, fiber.Map{"message": "User suspended successfully"})
@@ -429,6 +432,9 @@ func (h *Handler) ActivateUser(c *fiber.Ctx) error {
 	}
 
 	if err := h.svc.ActivateUser(c.UserContext(), tc, id); err != nil {
+		if err.Error() == "user not found" {
+			return httpx.NotFound("User not found")
+		}
 		return httpx.BadRequest(err.Error())
 	}
 	return httpx.OK(c, fiber.Map{"message": "User activated successfully"})
@@ -453,6 +459,9 @@ func (h *Handler) UpdateUserRoles(c *fiber.Ctx) error {
 	}
 
 	if err := h.svc.UpdateUserRoles(c.UserContext(), tc, id, body.RoleIDs); err != nil {
+		if err.Error() == "user not found" {
+			return httpx.NotFound("User not found")
+		}
 		return httpx.BadRequest(err.Error())
 	}
 	return httpx.OK(c, fiber.Map{"message": "User roles updated successfully"})

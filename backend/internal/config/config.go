@@ -34,6 +34,8 @@ type Config struct {
 	Secrets  SecretsConfig
 	// ReadyCheckTimeout bounds each dependency check performed by /readyz.
 	ReadyCheckTimeout time.Duration
+	// AllowLoopbackInTest enables SSRF loopback exceptions ONLY outside production when explicitly configured.
+	AllowLoopbackInTest bool
 }
 
 type SecretsConfig struct {
@@ -94,6 +96,11 @@ func (s ServerConfig) Addr() string {
 
 // IsDevelopment reports whether development-only features may be enabled.
 func (c *Config) IsDevelopment() bool { return c.Env == EnvDevelopment }
+
+// AllowLoopback returns true ONLY outside production AND when ALLOW_LOOPBACK_IN_TEST is explicitly enabled.
+func (c *Config) AllowLoopback() bool {
+	return c != nil && c.AllowLoopbackInTest && c.Env != EnvProduction
+}
 
 // RedactedDatabaseURL returns the database URL with the password masked, safe for logs.
 func (d DatabaseConfig) RedactedDatabaseURL() string {
@@ -204,7 +211,12 @@ func Parse(getenv func(string) string) (*Config, error) {
 			KeyID:         p.str("SECRETS_KEY_ID", "v1"),
 			PreviousKeys:  p.str("SECRETS_ENCRYPTION_KEYS_PREVIOUS", ""),
 		},
-		ReadyCheckTimeout: p.duration("READY_CHECK_TIMEOUT", 2*time.Second),
+		ReadyCheckTimeout:   p.duration("READY_CHECK_TIMEOUT", 2*time.Second),
+		AllowLoopbackInTest: p.boolean("ALLOW_LOOPBACK_IN_TEST", false),
+	}
+
+	if cfg.Env == EnvProduction && cfg.AllowLoopbackInTest {
+		p.errs = append(p.errs, errors.New("ALLOW_LOOPBACK_IN_TEST cannot be enabled in production"))
 	}
 
 	// Log format default depends on the environment: JSON in production, text otherwise.

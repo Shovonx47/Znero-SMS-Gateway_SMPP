@@ -2,11 +2,15 @@ import { test, expect } from '@playwright/test';
 import path from 'path';
 import { execSync } from 'child_process';
 
+const testDbUrl =
+	process.env.TEST_DATABASE_URL ||
+	'postgres://znero_app:s3cretPASS@127.0.0.1:5432/znero_test?sslmode=disable';
+
 function cleanupTestCountries() {
 	try {
 		const psql = 'C:\\Program Files\\PostgreSQL\\17\\bin\\psql.exe';
 		execSync(
-			`"${psql}" -U postgres -d znero_dev -c "DELETE FROM change_requests WHERE entity_type='country' AND (proposed_data->>'name' LIKE '[E2E-TEST]%' OR proposed_data->>'name' LIKE 'DualControl Country%' OR proposed_data->>'name' LIKE 'Test Country %'); DELETE FROM countries_history WHERE country_id IN (SELECT id FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %'); DELETE FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %';"`,
+			`"${psql}" "${testDbUrl}" -c "DELETE FROM change_requests WHERE entity_type='country' AND (proposed_data->>'name' LIKE '[E2E-TEST]%' OR proposed_data->>'name' LIKE 'DualControl Country%' OR proposed_data->>'name' LIKE 'Test Country %'); DELETE FROM countries_history WHERE country_id IN (SELECT id FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %'); DELETE FROM countries WHERE name LIKE '[E2E-TEST]%' OR name LIKE 'DualControl Country%' OR name LIKE 'Test Country %';"`,
 			{ stdio: 'ignore' }
 		);
 	} catch {
@@ -36,7 +40,7 @@ function getFreeCountryCodes(): { iso2: string; iso3: string; num: string } {
 			  AND NOT EXISTS (SELECT 1 FROM countries WHERE numeric_code = n.num)
 			LIMIT 1;
 		`.replace(/\s+/g, ' ');
-		const out = execSync(`"${psql}" -U postgres -d znero_dev -t -A -c "${sql}"`).toString().trim();
+		const out = execSync(`"${psql}" "${testDbUrl}" -t -A -c "${sql}"`).toString().trim();
 		const [iso2, iso3, num] = out.split('|');
 		if (iso2 && iso3 && num) {
 			return { iso2, iso3, num };

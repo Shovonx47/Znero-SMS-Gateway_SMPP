@@ -327,7 +327,7 @@
 					<div class="flex items-center justify-between">
 						<div class="flex items-center gap-2">
 							<span class="text-slate-500 font-medium">Route Scope:</span>
-							<select
+							<select aria-label="Select direction"
 								bind:value={direction}
 								class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
 							>

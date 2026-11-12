@@ -86,6 +86,16 @@ func (s *Server) Tracker() *SessionTracker {
 	return s.tracker
 }
 
+// Addr returns the listener's bound address (useful when Addr=":0").
+func (s *Server) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return s.cfg.Addr
+	}
+	return s.listener.Addr().String()
+}
+
 // Start begins listening on the configured TCP or TLS address.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()

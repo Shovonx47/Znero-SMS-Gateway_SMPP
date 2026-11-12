@@ -283,6 +283,9 @@ func TestCustomerProfilesAndCredentialsIntegration(t *testing.T) {
 		t.Fatalf("CreateSMPPAccount failed: %v", err)
 	}
 	smppPass := issuedSMPP.PlaintextPassword
+	if len(smppPass) > 8 {
+		t.Fatalf("BUG-033 regression: SMPP v3.4 password must be <= 8 chars (max 9 octets incl NUL), got %d (%q)", len(smppPass), smppPass)
+	}
 
 	// Duplicate system_id is rejected
 	if _, err := svc.CreateSMPPAccount(ctx, e.Override, customer.CreateSMPPAccountRequest{

@@ -47,7 +47,7 @@
 			</p>
 		</div>
 		<div class="flex items-center gap-3">
-			<select
+			<select aria-label="Filter by status"
 				bind:value={statusFilter}
 				onchange={() => {
 					page = 1;

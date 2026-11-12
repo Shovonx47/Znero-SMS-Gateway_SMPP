@@ -49,6 +49,8 @@ import type {
 	ProviderConnection,
 	ProviderConnectionHistory,
 	ConnectionMutationResponse,
+	HTTPTestSendRequest,
+	HTTPTestSendResult,
 	ProviderCoverage,
 	ProviderCoverageHistory,
 	CoverageMutationResponse,
@@ -1143,9 +1145,24 @@ export class ApiClient {
 		});
 	}
 
-	async updateProviderConnectionSecret(providerId: string, connId: string, body: { smpp_password?: string; http_credentials?: string; reason: string }): Promise<{ data: ConnectionMutationResponse; requestId: string }> {
+	async updateProviderConnectionSecret(
+		providerId: string,
+		connId: string,
+		body: { smpp_password?: string; http_credentials?: string; http_dlr_secret?: string; reason: string }
+	): Promise<{ data: ConnectionMutationResponse; requestId: string }> {
 		return this.request<ConnectionMutationResponse>(`/api/v1/providers/${providerId}/connections/${connId}/secret`, {
 			method: 'PUT',
+			body: JSON.stringify(body)
+		});
+	}
+
+	async testProviderConnectionSend(
+		providerId: string,
+		connId: string,
+		body: HTTPTestSendRequest
+	): Promise<{ data: HTTPTestSendResult; requestId: string }> {
+		return this.request<HTTPTestSendResult>(`/api/v1/providers/${providerId}/connections/${connId}/test-send`, {
+			method: 'POST',
 			body: JSON.stringify(body)
 		});
 	}
@@ -1765,11 +1782,14 @@ export class ApiClient {
 	}
 
 	async getReconciliationReport(): Promise<{ data: ReconciliationReport[]; requestId: string }> {
-		return this.request<ReconciliationReport[]>('/api/v1/ledger/reconcile');
+		return this.request<ReconciliationReport[]>('/api/v1/ledger/reconciliation');
 	}
 
 	async runReconciliationRepair(): Promise<{ data: ReconciliationReport[]; requestId: string }> {
-		return this.request<ReconciliationReport[]>('/api/v1/ledger/reconcile', { method: 'POST' });
+		return this.request<ReconciliationReport[]>('/api/v1/ledger/reconciliation/run', {
+			method: 'POST',
+			body: JSON.stringify({ repair: true })
+		});
 	}
 
 	// -------------------------------------------------------------------------

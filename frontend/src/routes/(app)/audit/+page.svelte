@@ -36,7 +36,7 @@
 				page,
 				pageSize
 			});
-			logs = res.data.items;
+			logs = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -111,7 +111,7 @@
 			/>
 		</div>
 
-		<select
+		<select aria-label="Filter by module"
 			bind:value={moduleFilter}
 			onchange={() => { page = 1; loadLogs(); }}
 			class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
@@ -124,7 +124,7 @@
 			<option value="system">System</option>
 		</select>
 
-		<select
+		<select aria-label="Filter by entity type"
 			bind:value={entityTypeFilter}
 			onchange={() => { page = 1; loadLogs(); }}
 			class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"

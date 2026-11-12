@@ -3,6 +3,7 @@
 	import { apiClient, ApiClientError } from '$lib/api/client';
 	import { auth } from '$lib/auth.svelte';
 	import type {
+		ChangeRequest,
 		CustomerAPIKey,
 		CustomerProfile,
 		CustomerProfileHistory,
@@ -23,6 +24,7 @@
 	let smppAccounts = $state<CustomerSMPPAccount[]>([]);
 	let senderIds = $state<SenderID[]>([]);
 	let profileHistory = $state<CustomerProfileHistory[]>([]);
+	let pendingProfileChange = $state<ChangeRequest | null>(null);
 
 	let activeTab = $state<'profile' | 'apikeys' | 'smpp' | 'senderids' | 'history'>('profile');
 	let isLoading = $state(true);
@@ -38,12 +40,25 @@
 	let profMaxTps = $state(25);
 	let profDestPolicy = $state<'allow_all' | 'allow_listed' | 'block_listed'>('allow_all');
 	let profAllowedCountries = $state('US,GB');
+	let profBillingMode = $state<'on_provider_accept' | 'on_delivery'>('on_delivery');
+	let profDlrWaitHours = $state(24);
+	let profNoDlrPolicy = $state<'retain_until_resolution' | 'immediate_release' | 'capture_at_ttl'>('retain_until_resolution');
+	let profFailedAfterAccept = $state<'keep_charge' | 'refund'>('keep_charge');
 	let profStatus = $state<'draft' | 'active' | 'suspended' | 'closed'>('active');
 	let profTechContact = $state('');
 	let profBillingContact = $state('');
 	let profNotes = $state('');
 	let profReason = $state('');
 	let profError = $state<string | null>(null);
+
+	// Edit Billing Terms Modal (Platform-only)
+	let isBillingModalOpen = $state(false);
+	let editBillingMode = $state<'on_provider_accept' | 'on_delivery'>('on_delivery');
+	let editDlrWaitHours = $state(24);
+	let editNoDlrPolicy = $state<'retain_until_resolution' | 'immediate_release' | 'capture_at_ttl'>('retain_until_resolution');
+	let editFailedAfterAccept = $state<'keep_charge' | 'refund'>('keep_charge');
+	let editBillingReason = $state('');
+	let editBillingError = $state<string | null>(null);
 
 	// Create API Key Modal
 	let isKeyModalOpen = $state(false);
@@ -68,6 +83,8 @@
 	let smppError = $state<string | null>(null);
 
 	const canEditProfile = $derived(auth.hasPermission('customer.profile.create') || auth.hasPermission('customer.profile.edit'));
+	const isPlatformUser = $derived(auth.tenant?.actor_org_type === 'platform');
+	const canEditBillingTerms = $derived(isPlatformUser && auth.hasPermission('customer.profile.edit'));
 	const canCreateKey = $derived(auth.hasPermission('customer.apikey.create'));
 	const canCreateSmpp = $derived(auth.hasPermission('customer.smppaccount.create'));
 
@@ -77,10 +94,14 @@
 		try {
 			const profRes = await apiClient.listCustomerProfiles({ pageSize: 100 });
 			profiles = profRes.data.items || [];
-			try {
-				const orgRes = await apiClient.listOrganizations({ type: 'customer', pageSize: 100 });
-				customerOrgs = orgRes.data.items || [];
-			} catch {
+			if (auth.hasPermission('org.organization.view')) {
+				try {
+					const orgRes = await apiClient.listOrganizations({ type: 'customer', pageSize: 100 });
+					customerOrgs = orgRes.data.items || [];
+				} catch {
+					customerOrgs = [];
+				}
+			} else {
 				customerOrgs = [];
 			}
 			if (profiles.length > 0 && !selectedOrgId) {
@@ -100,9 +121,9 @@
 		selectedProfile = profiles.find((p) => p.organization_id === orgId) || null;
 		try {
 			const [kRes, sRes, sidRes] = await Promise.all([
-				apiClient.listCustomerAPIKeys(orgId),
-				apiClient.listCustomerSMPPAccounts(orgId),
-				apiClient.listSenderIDs({ organization_id: orgId, pageSize: 50 })
+				auth.hasPermission('customer.apikey.view') ? apiClient.listCustomerAPIKeys(orgId) : Promise.resolve({ data: [] as CustomerAPIKey[] }),
+				auth.hasPermission('customer.smppaccount.view') ? apiClient.listCustomerSMPPAccounts(orgId) : Promise.resolve({ data: [] as CustomerSMPPAccount[] }),
+				auth.hasPermission('customer.senderid.view') ? apiClient.listSenderIDs({ organization_id: orgId, pageSize: 50 }) : Promise.resolve({ data: { items: [] as SenderID[] } })
 			]);
 			apiKeys = kRes.data || [];
 			smppAccounts = sRes.data || [];
@@ -110,8 +131,18 @@
 			if (selectedProfile) {
 				const hRes = await apiClient.getCustomerProfileHistory(selectedProfile.id);
 				profileHistory = hRes.data || [];
+				pendingProfileChange = null;
+				if (isPlatformUser) {
+					try {
+						const crRes = await apiClient.listChangeRequests({ entity_type: 'customer_profile', status: 'pending', pageSize: 50 });
+						pendingProfileChange = (crRes.data.items || []).find((cr) => cr.entity_id === selectedProfile?.id) || null;
+					} catch {
+						pendingProfileChange = null;
+					}
+				}
 			} else {
 				profileHistory = [];
+				pendingProfileChange = null;
 			}
 		} catch {
 			// ignore partial load errors
@@ -138,6 +169,14 @@
 				default_max_tps: Number(profMaxTps),
 				destination_policy: profDestPolicy,
 				allowed_countries: countries,
+				...(isPlatformUser
+					? {
+							billing_mode: profBillingMode,
+							dlr_wait_hours: Number(profDlrWaitHours),
+							no_dlr_policy: profNoDlrPolicy,
+							failed_after_accept_policy: profFailedAfterAccept
+						}
+					: {}),
 				status: profStatus,
 				technical_contact: profTechContact.trim(),
 				billing_contact: profBillingContact.trim(),
@@ -249,6 +288,46 @@
 		if (navigator.clipboard && revealedSecretValue) {
 			navigator.clipboard.writeText(revealedSecretValue);
 			toast('Copied secret to clipboard', 'success');
+		}
+	}
+
+	function openBillingModal() {
+		if (!selectedProfile) return;
+		editBillingMode = selectedProfile.billing_mode || 'on_delivery';
+		editDlrWaitHours = selectedProfile.dlr_wait_hours || 24;
+		editNoDlrPolicy = selectedProfile.no_dlr_policy || 'retain_until_resolution';
+		editFailedAfterAccept = selectedProfile.failed_after_accept_policy || 'keep_charge';
+		editBillingReason = '';
+		editBillingError = null;
+		isBillingModalOpen = true;
+	}
+
+	async function submitUpdateBillingTerms() {
+		if (!selectedProfile) return;
+		editBillingError = null;
+		const wait = Number(editDlrWaitHours);
+		if (!Number.isInteger(wait) || wait < 1 || wait > 168) {
+			editBillingError = 'DLR Wait Hours must be a whole number between 1 and 168.';
+			return;
+		}
+		try {
+			const res = await apiClient.updateCustomerProfile(selectedProfile.id, {
+				billing_mode: editBillingMode,
+				dlr_wait_hours: wait,
+				no_dlr_policy: editNoDlrPolicy,
+				failed_after_accept_policy: editFailedAfterAccept,
+				reason: editBillingReason.trim() || 'Updated per-customer billing terms'
+			});
+			isBillingModalOpen = false;
+			if (res.data.pending_approval) {
+				toast('Billing terms change submitted for Maker-Checker approval', 'info');
+			} else {
+				toast('Customer billing terms updated', 'success');
+			}
+			await loadInitial();
+			if (selectedOrgId) await selectCustomerOrg(selectedOrgId);
+		} catch (err) {
+			editBillingError = err instanceof ApiClientError ? err.message : 'Failed to update billing terms';
 		}
 	}
 </script>
@@ -391,6 +470,56 @@
 								</div>
 							</div>
 						</div>
+
+						<!-- Billing Terms Section -->
+						<div data-testid="billing-terms-section" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900 space-y-4 text-xs">
+							<div class="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
+								<div>
+									<h3 class="text-sm font-bold text-slate-900 dark:text-white">SMS Billing Terms</h3>
+									<p class="text-[11px] text-slate-500">
+										Snapshotted per message at authorization time. Platform-managed (Maker-Checker &amp; audited).
+									</p>
+								</div>
+								{#if canEditBillingTerms}
+									<button
+										type="button"
+										data-testid="edit-billing-terms-btn"
+										onclick={openBillingModal}
+										class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-200"
+									>
+										Edit Billing Terms
+									</button>
+								{/if}
+							</div>
+
+							{#if pendingProfileChange}
+								<div data-testid="billing-terms-pending-banner" class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200 flex items-center justify-between gap-2">
+									<div>
+										<span class="font-bold">Pending Maker-Checker Approval</span> — Proposed profile/billing terms update is awaiting checker sign-off (Change ID: <span class="font-mono">{pendingProfileChange.id.slice(0, 8)}</span>).
+									</div>
+									<a href="/master-data/pending-changes" class="shrink-0 font-semibold underline">Review Queue →</a>
+								</div>
+							{/if}
+
+							<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+								<div>
+									<div class="text-slate-400">Billing Trigger Mode</div>
+									<div data-testid="term-billing-mode" class="font-mono font-bold mt-0.5">{selectedProfile.billing_mode || 'on_delivery'}</div>
+								</div>
+								<div>
+									<div class="text-slate-400">DLR Wait Window</div>
+									<div data-testid="term-dlr-wait-hours" class="font-mono font-bold mt-0.5">{selectedProfile.dlr_wait_hours || 24} hours</div>
+								</div>
+								<div>
+									<div class="text-slate-400">No-DLR Policy</div>
+									<div data-testid="term-no-dlr-policy" class="font-mono font-bold mt-0.5">{selectedProfile.no_dlr_policy || 'retain_until_resolution'}</div>
+								</div>
+								<div>
+									<div class="text-slate-400">Failed After Accept</div>
+									<div data-testid="term-failed-after-accept" class="font-mono font-bold mt-0.5">{selectedProfile.failed_after_accept_policy || 'keep_charge'}</div>
+								</div>
+							</div>
+						</div>
 					{/if}
 				{:else if activeTab === 'apikeys'}
 					<div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 space-y-4">
@@ -514,6 +643,7 @@
 							<thead>
 								<tr>
 									<th class="px-3 py-2">Version</th>
+									<th class="px-3 py-2">Billing Terms Snapshot</th>
 									<th class="px-3 py-2">Changed At</th>
 									<th class="px-3 py-2">Reason</th>
 								</tr>
@@ -522,6 +652,9 @@
 								{#each profileHistory as h}
 									<tr>
 										<td class="px-3 py-2 font-mono font-bold">v{h.version}</td>
+										<td class="px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+											{(h.snapshot?.billing_mode as string) || 'on_delivery'} • {(h.snapshot?.dlr_wait_hours as number) || 24}h • {(h.snapshot?.no_dlr_policy as string) || 'retain_until_resolution'} • {(h.snapshot?.failed_after_accept_policy as string) || 'keep_charge'}
+										</td>
 										<td class="px-3 py-2">{new Date(h.changed_at).toLocaleString()}</td>
 										<td class="px-3 py-2">{h.reason}</td>
 									</tr>
@@ -683,6 +816,36 @@
 						<input id="cprof-tps" type="number" bind:value={profMaxTps} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
 					</div>
 				</div>
+				{#if isPlatformUser}
+					<div class="grid grid-cols-2 gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+						<div>
+							<label for="cprof-bmode" class="block font-medium text-slate-700 mb-1">Billing Mode</label>
+							<select id="cprof-bmode" bind:value={profBillingMode} class="w-full rounded-lg border border-slate-300 px-2 py-1.5 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+								<option value="on_delivery">on_delivery</option>
+								<option value="on_provider_accept">on_provider_accept</option>
+							</select>
+						</div>
+						<div>
+							<label for="cprof-wait" class="block font-medium text-slate-700 mb-1">DLR Wait Hours (1..168)</label>
+							<input id="cprof-wait" type="number" min="1" max="168" bind:value={profDlrWaitHours} class="w-full rounded-lg border border-slate-300 px-2 py-1.5 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+						</div>
+						<div>
+							<label for="cprof-nodlr" class="block font-medium text-slate-700 mb-1">No-DLR Policy</label>
+							<select id="cprof-nodlr" bind:value={profNoDlrPolicy} class="w-full rounded-lg border border-slate-300 px-2 py-1.5 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+								<option value="retain_until_resolution">retain_until_resolution</option>
+								<option value="immediate_release">immediate_release</option>
+								<option value="capture_at_ttl">capture_at_ttl</option>
+							</select>
+						</div>
+						<div>
+							<label for="cprof-failed-accept" class="block font-medium text-slate-700 mb-1">Failed After Accept</label>
+							<select id="cprof-failed-accept" bind:value={profFailedAfterAccept} class="w-full rounded-lg border border-slate-300 px-2 py-1.5 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+								<option value="keep_charge">keep_charge</option>
+								<option value="refund">refund</option>
+							</select>
+						</div>
+					</div>
+				{/if}
 				<div>
 					<label for="cprof-reason" class="block font-medium text-slate-700 mb-1">Reason *</label>
 					<input id="cprof-reason" type="text" bind:value={profReason} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
@@ -697,6 +860,62 @@
 					class="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
 				>
 					Create Profile
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Edit Billing Terms Modal (Platform-only) -->
+{#if isBillingModalOpen}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+		<div class="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl dark:bg-slate-900">
+			<h2 class="text-base font-bold text-slate-900 dark:text-white">Edit Per-Customer Billing Terms</h2>
+			<p class="mt-1 text-xs text-slate-500">Applies only to future messages. In-flight messages keep their snapshotted terms.</p>
+			{#if editBillingError}
+				<div class="mt-2 rounded bg-rose-50 p-2 text-xs text-rose-700">{editBillingError}</div>
+			{/if}
+			<div class="mt-4 space-y-3 text-xs">
+				<div>
+					<label for="ebt-mode" class="block font-medium text-slate-700 mb-1">Billing Mode</label>
+					<select id="ebt-mode" bind:value={editBillingMode} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="on_delivery">on_delivery (capture on DELIVERED)</option>
+						<option value="on_provider_accept">on_provider_accept (capture on PROVIDER_ACCEPTED)</option>
+					</select>
+				</div>
+				<div>
+					<label for="ebt-wait" class="block font-medium text-slate-700 mb-1">DLR Wait Hours (1..168)</label>
+					<input id="ebt-wait" type="number" min="1" max="168" bind:value={editDlrWaitHours} class="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+				<div>
+					<label for="ebt-nodlr" class="block font-medium text-slate-700 mb-1">No-DLR Policy (for on_delivery)</label>
+					<select id="ebt-nodlr" bind:value={editNoDlrPolicy} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="retain_until_resolution">retain_until_resolution</option>
+						<option value="immediate_release">immediate_release</option>
+						<option value="capture_at_ttl">capture_at_ttl</option>
+					</select>
+				</div>
+				<div>
+					<label for="ebt-fail" class="block font-medium text-slate-700 mb-1">Failed After Accept Policy (for on_provider_accept)</label>
+					<select id="ebt-fail" bind:value={editFailedAfterAccept} class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white">
+						<option value="keep_charge">keep_charge (default wholesale rule)</option>
+						<option value="refund">refund</option>
+					</select>
+				</div>
+				<div>
+					<label for="ebt-reason" class="block font-medium text-slate-700 mb-1">Audit Reason *</label>
+					<input id="ebt-reason" type="text" bind:value={editBillingReason} placeholder="Commercial contract amendment" class="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800 dark:text-white" />
+				</div>
+			</div>
+			<div class="mt-5 flex justify-end gap-2">
+				<button type="button" onclick={() => isBillingModalOpen = false} class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700">Cancel</button>
+				<button
+					type="button"
+					data-testid="save-billing-terms-btn"
+					onclick={submitUpdateBillingTerms}
+					class="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+				>
+					Save Terms
 				</button>
 			</div>
 		</div>

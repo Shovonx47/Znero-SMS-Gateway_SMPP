@@ -76,7 +76,7 @@
 		isLoadingRows = true;
 		try {
 			const res = await apiClient.getImportJobRows(jobId, { pageSize: 50 });
-			jobRows = res.data.items;
+			jobRows = res.data.items || [];
 		} catch {
 			toast('Failed to load preview rows', 'error');
 		} finally {
@@ -136,7 +136,7 @@
 		isLoadingJobs = true;
 		try {
 			const res = await apiClient.listImportJobs({ page: jobPage, pageSize: jobPageSize });
-			jobs = res.data.items;
+			jobs = res.data.items || [];
 			totalJobs = res.data.total_count;
 		} catch {
 			// ignore fallback
@@ -233,7 +233,7 @@
 					<p class="text-[10px] text-slate-400 mt-1">Accepts CSV, XLSX, JSON (Max 50MB)</p>
 					<label class="mt-3 inline-flex cursor-pointer items-center rounded-lg bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-200">
 						Browse File
-						<input type="file" accept=".csv,.xlsx,.json" onchange={handleFileSelect} class="hidden" />
+						<input aria-label="Select input filter" type="file" accept=".csv,.xlsx,.json" onchange={handleFileSelect} class="hidden" />
 					</label>
 				</div>
 

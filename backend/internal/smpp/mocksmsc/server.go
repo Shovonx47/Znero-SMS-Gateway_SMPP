@@ -47,11 +47,20 @@ type ServerConfig struct {
 	SystemID             string
 	Password             string
 	EnforceSingleSession bool
+	ReplayUnackedDLRs    bool
 	TLS                  bool
 	InjectedError        uint32
 	Latency              time.Duration
 	DLRMode              DLRMode
 	DLRDelay             time.Duration
+}
+
+type pendingDLR struct {
+	seq   uint32
+	msgID string
+	src   string
+	dst   string
+	mode  DLRMode
 }
 
 // SubmittedMessage stores details of an ingested submit_sm.
@@ -75,6 +84,7 @@ type Server struct {
 	mu            sync.RWMutex
 	activeBinds   int
 	submitted     []SubmittedMessage
+	unackedDLRs   map[uint32]pendingDLR
 	running       bool
 	closeCh       chan struct{}
 	msgCounter    uint64
@@ -110,10 +120,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:       cfg,
-		tlsConfig: tlsCfg,
-		closeCh:   make(chan struct{}),
-		running:   true,
+		cfg:         cfg,
+		tlsConfig:   tlsCfg,
+		unackedDLRs: make(map[uint32]pendingDLR),
+		closeCh:     make(chan struct{}),
+		running:     true,
 	}, nil
 }
 
@@ -299,6 +310,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			respCmd := getBindRespCmd(hdr.CommandID)
 			_ = pdu.WritePDU(conn, pdu.NewBindResp(respCmd, pdu.StatusROK, hdr.SequenceNumber, "MOCK_SMSC"))
 
+			if s.cfg.ReplayUnackedDLRs && (hdr.CommandID == pdu.CmdBindTransceiver || hdr.CommandID == pdu.CmdBindReceiver) {
+				s.replayPendingDLRs(conn)
+			}
+
 		case pdu.CmdUnbind:
 			_ = pdu.WritePDU(conn, pdu.NewUnbindResp(pdu.StatusROK, hdr.SequenceNumber))
 			return
@@ -386,7 +401,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 
 		case pdu.CmdDeliverSMResp:
-			// Client acknowledged DLR receipt
+			if resp, ok := p.(*pdu.DeliverSMResp); ok && resp.Header.CommandStatus == pdu.StatusROK {
+				s.mu.Lock()
+				delete(s.unackedDLRs, hdr.SequenceNumber)
+				s.mu.Unlock()
+			}
 
 		default:
 			_ = pdu.WritePDU(conn, pdu.NewGenericNack(pdu.StatusRInvCmdID, hdr.SequenceNumber))
@@ -394,8 +413,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) sendDLR(w io.Writer, msgID, src, dst string, mode DLRMode) {
-	seq := atomic.AddUint32(&s.smscSeq, 1)
+func buildDeliverSMPDU(seq uint32, msgID, src, dst string, mode DLRMode) *pdu.DeliverSM {
 	dlr := pdu.NewDeliverSM(seq)
 	dlr.SourceAddr = dst // DLR comes from destination back to source
 	dlr.DestAddr = src
@@ -432,8 +450,34 @@ func (s *Server) sendDLR(w io.Writer, msgID, src, dst string, mode DLRMode) {
 		{Tag: pdu.TagReceiptedMessageId, Length: uint16(len(msgID)), Value: []byte(msgID)},
 		{Tag: pdu.TagMessageState, Length: 1, Value: []byte{msgState}},
 	}
+	return dlr
+}
 
-	_ = pdu.WritePDU(w, dlr)
+func (s *Server) sendDLR(w io.Writer, msgID, src, dst string, mode DLRMode) {
+	seq := atomic.AddUint32(&s.smscSeq, 1)
+	if s.cfg.ReplayUnackedDLRs {
+		s.mu.Lock()
+		s.unackedDLRs[seq] = pendingDLR{seq: seq, msgID: msgID, src: src, dst: dst, mode: mode}
+		s.mu.Unlock()
+	}
+	_ = pdu.WritePDU(w, buildDeliverSMPDU(seq, msgID, src, dst, mode))
+}
+
+func (s *Server) replayPendingDLRs(w io.Writer) {
+	s.mu.RLock()
+	if len(s.unackedDLRs) == 0 {
+		s.mu.RUnlock()
+		return
+	}
+	items := make([]pendingDLR, 0, len(s.unackedDLRs))
+	for _, it := range s.unackedDLRs {
+		items = append(items, it)
+	}
+	s.mu.RUnlock()
+
+	for _, it := range items {
+		_ = pdu.WritePDU(w, buildDeliverSMPDU(it.seq, it.msgID, it.src, it.dst, it.mode))
+	}
 }
 
 func getBindRespCmd(cmdID uint32) uint32 {

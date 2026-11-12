@@ -17,20 +17,23 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/znero-international/znero/backend/internal/ledger"
 	"github.com/znero-international/znero/backend/internal/messaging"
+	"github.com/znero-international/znero/backend/internal/provider"
 	"github.com/znero-international/znero/backend/internal/rating"
 	"github.com/znero-international/znero/backend/internal/secrets"
 )
 
 // EdgeHandler serves public customer-facing HTTP REST APIs (/api/v1/customer).
 type EdgeHandler struct {
-	auth      *EdgeAuthenticator
-	limiter   *CustomerLimiter
-	msgSvc    *messaging.Service
-	repo      messaging.Repository
-	ledgerSvc *ledger.Service
-	ratingSvc *rating.Service
-	keyring   *secrets.KeyRing
-	pool      *pgxpool.Pool
+	auth          *EdgeAuthenticator
+	limiter       *CustomerLimiter
+	msgSvc        *messaging.Service
+	repo          messaging.Repository
+	ledgerSvc     *ledger.Service
+	ratingSvc     *rating.Service
+	keyring       *secrets.KeyRing
+	pool          *pgxpool.Pool
+	appEnv        string
+	allowLoopback bool
 }
 
 // NewEdgeHandler constructs a new EdgeHandler.
@@ -54,6 +57,23 @@ func NewEdgeHandler(
 		keyring:   keyring,
 		pool:      pool,
 	}
+}
+
+// SetAllowLoopback configures loopback webhook exceptions strictly outside production.
+func (h *EdgeHandler) SetAllowLoopback(appEnv string, allow bool) {
+	h.appEnv = strings.TrimSpace(appEnv)
+	h.allowLoopback = allow && !strings.EqualFold(h.appEnv, "production")
+}
+
+func (h *EdgeHandler) validateWebhookURL(rawURL string) error {
+	if strings.ContainsAny(rawURL, "\r\n\x00") {
+		return fmt.Errorf("control characters are not allowed in webhook URL")
+	}
+	env := h.appEnv
+	if env == "" {
+		env = "production"
+	}
+	return provider.ValidateHTTPBaseURLWithOptions(rawURL, "http", env, "active", h.allowLoopback)
 }
 
 // RegisterRoutes mounts all customer edge endpoints onto the provided Fiber router.
@@ -191,13 +211,21 @@ type BalanceResponse struct {
 	Currency    string          `json:"currency"`
 }
 
+type BillingTermsSummary struct {
+	BillingMode             string `json:"billing_mode"`
+	DLRWaitHours            int    `json:"dlr_wait_hours"`
+	NoDLRPolicy             string `json:"no_dlr_policy"`
+	FailedAfterAcceptPolicy string `json:"failed_after_accept_policy"`
+}
+
 type AccountResponse struct {
-	OrganizationID string `json:"organization_id"`
-	DailyUsage     int64  `json:"daily_usage"`
-	DailyCap       int64  `json:"daily_cap"`
-	MonthlyUsage   int64  `json:"monthly_usage"`
-	MonthlyCap     int64  `json:"monthly_cap"`
-	TPSLimit       int    `json:"tps_limit"`
+	OrganizationID string              `json:"organization_id"`
+	DailyUsage     int64               `json:"daily_usage"`
+	DailyCap       int64               `json:"daily_cap"`
+	MonthlyUsage   int64               `json:"monthly_usage"`
+	MonthlyCap     int64               `json:"monthly_cap"`
+	TPSLimit       int                 `json:"tps_limit"`
+	BillingTerms   BillingTermsSummary `json:"billing_terms"`
 }
 
 // computeFingerprint hashes payload invariant fields for idempotency validation.
@@ -328,6 +356,8 @@ func (h *EdgeHandler) submitBulk(c *fiber.Ctx) error {
 	acceptedCount := 0
 	failedCount := 0
 
+	var validIdxs []int
+	var bulkReqs []messaging.SubmitRequest
 	for i, m := range req.Messages {
 		if strings.TrimSpace(m.Destination) == "" || strings.TrimSpace(m.SenderID) == "" || m.Text == "" {
 			results[i] = BulkItemResult{
@@ -343,9 +373,8 @@ func (h *EdgeHandler) submitBulk(c *fiber.Ctx) error {
 			continue
 		}
 
-		fingerprint := computeFingerprint(m.Destination, m.SenderID, m.Text, m.TrafficProfile)
-
-		subReq := messaging.SubmitRequest{
+		validIdxs = append(validIdxs, i)
+		bulkReqs = append(bulkReqs, messaging.SubmitRequest{
 			Destination:        m.Destination,
 			SenderID:           m.SenderID,
 			Text:               m.Text,
@@ -355,35 +384,48 @@ func (h *EdgeHandler) submitBulk(c *fiber.Ctx) error {
 			IngressChannel:     "http",
 			IngressAccountID:   principal.APIKeyID,
 			DLRRequested:       m.DLRRequested,
-			RequestFingerprint: fingerprint,
-		}
+			RequestFingerprint: computeFingerprint(m.Destination, m.SenderID, m.Text, m.TrafficProfile),
+		})
+	}
 
-		resp, err := h.msgSvc.Submit(c.Context(), principal.ToTenantContext(), subReq)
+	if len(bulkReqs) > 0 {
+		outcomes, err := h.msgSvc.SubmitBulk(c.Context(), principal.ToTenantContext(), bulkReqs)
 		if err != nil {
 			mapped := MapSubmitError(err)
-			results[i] = BulkItemResult{
-				Index:   i,
-				Success: false,
-				Error:   mapped,
+			for _, origIdx := range validIdxs {
+				results[origIdx] = BulkItemResult{Index: origIdx, Success: false, Error: mapped}
+				failedCount++
 			}
-			failedCount++
 		} else {
-			results[i] = BulkItemResult{
-				Index:   i,
-				Success: true,
-				Data: &CustomerSubmitResponse{
-					ID:              resp.MessageID.String(),
-					ClientReference: resp.ClientReference,
-					Status:          MapInternalToCustomerStatus(resp.Status).Status,
-					Destination:     resp.Destination,
-					SenderID:        resp.SenderID,
-					Parts:           resp.Parts,
-					Price:           resp.Price,
-					Currency:        resp.Currency,
-					CreatedAt:       resp.CreatedAt.UTC().Format(time.RFC3339),
-				},
+			for k, origIdx := range validIdxs {
+				out := outcomes[k]
+				if out.Err != nil {
+					results[origIdx] = BulkItemResult{
+						Index:   origIdx,
+						Success: false,
+						Error:   MapSubmitError(out.Err),
+					}
+					failedCount++
+				} else {
+					resp := out.Response
+					results[origIdx] = BulkItemResult{
+						Index:   origIdx,
+						Success: true,
+						Data: &CustomerSubmitResponse{
+							ID:              resp.MessageID.String(),
+							ClientReference: resp.ClientReference,
+							Status:          MapInternalToCustomerStatus(resp.Status).Status,
+							Destination:     resp.Destination,
+							SenderID:        resp.SenderID,
+							Parts:           resp.Parts,
+							Price:           resp.Price,
+							Currency:        resp.Currency,
+							CreatedAt:       resp.CreatedAt.UTC().Format(time.RFC3339),
+						},
+					}
+					acceptedCount++
+				}
 			}
-			acceptedCount++
 		}
 	}
 
@@ -444,27 +486,26 @@ func (h *EdgeHandler) estimateSMS(c *fiber.Ctx) error {
 		}
 	}
 
-	// Query active sell rate for customer organization
+	// Query active sell rate for customer organization using Phase 5 rating engine
 	var rate decimal.Decimal
-	var currency string
-	q := `
-		SELECT r.rate, r.currency
-		FROM rates r
-		JOIN rate_tables rt ON r.rate_table_id = rt.id
-		JOIN customer_profiles cp ON cp.rate_table_id = rt.id
-		WHERE cp.organization_id = $1
-		  AND r.status = 'active'
-		  AND r.effective_from <= now()
-		  AND (r.effective_to IS NULL OR r.effective_to > now())
-		  AND $2 LIKE r.prefix || '%'
-		ORDER BY length(r.prefix) DESC
-		LIMIT 1
-	`
-	err := h.pool.QueryRow(c.Context(), q, principal.CustomerOrgID, dest).Scan(&rate, &currency)
-	if err != nil {
+	currency := "USD"
+	msgType := "default"
+	if req.TrafficProfile != "" {
+		msgType = req.TrafficProfile
+	}
+	matched := false
+	if h.ratingSvc != nil {
+		if rm, err := h.ratingSvc.LookupByPhoneNumber(c.Context(), principal.CustomerOrgID, dest, msgType, time.Now().UTC()); err == nil && rm != nil && rm.Found {
+			rate = rm.Price
+			if rm.Currency != "" {
+				currency = rm.Currency
+			}
+			matched = true
+		}
+	}
+	if !matched {
 		// Default estimation fallback if unrated
 		rate = decimal.NewFromFloat(0.005)
-		currency = "USD"
 	}
 
 	totalPrice := rate.Mul(decimal.NewFromInt(int64(parts)))
@@ -638,16 +679,21 @@ func (h *EdgeHandler) listRates(c *fiber.Ctx) error {
 	offset := (page - 1) * pageSize
 
 	q := `
-		SELECT r.prefix, r.rate, r.currency, c.name, r.effective_from, r.effective_to
-		FROM rates r
-		JOIN rate_tables rt ON r.rate_table_id = rt.id
-		JOIN customer_profiles cp ON cp.rate_table_id = rt.id
+		SELECT COALESCE(c.iso2, ''), COALESCE(c.name, ''), COALESCE(o.name, ''), r.message_type, r.price, rc.currency_code, r.effective_from
+		FROM customer_rate_assignments cra
+		JOIN rate_cards rc ON cra.card_id = rc.id
+		JOIN rates r ON r.card_id = rc.id
 		LEFT JOIN countries c ON r.country_id = c.id
-		WHERE cp.organization_id = $1
+		LEFT JOIN operators o ON r.operator_id = o.id
+		WHERE cra.customer_org_id = $1
+		  AND cra.status = 'active'
+		  AND cra.effective_from <= now()
+		  AND (cra.effective_to IS NULL OR cra.effective_to > now())
+		  AND rc.status = 'active'
 		  AND r.status = 'active'
 		  AND r.effective_from <= now()
 		  AND (r.effective_to IS NULL OR r.effective_to > now())
-		ORDER BY r.prefix ASC
+		ORDER BY COALESCE(c.iso2, '') ASC, COALESCE(o.name, '') ASC, r.message_type ASC
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := h.pool.Query(c.Context(), q, principal.CustomerOrgID, pageSize, offset)
@@ -657,8 +703,10 @@ func (h *EdgeHandler) listRates(c *fiber.Ctx) error {
 	defer rows.Close()
 
 	type RateItem struct {
-		Prefix        string          `json:"prefix"`
+		CountryISO2   string          `json:"country_iso2"`
 		CountryName   string          `json:"country_name"`
+		OperatorName  string          `json:"operator_name,omitempty"`
+		MessageType   string          `json:"message_type"`
 		Rate          decimal.Decimal `json:"rate"`
 		Currency      string          `json:"currency"`
 		EffectiveFrom string          `json:"effective_from"`
@@ -667,13 +715,8 @@ func (h *EdgeHandler) listRates(c *fiber.Ctx) error {
 	var list []RateItem
 	for rows.Next() {
 		var it RateItem
-		var cName *string
 		var effFrom time.Time
-		var effTo *time.Time
-		if err := rows.Scan(&it.Prefix, &it.Rate, &it.Currency, &cName, &effFrom, &effTo); err == nil {
-			if cName != nil {
-				it.CountryName = *cName
-			}
+		if err := rows.Scan(&it.CountryISO2, &it.CountryName, &it.OperatorName, &it.MessageType, &it.Rate, &it.Currency, &effFrom); err == nil {
 			it.EffectiveFrom = effFrom.UTC().Format(time.RFC3339)
 			list = append(list, it)
 		}
@@ -695,6 +738,8 @@ func (h *EdgeHandler) getAccount(c *fiber.Ctx) error {
 		return c.Status(http.StatusInternalServerError).JSON(ErrServiceUnavailable)
 	}
 
+	terms, _ := h.repo.GetCustomerBillingTerms(c.Context(), principal.CustomerOrgID, messaging.DefaultCustomerBillingTerms())
+
 	return c.Status(http.StatusOK).JSON(AccountResponse{
 		OrganizationID: principal.CustomerOrgID.String(),
 		DailyUsage:     daily,
@@ -702,6 +747,12 @@ func (h *EdgeHandler) getAccount(c *fiber.Ctx) error {
 		MonthlyUsage:   monthly,
 		MonthlyCap:     monthlyCap,
 		TPSLimit:       tps,
+		BillingTerms: BillingTermsSummary{
+			BillingMode:             terms.BillingMode,
+			DLRWaitHours:            terms.DLRWaitHours,
+			NoDLRPolicy:             terms.NoDLRPolicy,
+			FailedAfterAcceptPolicy: terms.FailedAfterAcceptPolicy,
+		},
 	})
 }
 
@@ -730,14 +781,15 @@ func (h *EdgeHandler) createWebhook(c *fiber.Ctx) error {
 		return c.Status(ErrValidation.HTTPStatus).JSON(ErrValidation)
 	}
 
-	url := strings.TrimSpace(req.URL)
-	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+	webhookURL := strings.TrimSpace(req.URL)
+	if err := h.validateWebhookURL(webhookURL); err != nil {
 		return c.Status(ErrValidation.HTTPStatus).JSON(&PublicEdgeError{
 			HTTPStatus: http.StatusBadRequest,
 			Code:       "invalid_webhook_url",
-			Message:    "Webhook URL must be a valid HTTP or HTTPS endpoint",
+			Message:    "Webhook URL must be a valid external HTTPS endpoint and not target private, loopback, or metadata networks",
 		})
 	}
+	url := webhookURL
 
 	if len(req.Events) == 0 {
 		req.Events = []string{"message.delivered", "message.failed"}
@@ -748,7 +800,7 @@ func (h *EdgeHandler) createWebhook(c *fiber.Ctx) error {
 	_, _ = rand.Read(secBytes)
 	plaintextSecret := hex.EncodeToString(secBytes)
 
-	// Encrypt secret via KMS Keyring for at-rest protection
+	// Encrypt secret via secrets KeyRing for at-rest protection
 	encryptedSec, err := h.keyring.Encrypt(plaintextSecret)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrServiceUnavailable)
@@ -850,13 +902,29 @@ func (h *EdgeHandler) updateWebhook(c *fiber.Ctx) error {
 	}
 
 	if req.URL != "" {
-		w.URL = strings.TrimSpace(req.URL)
+		nextURL := strings.TrimSpace(req.URL)
+		if err := h.validateWebhookURL(nextURL); err != nil {
+			return c.Status(ErrValidation.HTTPStatus).JSON(&PublicEdgeError{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       "invalid_webhook_url",
+				Message:    "Webhook URL must be a valid external HTTPS endpoint and not target private, loopback, or metadata networks",
+			})
+		}
+		w.URL = nextURL
 	}
 	if len(req.Events) > 0 {
 		w.Events = req.Events
 	}
 	if req.Status != "" {
-		w.Status = req.Status
+		st := strings.TrimSpace(req.Status)
+		if st != "active" && st != "disabled" {
+			return c.Status(ErrValidation.HTTPStatus).JSON(&PublicEdgeError{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       "invalid_webhook_status",
+				Message:    "Webhook status must be 'active' or 'disabled'",
+			})
+		}
+		w.Status = st
 	}
 
 	if err := h.repo.UpdateWebhook(c.Context(), w); err != nil {
@@ -878,6 +946,14 @@ func (h *EdgeHandler) deleteWebhook(c *fiber.Ctx) error {
 	principal := c.Locals("edge_principal").(*Principal)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
+		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Webhook not found"})
+	}
+
+	w, err := h.repo.GetWebhook(c.Context(), id, principal.CustomerOrgID)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrServiceUnavailable)
+	}
+	if w == nil {
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Webhook not found"})
 	}
 
@@ -930,6 +1006,14 @@ func (h *EdgeHandler) listWebhookDeliveries(c *fiber.Ctx) error {
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Webhook not found"})
 	}
 
+	w, err := h.repo.GetWebhook(c.Context(), id, principal.CustomerOrgID)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(ErrServiceUnavailable)
+	}
+	if w == nil {
+		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "Webhook not found"})
+	}
+
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	pageSize, _ := strconv.Atoi(c.Query("limit", "20"))
 	status := c.Query("status")
@@ -937,6 +1021,9 @@ func (h *EdgeHandler) listWebhookDeliveries(c *fiber.Ctx) error {
 	deliveries, total, err := h.repo.ListWebhookDeliveries(c.Context(), principal.CustomerOrgID, &id, status, page, pageSize)
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).JSON(ErrServiceUnavailable)
+	}
+	if deliveries == nil {
+		deliveries = []messaging.CustomerWebhookDelivery{}
 	}
 
 	return c.Status(http.StatusOK).JSON(fiber.Map{

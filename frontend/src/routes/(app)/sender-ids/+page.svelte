@@ -71,10 +71,14 @@
 			} catch {
 				profiles = [];
 			}
-			try {
-				const orgRes = await apiClient.listOrganizations({ type: 'customer', pageSize: 100 });
-				customerOrgs = orgRes.data.items || [];
-			} catch {
+			if (auth.hasPermission('org.organization.view')) {
+				try {
+					const orgRes = await apiClient.listOrganizations({ type: 'customer', pageSize: 100 });
+					customerOrgs = orgRes.data.items || [];
+				} catch {
+					customerOrgs = [];
+				}
+			} else {
 				customerOrgs = [];
 			}
 		} catch (err) {

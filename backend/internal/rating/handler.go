@@ -738,6 +738,15 @@ func (h *Handler) ExportRates(c *fiber.Ctx) error {
 // ASSIGNMENT HANDLERS
 // -----------------------------------------------------------------------------
 
+func mapRatingErr(err error) error {
+	switch {
+	case errors.Is(err, ErrPlatformOnlyResource), errors.Is(err, ErrCrossTenantAccess), errors.Is(err, ErrPermissionDenied):
+		return fiber.NewError(fiber.StatusForbidden, err.Error())
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+}
+
 func (h *Handler) ListAssignments(c *fiber.Ctx) error {
 	tc, err := getTC(c)
 	if err != nil {
@@ -757,14 +766,14 @@ func (h *Handler) ListAssignments(c *fiber.Ctx) error {
 	if c.Query("is_reseller") == "true" {
 		assignments, err := h.svc.ListResellerCostAssignments(c.UserContext(), tc, targetOrgID)
 		if err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			return mapRatingErr(err)
 		}
 		return c.JSON(assignments)
 	}
 
 	assignments, err := h.svc.ListCustomerAssignments(c.UserContext(), tc, targetOrgID)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return mapRatingErr(err)
 	}
 	return c.JSON(assignments)
 }
@@ -776,6 +785,9 @@ func (h *Handler) CreateAssignment(c *fiber.Ctx) error {
 	}
 	if tc == nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "unauthorized")
+	}
+	if !tc.IsPlatformOrg() || !tc.HasPermission("rate.assignment.create") {
+		return fiber.NewError(fiber.StatusForbidden, ErrPermissionDenied.Error())
 	}
 
 	var req struct {
@@ -793,7 +805,7 @@ func (h *Handler) CreateAssignment(c *fiber.Ctx) error {
 	if req.IsReseller {
 		res, err := h.svc.CreateResellerCostAssignment(c.UserContext(), tc, req.TargetOrgID, req.CardID, req.EffectiveFrom, req.EffectiveTo, req.Reason)
 		if err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			return mapRatingErr(err)
 		}
 		if res.PendingChange != nil {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -806,7 +818,7 @@ func (h *Handler) CreateAssignment(c *fiber.Ctx) error {
 
 	res, err := h.svc.CreateAssignment(c.UserContext(), tc, req.TargetOrgID, req.CardID, req.EffectiveFrom, req.EffectiveTo, req.Reason)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return mapRatingErr(err)
 	}
 	if res.PendingChange != nil {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -822,6 +834,9 @@ func (h *Handler) DeactivateAssignment(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if !tc.IsPlatformOrg() || !tc.HasPermission("rate.assignment.update") {
+		return fiber.NewError(fiber.StatusForbidden, ErrPermissionDenied.Error())
+	}
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
@@ -835,7 +850,7 @@ func (h *Handler) DeactivateAssignment(c *fiber.Ctx) error {
 
 	res, err := h.svc.DeactivateAssignment(c.UserContext(), tc, id, req.IsCustomer, req.Reason)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return mapRatingErr(err)
 	}
 	if res.PendingChange != nil {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -851,23 +866,18 @@ func (h *Handler) GetAssignmentHistory(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	_ = tc
+	if tc == nil || tc.IsCustomerOrg() || !tc.HasPermission("rate.assignment.read") {
+		return fiber.NewError(fiber.StatusForbidden, ErrPermissionDenied.Error())
+	}
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
 
 	isCustomer := c.Query("type") != "reseller"
-	if isCustomer {
-		hist, err := h.svc.repo.ListCustomerAssignmentHistory(c.UserContext(), id)
-		if err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
-		}
-		return c.JSON(hist)
-	}
-	hist, err := h.svc.repo.ListResellerCostAssignmentHistory(c.UserContext(), id)
+	hist, err := h.svc.GetAssignmentHistory(c.UserContext(), tc, id, isCustomer)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return mapRatingErr(err)
 	}
 	return c.JSON(hist)
 }
@@ -954,6 +964,9 @@ func (h *Handler) CheckMargin(c *fiber.Ctx) error {
 	}
 	if tc == nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "unauthorized")
+	}
+	if !tc.IsPlatformOrg() || !tc.HasPermission("rate.margin.view") {
+		return fiber.NewError(fiber.StatusForbidden, ErrPlatformOnlyResource.Error())
 	}
 
 	cardID, err := uuid.Parse(c.Query("card_id"))

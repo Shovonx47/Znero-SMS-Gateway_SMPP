@@ -14,6 +14,11 @@ import (
 	"github.com/znero-international/znero/backend/internal/smpp/pdu"
 )
 
+// ErrAmbiguousOutcome indicates submit_sm was written onto the carrier socket
+// but the session/connection terminated before submit_sm_resp arrived.
+// Callers MUST treat this as SendStatusUnknown and NEVER auto-resend.
+var ErrAmbiguousOutcome = errors.New("submit_sm written to wire; connection closed before submit_sm_resp")
+
 // DLRHandler is called when a deliver_sm PDU is received from the upstream carrier.
 type DLRHandler func(ctx context.Context, connectionID uuid.UUID, deliver *pdu.DeliverSM) error
 
@@ -215,7 +220,7 @@ func (s *Session) Submit(ctx context.Context, sm *pdu.SubmitSM) (*pdu.SubmitSMRe
 	case resp, ok := <-respCh:
 		if !ok || resp == nil {
 			s.recordFailure("connection reset during wait")
-			return nil, fmt.Errorf("connection closed while waiting for submit_sm_resp")
+			return nil, fmt.Errorf("%w: connection closed while waiting for submit_sm_resp", ErrAmbiguousOutcome)
 		}
 		if resp.Header.CommandStatus == pdu.StatusROK {
 			s.recordSuccess()
@@ -232,7 +237,7 @@ func (s *Session) Submit(ctx context.Context, sm *pdu.SubmitSM) (*pdu.SubmitSMRe
 
 	case <-s.closeCh:
 		s.recordFailure("session_closed")
-		return nil, fmt.Errorf("session closed while waiting for submit_sm_resp")
+		return nil, fmt.Errorf("%w: session closed while waiting for submit_sm_resp", ErrAmbiguousOutcome)
 	}
 }
 
@@ -346,13 +351,15 @@ func (s *Session) readLoop() {
 			deliver, ok := p.(*pdu.DeliverSM)
 			if ok {
 				// Persist raw DLR receipt BEFORE sending deliver_sm_resp
+				respStatus := pdu.StatusROK
 				if s.cfg.DLRHandler != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					_ = s.cfg.DLRHandler(ctx, s.cfg.ConnectionID, deliver)
+					if err := s.cfg.DLRHandler(ctx, s.cfg.ConnectionID, deliver); err != nil {
+						respStatus = pdu.StatusRSysErr
+					}
 					cancel()
 				}
-				// Reply with deliver_sm_resp OK
-				_ = pdu.WritePDU(s.conn, pdu.NewDeliverSMResp(pdu.StatusROK, hdr.SequenceNumber))
+				_ = pdu.WritePDU(s.conn, pdu.NewDeliverSMResp(respStatus, hdr.SequenceNumber))
 			}
 
 		case pdu.CmdUnbind:

@@ -53,8 +53,8 @@
 				apiClient.listCountries({ pageSize: 500 }),
 				apiClient.listOperators({ pageSize: 500 })
 			]);
-			countries = cRes.data.items;
-			operators = oRes.data.items;
+			countries = cRes.data.items || [];
+			operators = oRes.data.items || [];
 		} catch {
 			// ignore fallback
 		}
@@ -71,7 +71,7 @@
 				page,
 				pageSize
 			});
-			rules = res.data.items;
+			rules = res.data.items || [];
 			totalCount = res.data.total_count;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -256,7 +256,7 @@
 				/>
 			</div>
 
-			<select
+			<select aria-label="Select test direction"
 				bind:value={testDirection}
 				class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
 			>
@@ -306,7 +306,7 @@
 	<!-- Filter Bar -->
 	<div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
 		<div class="flex flex-wrap items-center gap-3">
-			<select
+			<select aria-label="Filter by scope"
 				bind:value={scopeFilter}
 				onchange={() => { page = 1; loadRules(); }}
 				class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
@@ -317,7 +317,7 @@
 				<option value="operator">Operator</option>
 			</select>
 
-			<select
+			<select aria-label="Filter by status"
 				bind:value={statusFilter}
 				onchange={() => { page = 1; loadRules(); }}
 				class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

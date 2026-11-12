@@ -116,6 +116,11 @@ func TestIntegrationPublishAndConsumeRoundTrip(t *testing.T) {
 	if err := prod.EnsureTopic(ctx, topic, 1, 1); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dcancel()
+		_ = prod.DeleteTopic(dctx, topic)
+	})
 	if err := prod.EnsureTopic(ctx, topic, 1, 1); err != nil {
 		t.Fatalf("EnsureTopic must be idempotent: %v", err)
 	}

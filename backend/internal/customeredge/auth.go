@@ -76,6 +76,9 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 	rawKey = strings.TrimSpace(rawKey)
 	if !strings.HasPrefix(rawKey, "znk_live_") || len(rawKey) < 20 {
 		// Key is too short to have a meaningful prefix; use IP alone for lockout
+		if a.isLockedOut(clientIP) {
+			return nil, ErrUnauthorized
+		}
 		a.recordFailure(clientIP)
 		return nil, ErrUnauthorized
 	}
@@ -115,7 +118,7 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 	query := `
 		SELECT k.id, k.organization_id, k.label, k.key_prefix, k.key_hash,
 		       k.scopes, k.ip_allowlist, k.status, k.expires_at,
-		       o.status, o.type, coalesce(cp.tps_limit, 50)
+		       o.status, o.type, o.path, coalesce(cp.default_max_tps, 50)
 		FROM customer_api_keys k
 		JOIN organizations o ON o.id = k.organization_id
 		LEFT JOIN customer_profiles cp ON cp.organization_id = o.id
@@ -133,13 +136,14 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 		expiresAt   *time.Time
 		orgStatus   string
 		orgType     string
+		orgPath     string
 		tpsLimit    int
 	)
 
 	err := a.pool.QueryRow(ctx, query, keyHash).Scan(
 		&keyID, &orgID, &label, &keyPrefix, &dbHash,
 		&scopes, &ipAllowlist, &keyStatus, &expiresAt,
-		&orgStatus, &orgType, &tpsLimit,
+		&orgStatus, &orgType, &orgPath, &tpsLimit,
 	)
 	if err != nil {
 		a.recordFailure(lockoutKey)
@@ -171,14 +175,15 @@ func (a *EdgeAuthenticator) AuthenticateAPIKey(ctx context.Context, rawKey strin
 	}
 
 	p := &Principal{
-		CustomerOrgID: orgID,
-		APIKeyID:      &keyID,
-		Label:         label,
-		KeyPrefix:     keyPrefix,
-		Scopes:        scopes,
-		AllowedIPs:    ipAllowlist,
-		MaxTPS:        tpsLimit,
-		IsActive:      true,
+		CustomerOrgID:   orgID,
+		CustomerOrgPath: orgPath,
+		APIKeyID:        &keyID,
+		Label:           label,
+		KeyPrefix:       keyPrefix,
+		Scopes:          scopes,
+		AllowedIPs:      ipAllowlist,
+		MaxTPS:          tpsLimit,
+		IsActive:        true,
 	}
 
 	// 8. Cache valid principal
@@ -208,14 +213,17 @@ func (a *EdgeAuthenticator) isLockedOut(identifier string) bool {
 	a.failMu.Lock()
 	defer a.failMu.Unlock()
 	rec, exists := a.failures[identifier]
-	if !exists {
+	if !exists || rec.lockoutUntl.IsZero() {
 		return false
 	}
 	if time.Now().Before(rec.lockoutUntl) {
 		return true
 	}
-	// Lockout expired: reset
-	delete(a.failures, identifier)
+	if rec.count >= 10 {
+		delete(a.failures, identifier)
+	} else {
+		rec.lockoutUntl = time.Time{}
+	}
 	return false
 }
 

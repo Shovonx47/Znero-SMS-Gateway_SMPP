@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,7 @@ type ConnectionManager struct {
 	sessions   map[uuid.UUID]*Session
 	lockConns  map[uuid.UUID]*pgxpool.Conn // holds the PostgreSQL advisory lock per connection
 	bindStates map[uuid.UUID]*bindState
+	bindLocks  map[uuid.UUID]*sync.Mutex // serializes concurrent cold-bind attempts per connection
 	closed     bool
 }
 
@@ -96,47 +98,136 @@ func NewConnectionManager(cfg ManagerConfig) *ConnectionManager {
 		sessions:   make(map[uuid.UUID]*Session),
 		lockConns:  make(map[uuid.UUID]*pgxpool.Conn),
 		bindStates: make(map[uuid.UUID]*bindState),
+		bindLocks:  make(map[uuid.UUID]*sync.Mutex),
 	}
+}
+
+func (m *ConnectionManager) getBindLock(connID uuid.UUID) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.bindLocks[connID]
+	if !ok {
+		l = &sync.Mutex{}
+		m.bindLocks[connID] = l
+	}
+	return l
+}
+
+// CanSendOnConnection checks whether this process holds or can acquire the cluster advisory lock for connID.
+// Returning false when another peer dispatcher already holds the advisory lock prevents unnecessary retry/failover burn.
+func (m *ConnectionManager) CanSendOnConnection(ctx context.Context, connID uuid.UUID) bool {
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return true
+	}
+	if m.sessions[connID] != nil || m.lockConns[connID] != nil {
+		m.mu.RUnlock()
+		return true
+	}
+	m.mu.RUnlock()
+
+	if m.cfg.DB == nil {
+		return true
+	}
+
+	bindMu := m.getBindLock(connID)
+	bindMu.Lock()
+	defer bindMu.Unlock()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return true
+	}
+	if m.sessions[connID] != nil || m.lockConns[connID] != nil {
+		m.mu.Unlock()
+		return true
+	}
+	m.mu.Unlock()
+
+	lockConn, err := m.acquireAdvisoryLock(ctx, connID)
+	if err != nil {
+		return !strings.Contains(err.Error(), "held by another process")
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		k1, k2 := uuidToLockKeys(connID)
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1, $2)", k1, k2)
+		lockConn.Release()
+		return true
+	}
+	if existing, exists := m.lockConns[connID]; exists && existing != nil {
+		m.mu.Unlock()
+		k1, k2 := uuidToLockKeys(connID)
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1, $2)", k1, k2)
+		lockConn.Release()
+		return true
+	}
+	m.lockConns[connID] = lockConn
+	m.mu.Unlock()
+	return true
 }
 
 // GetSession returns an active bound SMPP session for the connection, establishing or refreshing it if needed.
 func (m *ConnectionManager) GetSession(ctx context.Context, connID uuid.UUID) (*Session, error) {
-	m.mu.Lock()
+	m.mu.RLock()
 	if m.closed {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("connection manager is closed")
 	}
+	m.mu.RUnlock()
 
-	// 1. Fetch connection configuration and verify eligibility
+	// 1. Fetch connection configuration and verify eligibility outside manager lock
 	connCfg, err := m.fetchConnectionConfig(ctx, connID)
 	if err != nil {
-		m.mu.Unlock()
 		return nil, fmt.Errorf("fetch connection config %s: %w", connID, err)
 	}
 
 	// 2. Kill-switch and active status checks
 	if connCfg.KillSwitched {
-		// Close existing session immediately without restarting
+		m.mu.Lock()
 		m.closeSessionLocked(connID)
 		m.mu.Unlock()
 		return nil, fmt.Errorf("connection %s is disabled by kill switch: %s", connID, connCfg.KillSwitchReason)
 	}
 
 	if connCfg.Status != "active" || connCfg.Archived {
+		m.mu.Lock()
 		m.closeSessionLocked(connID)
 		m.mu.Unlock()
 		return nil, fmt.Errorf("connection %s is not active (status=%s, archived=%v)", connID, connCfg.Status, connCfg.Archived)
 	}
 
-	// 3. Check existing session
+	// 3. Fast path: return active bound session
+	m.mu.RLock()
 	existingSession, exists := m.sessions[connID]
+	m.mu.RUnlock()
+	if exists && existingSession != nil && existingSession.Stats().Bound {
+		return existingSession, nil
+	}
+
+	// 4. Slow path: serialize concurrent bind attempts per connection ID
+	bindMu := m.getBindLock(connID)
+	bindMu.Lock()
+	defer bindMu.Unlock()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("connection manager is closed")
+	}
+
+	// Re-check existing session after acquiring per-connection bind lock
+	existingSession, exists = m.sessions[connID]
 	if exists && existingSession != nil {
 		stats := existingSession.Stats()
 		if stats.Bound {
 			m.mu.Unlock()
 			return existingSession, nil
 		}
-		// Session exists but is unbound / dead: clean it up
 		m.closeSessionLocked(connID)
 	}
 
@@ -172,6 +263,7 @@ func (m *ConnectionManager) GetSession(ctx context.Context, connID uuid.UUID) (*
 	if m.cfg.Decrypter != nil && connCfg.SMPPPasswordEncrypted != "" {
 		decrypted, err := m.cfg.Decrypter.Decrypt(connCfg.SMPPPasswordEncrypted)
 		if err != nil {
+			m.releaseAdvisoryLock(connID)
 			return nil, fmt.Errorf("decrypt smpp password for %s: %w", connID, err)
 		}
 		passwordPlain = decrypted
@@ -192,6 +284,7 @@ func (m *ConnectionManager) GetSession(ctx context.Context, connID uuid.UUID) (*
 	targetAddr := fmt.Sprintf("%s:%d", connCfg.SMPPHost, connCfg.SMPPPort)
 	conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
+		m.releaseAdvisoryLock(connID)
 		m.recordBindFailure(connID, err)
 		return nil, fmt.Errorf("dial upstream carrier %s (%s): %w", connCfg.Name, targetAddr, err)
 	}
@@ -215,12 +308,19 @@ func (m *ConnectionManager) GetSession(ctx context.Context, connID uuid.UUID) (*
 
 	if err := session.Bind(bindCtx); err != nil {
 		_ = session.Close()
+		m.releaseAdvisoryLock(connID)
 		m.recordBindFailure(connID, err)
 		return nil, fmt.Errorf("bind upstream carrier %s (%s): %w", connCfg.Name, targetAddr, err)
 	}
 
-	// 9. Successfully bound: reset backoff state and store session
+	// 9. Successfully bound: reset backoff state and store session (unless manager closed meanwhile)
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		_ = session.Close()
+		m.releaseAdvisoryLock(connID)
+		return nil, fmt.Errorf("connection manager is closed")
+	}
 	m.bindStates[connID] = &bindState{} // reset failures
 	m.sessions[connID] = session
 	m.mu.Unlock()
@@ -380,7 +480,21 @@ func (m *ConnectionManager) Close() error {
 	for connID := range m.sessions {
 		m.closeSessionLocked(connID)
 	}
+	for connID := range m.lockConns {
+		m.closeSessionLocked(connID)
+	}
 	return nil
+}
+
+func (m *ConnectionManager) releaseAdvisoryLock(connID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lockConn, exists := m.lockConns[connID]; exists && lockConn != nil {
+		k1, k2 := uuidToLockKeys(connID)
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1, $2)", k1, k2)
+		lockConn.Release()
+		delete(m.lockConns, connID)
+	}
 }
 
 func (m *ConnectionManager) closeSessionLocked(connID uuid.UUID) {

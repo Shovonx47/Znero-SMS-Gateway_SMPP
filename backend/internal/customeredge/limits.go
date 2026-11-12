@@ -55,6 +55,15 @@ func (cl *CustomerLimiter) AllowN(customerOrgID uuid.UUID, maxTPS int, count int
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
+	newLimit := float64(maxTPS)
+	if tb.rate != newLimit || tb.capacity != newLimit {
+		tb.rate = newLimit
+		tb.capacity = newLimit
+		if tb.tokens > tb.capacity {
+			tb.tokens = tb.capacity
+		}
+	}
+
 	now := time.Now()
 	elapsed := now.Sub(tb.lastRefill).Seconds()
 	tb.tokens += elapsed * tb.rate

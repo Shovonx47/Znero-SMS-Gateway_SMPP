@@ -44,7 +44,7 @@
 				page,
 				pageSize
 			});
-			users = res.data.items;
+			users = res.data.items || [];
 			totalCount = res.data.total;
 		} catch (err) {
 			if (err instanceof ApiClientError) {
@@ -201,7 +201,7 @@
 			/>
 		</div>
 
-		<select
+		<select aria-label="Filter by status"
 			bind:value={statusFilter}
 			onchange={() => { page = 1; loadUsers(); }}
 			class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"

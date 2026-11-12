@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { apiClient } from '$lib/api/client';
+	import { auth } from '$lib/auth.svelte';
+import { apiClient } from '$lib/api/client';
 	import type { Organization, SimulateResult, SnapshotStatus } from '$lib/types/api';
 	import Loading from '$lib/components/Loading.svelte';
 	import Empty from '$lib/components/Empty.svelte';
@@ -23,7 +24,9 @@
 	async function loadInitData() {
 		try {
 			const [orgRes, snapRes] = await Promise.all([
-				apiClient.listOrganizations({ pageSize: 100, type: 'customer' }),
+				auth.hasPermission('org.organization.view')
+					? apiClient.listOrganizations({ pageSize: 100, type: 'customer' })
+					: Promise.resolve({ data: { items: [] as Organization[] } }),
 				apiClient.getSnapshotStatus()
 			]);
 			customers = orgRes.data.items || [];
@@ -99,7 +102,7 @@
 				<span>In-Memory Snapshot:</span>
 				<span class="font-mono font-bold text-slate-900 dark:text-white">{snapshotStatus.plans_count} plans</span>
 				<span>•</span>
-				<span class="font-mono">{snapshotStatus.age_ms}ms old</span>
+				<span class="font-mono">{snapshotStatus.age_ms ?? Math.round(((snapshotStatus as any).age_seconds ?? 0) * 1000)}ms old</span>
 			</div>
 		{/if}
 	</div>
@@ -229,11 +232,11 @@
 						</div>
 						<div>
 							<div class="text-slate-500">Candidates</div>
-							<div class="font-bold text-slate-900 dark:text-white">{result.resolve.candidates.length} eligible</div>
+							<div class="font-bold text-slate-900 dark:text-white">{(result.resolve.candidates ?? []).length} eligible</div>
 						</div>
 						<div>
 							<div class="text-slate-500">Exclusions</div>
-							<div class="font-bold text-rose-600 dark:text-rose-400">{result.resolve.excluded.length} disqualified</div>
+							<div class="font-bold text-rose-600 dark:text-rose-400">{(result.resolve.excluded ?? []).length} disqualified</div>
 						</div>
 					</div>
 				</div>
@@ -252,7 +255,7 @@
 			</div>
 
 			<!-- Candidates Table -->
-			{#if result.resolve.candidates.length > 0}
+			{#if (result.resolve.candidates ?? []).length > 0}
 				<div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
 					<h3 class="text-sm font-bold text-slate-900 dark:text-white">Ordered Candidates (Primary + Failovers)</h3>
 					<div class="overflow-x-auto">
@@ -270,7 +273,7 @@
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-								{#each result.resolve.candidates as c, idx}
+								{#each result.resolve.candidates ?? [] as c, idx}
 									<tr class={idx === 0 ? 'bg-indigo-50/40 dark:bg-indigo-950/20 font-semibold' : ''}>
 										<td class="px-4 py-2.5 font-mono text-xs">
 											#{idx + 1}
@@ -308,9 +311,9 @@
 			{/if}
 
 			<!-- Excluded Connections Table -->
-			{#if result.resolve.excluded.length > 0}
+			{#if (result.resolve.excluded ?? []).length > 0}
 				<div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
-					<h3 class="text-sm font-bold text-slate-900 dark:text-white">Disqualified Connections ({result.resolve.excluded.length})</h3>
+					<h3 class="text-sm font-bold text-slate-900 dark:text-white">Disqualified Connections ({(result.resolve.excluded ?? []).length})</h3>
 					<div class="overflow-x-auto">
 						<table class="w-full text-left text-sm text-slate-600 dark:text-slate-400">
 							<thead class="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
@@ -321,7 +324,7 @@
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-								{#each result.resolve.excluded as ex}
+								{#each result.resolve.excluded ?? [] as ex}
 									<tr>
 										<td class="px-4 py-2.5 text-xs font-mono text-slate-900 dark:text-white">
 											{ex.connection_name || (ex.connection_id ? ex.connection_id.slice(0, 8) + '...' : 'Plan Level')}

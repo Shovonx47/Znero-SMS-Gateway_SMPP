@@ -61,8 +61,12 @@
 		if (!isPlatform) return;
 		try {
 			const [orgsRes, connsRes] = await Promise.all([
-				apiClient.listOrganizations({ page: 1, pageSize: 100 }),
-				apiClient.listAllConnections()
+				auth.hasPermission('org.organization.view')
+					? apiClient.listOrganizations({ page: 1, pageSize: 100 })
+					: Promise.resolve({ data: { items: [] as Organization[] } }),
+				auth.hasPermission('provider.connection.view')
+					? apiClient.listAllConnections()
+					: Promise.resolve({ data: [] as ProviderConnection[] })
 			]);
 			customers = (orgsRes.data.items || []).filter((o: Organization) => o.type === 'customer');
 			connections = connsRes.data || [];

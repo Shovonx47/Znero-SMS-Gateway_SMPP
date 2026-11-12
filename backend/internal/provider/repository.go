@@ -320,11 +320,13 @@ const connSelectCols = `
 	smpp_source_ton, smpp_source_npi, smpp_dest_ton, smpp_dest_npi, smpp_charset, ip_allowlist_notes,
 	http_base_url, http_auth_type, http_credentials_encrypted, http_credentials_changed_at,
 	http_format_notes, http_dlr_callback_notes,
+	http_config, http_dlr_mode, http_dlr_secret_encrypted, http_dlr_secret_changed_at,
 	version, created_at, updated_at, created_by, updated_by
 `
 
 func scanConnection(row pgx.Row) (*ProviderConnection, error) {
 	var c ProviderConnection
+	var httpCfgRaw []byte
 	err := row.Scan(
 		&c.ID, &c.ProviderID, &c.Name, &c.Protocol, &c.RoleNotes, &c.Status, &c.Archived, &c.MaxTPS,
 		&c.SMPPHost, &c.SMPPPort, &c.SMPPSystemID, &c.SMPPPasswordEncrypted, &c.SMPPPasswordChangedAt,
@@ -332,6 +334,7 @@ func scanConnection(row pgx.Row) (*ProviderConnection, error) {
 		&c.SMPPSourceTON, &c.SMPPSourceNPI, &c.SMPPDestTON, &c.SMPPDestNPI, &c.SMPPCharset, &c.IPAllowlistNotes,
 		&c.HTTPBaseURL, &c.HTTPAuthType, &c.HTTPCredentialsEncrypted, &c.HTTPCredentialsChangedAt,
 		&c.HTTPFormatNotes, &c.HTTPDLRCallbackNotes,
+		&httpCfgRaw, &c.HTTPDLRMode, &c.HTTPDLRSecretEncrypted, &c.HTTPDLRSecretChangedAt,
 		&c.Version, &c.CreatedAt, &c.UpdatedAt, &c.CreatedBy, &c.UpdatedBy,
 	)
 	if err != nil {
@@ -340,8 +343,18 @@ func scanConnection(row pgx.Row) (*ProviderConnection, error) {
 		}
 		return nil, err
 	}
+	if len(httpCfgRaw) > 0 {
+		_ = json.Unmarshal(httpCfgRaw, &c.HTTPConfig)
+	}
+	if c.HTTPDLRMode == "" {
+		c.HTTPDLRMode = "none"
+	}
 	c.SMPPPassword = secrets.NewSecretStatus(c.SMPPPasswordEncrypted, c.SMPPPasswordChangedAt)
 	c.HTTPCredentials = secrets.NewSecretStatus(c.HTTPCredentialsEncrypted, c.HTTPCredentialsChangedAt)
+	c.HTTPDLRSecret = secrets.NewSecretStatus(c.HTTPDLRSecretEncrypted, c.HTTPDLRSecretChangedAt)
+	if c.Protocol == "http" {
+		c.HTTPDLRCallbackPath = ProviderDLRCallbackPath(c.ID)
+	}
 	return &c, nil
 }
 
@@ -370,6 +383,13 @@ func (r *pgRepository) ListConnectionsByProvider(ctx context.Context, providerID
 }
 
 func (r *pgRepository) CreateConnection(ctx context.Context, tx pgx.Tx, c *ProviderConnection, reason string) (*ProviderConnection, error) {
+	if c.HTTPDLRMode == "" {
+		c.HTTPDLRMode = "none"
+	}
+	httpCfgJSON, err := json.Marshal(c.HTTPConfig)
+	if err != nil {
+		return nil, fmt.Errorf("marshal http_config: %w", err)
+	}
 	q := `
 		INSERT INTO provider_connections (
 			provider_id, name, protocol, role_notes, status, archived, max_tps,
@@ -378,6 +398,7 @@ func (r *pgRepository) CreateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 			smpp_source_ton, smpp_source_npi, smpp_dest_ton, smpp_dest_npi, smpp_charset, ip_allowlist_notes,
 			http_base_url, http_auth_type, http_credentials_encrypted, http_credentials_changed_at,
 			http_format_notes, http_dlr_callback_notes,
+			http_config, http_dlr_mode, http_dlr_secret_encrypted, http_dlr_secret_changed_at,
 			version, created_by, updated_by
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
@@ -386,17 +407,19 @@ func (r *pgRepository) CreateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 			$18, $19, $20, $21, $22, $23,
 			$24, $25, $26, $27,
 			$28, $29,
-			1, $30, $30
+			$30, $31, $32, $33,
+			1, $34, $34
 		)
 		RETURNING id, version, created_at, updated_at`
 
-	err := tx.QueryRow(ctx, q,
+	err = tx.QueryRow(ctx, q,
 		c.ProviderID, c.Name, c.Protocol, c.RoleNotes, c.Status, c.Archived, c.MaxTPS,
 		c.SMPPHost, c.SMPPPort, c.SMPPSystemID, c.SMPPPasswordEncrypted, c.SMPPPasswordChangedAt,
 		c.SMPPSystemType, c.SMPPBindType, c.SMPPTLS, c.SMPPWindowSize, c.SMPPEnquireLinkSec,
 		c.SMPPSourceTON, c.SMPPSourceNPI, c.SMPPDestTON, c.SMPPDestNPI, c.SMPPCharset, c.IPAllowlistNotes,
 		c.HTTPBaseURL, c.HTTPAuthType, c.HTTPCredentialsEncrypted, c.HTTPCredentialsChangedAt,
 		c.HTTPFormatNotes, c.HTTPDLRCallbackNotes,
+		httpCfgJSON, c.HTTPDLRMode, c.HTTPDLRSecretEncrypted, c.HTTPDLRSecretChangedAt,
 		c.CreatedBy,
 	).Scan(&c.ID, &c.Version, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
@@ -409,6 +432,10 @@ func (r *pgRepository) CreateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 	c.UpdatedBy = c.CreatedBy
 	c.SMPPPassword = secrets.NewSecretStatus(c.SMPPPasswordEncrypted, c.SMPPPasswordChangedAt)
 	c.HTTPCredentials = secrets.NewSecretStatus(c.HTTPCredentialsEncrypted, c.HTTPCredentialsChangedAt)
+	c.HTTPDLRSecret = secrets.NewSecretStatus(c.HTTPDLRSecretEncrypted, c.HTTPDLRSecretChangedAt)
+	if c.Protocol == "http" {
+		c.HTTPDLRCallbackPath = ProviderDLRCallbackPath(c.ID)
+	}
 
 	if err := r.insertConnectionHistory(ctx, tx, c, c.CreatedBy, reason); err != nil {
 		return nil, err
@@ -417,6 +444,13 @@ func (r *pgRepository) CreateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 }
 
 func (r *pgRepository) UpdateConnection(ctx context.Context, tx pgx.Tx, c *ProviderConnection, reason string) (*ProviderConnection, error) {
+	if c.HTTPDLRMode == "" {
+		c.HTTPDLRMode = "none"
+	}
+	httpCfgJSON, err := json.Marshal(c.HTTPConfig)
+	if err != nil {
+		return nil, fmt.Errorf("marshal http_config: %w", err)
+	}
 	q := `
 		UPDATE provider_connections SET
 			name = $2, protocol = $3, role_notes = $4, status = $5, archived = $6, max_tps = $7,
@@ -425,17 +459,19 @@ func (r *pgRepository) UpdateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 			smpp_source_ton = $18, smpp_source_npi = $19, smpp_dest_ton = $20, smpp_dest_npi = $21, smpp_charset = $22, ip_allowlist_notes = $23,
 			http_base_url = $24, http_auth_type = $25, http_credentials_encrypted = $26, http_credentials_changed_at = $27,
 			http_format_notes = $28, http_dlr_callback_notes = $29,
-			version = version + 1, updated_at = now(), updated_by = $30
+			http_config = $30, http_dlr_mode = $31, http_dlr_secret_encrypted = $32, http_dlr_secret_changed_at = $33,
+			version = version + 1, updated_at = now(), updated_by = $34
 		WHERE id = $1
 		RETURNING version, updated_at`
 
-	err := tx.QueryRow(ctx, q,
+	err = tx.QueryRow(ctx, q,
 		c.ID, c.Name, c.Protocol, c.RoleNotes, c.Status, c.Archived, c.MaxTPS,
 		c.SMPPHost, c.SMPPPort, c.SMPPSystemID, c.SMPPPasswordEncrypted, c.SMPPPasswordChangedAt,
 		c.SMPPSystemType, c.SMPPBindType, c.SMPPTLS, c.SMPPWindowSize, c.SMPPEnquireLinkSec,
 		c.SMPPSourceTON, c.SMPPSourceNPI, c.SMPPDestTON, c.SMPPDestNPI, c.SMPPCharset, c.IPAllowlistNotes,
 		c.HTTPBaseURL, c.HTTPAuthType, c.HTTPCredentialsEncrypted, c.HTTPCredentialsChangedAt,
 		c.HTTPFormatNotes, c.HTTPDLRCallbackNotes,
+		httpCfgJSON, c.HTTPDLRMode, c.HTTPDLRSecretEncrypted, c.HTTPDLRSecretChangedAt,
 		c.UpdatedBy,
 	).Scan(&c.Version, &c.UpdatedAt)
 	if err != nil {
@@ -450,6 +486,12 @@ func (r *pgRepository) UpdateConnection(ctx context.Context, tx pgx.Tx, c *Provi
 	}
 	c.SMPPPassword = secrets.NewSecretStatus(c.SMPPPasswordEncrypted, c.SMPPPasswordChangedAt)
 	c.HTTPCredentials = secrets.NewSecretStatus(c.HTTPCredentialsEncrypted, c.HTTPCredentialsChangedAt)
+	c.HTTPDLRSecret = secrets.NewSecretStatus(c.HTTPDLRSecretEncrypted, c.HTTPDLRSecretChangedAt)
+	if c.Protocol == "http" {
+		c.HTTPDLRCallbackPath = ProviderDLRCallbackPath(c.ID)
+	} else {
+		c.HTTPDLRCallbackPath = ""
+	}
 
 	if err := r.insertConnectionHistory(ctx, tx, c, c.UpdatedBy, reason); err != nil {
 		return nil, err

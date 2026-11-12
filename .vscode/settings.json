@@ -1,0 +1,15 @@
+{
+  "gopls": {
+    "build.directoryFilters": [
+      "-frontend",
+      "-node_modules",
+      "-.tmp",
+      "-.run",
+      "-bin",
+      "-e2e-artifacts"
+    ]
+  },
+  "markdownlint.config": {
+    "default": false
+  }
+}

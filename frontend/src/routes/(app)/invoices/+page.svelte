@@ -268,7 +268,7 @@
 	<div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
 		<div class="flex flex-wrap items-center gap-3">
 			<div class="relative min-w-[240px] flex-1">
-				<input
+				<input aria-label="Select search"
 					type="text"
 					bind:value={search}
 					onkeydown={(e) => e.key === 'Enter' && (page = 1, loadInvoices())}
@@ -281,7 +281,7 @@
 			</div>
 
 			<div>
-				<select
+				<select aria-label="Filter by status"
 					bind:value={statusFilter}
 					onchange={() => { page = 1; loadInvoices(); }}
 					class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"

@@ -34,6 +34,8 @@ type Repository interface {
 	ListTransactions(ctx context.Context, tc *tenant.Context, filter TransactionFilter) ([]LedgerTransaction, int, error)
 
 	CreateHold(ctx context.Context, tx pgx.Tx, h Hold) (*Hold, error)
+	CreateHoldsBatch(ctx context.Context, tx pgx.Tx, holds []Hold) ([]Hold, error)
+	FinalizeHoldCapture(ctx context.Context, tx pgx.Tx, t LedgerTransaction, entries []LedgerEntry, walletID uuid.UUID, newBalance decimal.Decimal, walletVersion int, holdID uuid.UUID, captureAmount decimal.Decimal, holdVersion int) (*LedgerTransaction, error)
 	GetHoldByID(ctx context.Context, id uuid.UUID) (*Hold, error)
 	GetHoldByIDForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Hold, error)
 	GetHoldByIdempotency(ctx context.Context, tx pgx.Tx, walletID uuid.UUID, idempotencyKey string) (*Hold, error)
@@ -562,15 +564,33 @@ func (r *pgRepository) CreateTransaction(ctx context.Context, tx pgx.Tx, t Ledge
 }
 
 func (r *pgRepository) CreateEntries(ctx context.Context, tx pgx.Tx, entries []LedgerEntry) error {
-	for _, e := range entries {
-		query := `
+	if len(entries) == 0 {
+		return nil
+	}
+	if len(entries) == 1 {
+		e := entries[0]
+		_, err := tx.Exec(ctx, `
 			INSERT INTO ledger_entries (transaction_id, account_id, direction, amount, currency)
 			VALUES ($1, $2, $3, $4, $5)
-		`
-		_, err := tx.Exec(ctx, query, e.TransactionID, e.AccountID, e.Direction, e.Amount, e.Currency)
+		`, e.TransactionID, e.AccountID, e.Direction, e.Amount, e.Currency)
 		if err != nil {
 			return fmt.Errorf("create ledger entry: %w", err)
 		}
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ledger_entries (transaction_id, account_id, direction, amount, currency) VALUES ")
+	args := make([]any, 0, len(entries)*5)
+	for i, e := range entries {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		base := i * 5
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+		args = append(args, e.TransactionID, e.AccountID, e.Direction, e.Amount, e.Currency)
+	}
+	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+		return fmt.Errorf("create ledger entry: %w", err)
 	}
 	return nil
 }
@@ -701,6 +721,124 @@ func (r *pgRepository) CreateHold(ctx context.Context, tx pgx.Tx, h Hold) (*Hold
 		return nil, fmt.Errorf("create hold: %w", err)
 	}
 	return &out, nil
+}
+
+// CreateHoldsBatch persists multiple holds in a single pgx batch roundtrip inside the caller transaction.
+func (r *pgRepository) CreateHoldsBatch(ctx context.Context, tx pgx.Tx, holds []Hold) ([]Hold, error) {
+	if len(holds) == 0 {
+		return nil, nil
+	}
+	const query = `
+		INSERT INTO holds (wallet_id, amount, currency, status, expires_at, reference_type, reference_id, idempotency_key, captured_amount, version)
+		VALUES ($1, $2, $3, 'active', $4, $5, $6, $7, 0, 1)
+		RETURNING id, wallet_id, amount, currency, status, expires_at, reference_type, reference_id, idempotency_key, captured_amount, version, created_at, updated_at
+	`
+	var batch pgx.Batch
+	for _, h := range holds {
+		batch.Queue(query, h.WalletID, h.Amount, h.Currency, h.ExpiresAt, h.ReferenceType, h.ReferenceID, h.IdempotencyKey)
+	}
+	br := tx.SendBatch(ctx, &batch)
+	defer br.Close()
+
+	out := make([]Hold, len(holds))
+	for i := range holds {
+		if err := br.QueryRow().Scan(
+			&out[i].ID, &out[i].WalletID, &out[i].Amount, &out[i].Currency, &out[i].Status, &out[i].ExpiresAt,
+			&out[i].ReferenceType, &out[i].ReferenceID, &out[i].IdempotencyKey, &out[i].CapturedAmount,
+			&out[i].Version, &out[i].CreatedAt, &out[i].UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("create hold batch[%d]: %w", i, err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("close hold batch: %w", err)
+	}
+	return out, nil
+}
+
+// FinalizeHoldCapture writes the ledger transaction, entries, wallet cached balance, and hold capture status in a single batch roundtrip.
+func (r *pgRepository) FinalizeHoldCapture(
+	ctx context.Context,
+	tx pgx.Tx,
+	t LedgerTransaction,
+	entries []LedgerEntry,
+	walletID uuid.UUID,
+	newBalance decimal.Decimal,
+	walletVersion int,
+	holdID uuid.UUID,
+	captureAmount decimal.Decimal,
+	holdVersion int,
+) (*LedgerTransaction, error) {
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	for i := range entries {
+		entries[i].TransactionID = t.ID
+	}
+
+	var batch pgx.Batch
+	batch.Queue(`
+		INSERT INTO ledger_transactions (
+			id, type, reference_type, reference_id, idempotency_key, description, reason,
+			reversal_of_transaction_id, tenant_org_id, actor_user_id, actor_org_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING created_at
+	`, t.ID, t.Type, t.ReferenceType, t.ReferenceID, t.IdempotencyKey, t.Description, t.Reason,
+		t.ReversalOfTransactionID, t.TenantOrgID, t.ActorUserID, t.ActorOrgID)
+
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ledger_entries (transaction_id, account_id, direction, amount, currency) VALUES ")
+	args := make([]any, 0, len(entries)*5)
+	for i, e := range entries {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		base := i * 5
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+		args = append(args, t.ID, e.AccountID, e.Direction, e.Amount, e.Currency)
+	}
+	batch.Queue(sb.String(), args...)
+
+	batch.Queue(`
+		UPDATE wallets
+		SET cached_balance = $1, version = version + 1, updated_at = now()
+		WHERE id = $2 AND version = $3
+	`, newBalance, walletID, walletVersion)
+
+	batch.Queue(`
+		UPDATE holds
+		SET status = 'captured', captured_amount = $1, version = version + 1, updated_at = now()
+		WHERE id = $2 AND version = $3
+	`, captureAmount, holdID, holdVersion)
+
+	br := tx.SendBatch(ctx, &batch)
+	defer br.Close()
+
+	if err := br.QueryRow().Scan(&t.CreatedAt); err != nil {
+		return nil, fmt.Errorf("create transaction: %w", err)
+	}
+	if _, err := br.Exec(); err != nil {
+		return nil, fmt.Errorf("create ledger entry: %w", err)
+	}
+	ctW, err := br.Exec()
+	if err != nil {
+		return nil, fmt.Errorf("update wallet cached balance: %w", err)
+	}
+	if ctW.RowsAffected() == 0 {
+		return nil, errors.New("optimistic lock conflict or wallet not found")
+	}
+	ctH, err := br.Exec()
+	if err != nil {
+		return nil, fmt.Errorf("update hold status: %w", err)
+	}
+	if ctH.RowsAffected() == 0 {
+		return nil, errors.New("optimistic lock conflict or hold not found")
+	}
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("close capture batch: %w", err)
+	}
+	t.Entries = entries
+	return &t, nil
 }
 
 func (r *pgRepository) GetHoldByID(ctx context.Context, id uuid.UUID) (*Hold, error) {
