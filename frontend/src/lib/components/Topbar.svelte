@@ -1,7 +1,10 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { apiClient } from '$lib/api/client';
 	import { auth } from '../auth.svelte';
 	import { themeManager } from '../theme.svelte';
+	import { i18n, type Locale } from '../i18n.svelte';
+	import type { SearchResultItem } from '$lib/types/api';
 
 	interface Props {
 		onToggleSidebar?: () => void;
@@ -9,6 +12,55 @@
 	}
 
 	let { onToggleSidebar, backendLive }: Props = $props();
+
+	// Search state
+	let searchQuery = $state('');
+	let searchResults = $state<SearchResultItem[]>([]);
+	let isSearching = $state(false);
+	let showSearchDropdown = $state(false);
+	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+	function handleSearchInput() {
+		if (searchDebounce) clearTimeout(searchDebounce);
+		const q = searchQuery.trim();
+		if (!q) {
+			searchResults = [];
+			showSearchDropdown = false;
+			return;
+		}
+
+		searchDebounce = setTimeout(async () => {
+			try {
+				isSearching = true;
+				const res = await apiClient.search(q);
+				searchResults = res.data.results || [];
+				showSearchDropdown = true;
+			} catch (e) {
+				searchResults = [];
+			} finally {
+				isSearching = false;
+			}
+		}, 300);
+	}
+
+	function handleResultClick(item: SearchResultItem) {
+		showSearchDropdown = false;
+		searchQuery = '';
+		if (item.route) {
+			goto(item.route);
+		} else if (item.type === 'message') {
+			goto('/messages');
+		} else if (item.type === 'incident') {
+			goto('/incidents');
+		} else if (item.type === 'alert') {
+			goto('/alerts');
+		}
+	}
+
+	function toggleLocale() {
+		const next: Locale = i18n.current === 'en' ? 'bn' : 'en';
+		i18n.setLocale(next);
+	}
 
 	async function handleLogout() {
 		await auth.logout();
@@ -46,14 +98,65 @@
 		</div>
 	</div>
 
+	<!-- Center Global Search -->
+	<div class="relative hidden sm:block w-72 lg:w-96">
+		<div class="relative">
+			<input
+				type="text"
+				bind:value={searchQuery}
+				oninput={handleSearchInput}
+				onfocus={() => { if (searchResults.length > 0) showSearchDropdown = true; }}
+				placeholder={i18n.t('search_placeholder')}
+				class="w-full rounded-lg border border-slate-300 bg-slate-50/50 pl-8 pr-3 py-1.5 text-xs text-slate-900 transition focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800/50 dark:text-white dark:focus:bg-slate-800"
+			/>
+			<svg class="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+			</svg>
+		</div>
+
+		<!-- Search Results Dropdown -->
+		{#if showSearchDropdown && searchResults.length > 0}
+			<div class="absolute left-0 right-0 top-full mt-1.5 max-h-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl dark:border-slate-800 dark:bg-slate-900 z-50">
+				{#each searchResults as item}
+					<button
+						type="button"
+						onclick={() => handleResultClick(item)}
+						class="w-full flex items-center justify-between rounded-lg p-2 text-left hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+					>
+						<div>
+							<div class="text-xs font-semibold text-slate-900 dark:text-white">{item.title}</div>
+							<div class="text-[10px] text-slate-500">{item.subtitle || ''}</div>
+						</div>
+						<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-mono uppercase text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+							{item.type}
+						</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+	</div>
+
 	<div class="flex items-center gap-3">
 		<!-- Backend connection indicator -->
-		<div class="hidden sm:flex items-center gap-2 text-xs font-medium mr-2">
+		<div class="hidden lg:flex items-center gap-2 text-xs font-medium mr-1">
 			<span class="h-2 w-2 rounded-full {backendLive === undefined ? 'bg-amber-400 animate-pulse' : backendLive ? 'bg-emerald-500' : 'bg-rose-500'}"></span>
 			<span class="text-slate-600 dark:text-slate-300 text-[11px]">
 				{backendLive === undefined ? 'Probing' : backendLive ? 'Online' : 'Offline'}
 			</span>
 		</div>
+
+		<!-- Bilingual Language Toggle -->
+		<button
+			type="button"
+			onclick={toggleLocale}
+			class="flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+			title="Switch Language (English / বাংলা)"
+		>
+			<svg class="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+			</svg>
+			<span>{i18n.current === 'en' ? 'বাংলা' : 'EN'}</span>
+		</button>
 
 		<!-- Theme toggle -->
 		<button

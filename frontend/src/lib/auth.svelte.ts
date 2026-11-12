@@ -12,6 +12,10 @@ class AuthManager {
 		return !!this.user;
 	}
 
+	get isPlatformAdmin(): boolean {
+		return !!this.tenant?.is_platform_admin;
+	}
+
 	async init() {
 		if (!browser) return;
 		this.loading = true;

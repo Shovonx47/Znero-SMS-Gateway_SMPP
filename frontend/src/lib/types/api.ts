@@ -1688,3 +1688,233 @@ export interface CustomerUsage {
 
 
 
+
+// --- Phase 9 Visibility Types ---
+
+export interface TimeSeriesPoint {
+	bucket: string;
+	submitted: number;
+	delivered: number;
+	failed: number;
+	expired: number;
+	delivery_rate: number;
+	avg_latency_ms: number;
+	p95_latency_ms: number;
+	revenue_by_cur: Record<string, string>;
+	cost_by_cur?: Record<string, string>;
+	margin_by_cur?: Record<string, string>;
+}
+
+export interface ExecutiveDashboard {
+	total_submitted: number;
+	total_delivered: number;
+	total_failed: number;
+	delivery_rate: number;
+	revenue_by_cur: Record<string, string>;
+	cost_by_cur: Record<string, string>;
+	margin_by_cur: Record<string, string>;
+	time_series: TimeSeriesPoint[];
+	top_customers?: Array<{
+		customer_id: string;
+		customer_name: string;
+		submitted_count: number;
+		delivered_count: number;
+		revenue: string;
+		currency: string;
+	}>;
+	provider_breakdown?: Array<{
+		provider_id: string;
+		provider_name: string;
+		connection_count: number;
+		submitted_count: number;
+		delivered_count: number;
+		delivery_rate: number;
+		avg_latency_ms: number;
+		cost: string;
+		currency: string;
+	}>;
+}
+
+export interface NOCDashboard {
+	system_health: 'healthy' | 'degraded' | 'critical';
+	current_tps: number;
+	inbound_tps: number;
+	outbound_tps: number;
+	active_connections_count: number;
+	firing_alerts_count: number;
+	total_queued_messages: number;
+	connections: Array<{
+		id: string;
+		provider_id: string;
+		name: string;
+		protocol: string;
+		status: string;
+		current_tps: number;
+		latency_ms: number;
+		queue_depth: number;
+		error_rate: number;
+	}>;
+	recent_alerts: FiringAlert[];
+	queue_depths: Record<string, number>;
+}
+
+export interface ResellerDashboard {
+	total_submitted: number;
+	total_delivered: number;
+	total_failed: number;
+	delivery_rate: number;
+	revenue_by_cur: Record<string, string>;
+	time_series: TimeSeriesPoint[];
+	top_customers: Array<{
+		customer_id: string;
+		customer_name: string;
+		submitted_count: number;
+		delivered_count: number;
+		revenue: string;
+		currency: string;
+	}>;
+}
+
+export interface CustomerDashboard {
+	total_submitted: number;
+	total_delivered: number;
+	total_failed: number;
+	delivery_rate: number;
+	spend_by_cur: Record<string, string>;
+	time_series: TimeSeriesPoint[];
+	error_breakdown: Array<{
+		error_code: string;
+		count: number;
+		percentage: number;
+	}>;
+}
+
+export interface LiveTelemetry {
+	current_tps: number;
+	queued_messages: number;
+	active_connections: number;
+	latency_p95_ms: number;
+	firing_alerts_count: number;
+	timestamp: string;
+}
+
+export interface NotificationItem {
+	id: string;
+	user_id: string;
+	organization_id: string;
+	title: string;
+	message: string;
+	severity: 'info' | 'warning' | 'error' | 'critical';
+	category: string;
+	is_read: boolean;
+	read_at?: string;
+	created_at: string;
+}
+
+export interface AlertRule {
+	id: string;
+	name: string;
+	description?: string;
+	metric_name: string;
+	condition: '>' | '<' | '>=' | '<=' | '==' | '!=';
+	threshold: number;
+	duration_seconds: number;
+	severity: 'info' | 'warning' | 'error' | 'critical';
+	is_enabled: boolean;
+	silence_until?: string;
+	status: 'ok' | 'firing' | 'silenced' | 'unknown';
+	last_evaluated_at?: string;
+}
+
+export interface FiringAlert {
+	id: string;
+	rule_id: string;
+	rule_name: string;
+	severity: 'info' | 'warning' | 'error' | 'critical';
+	current_value: number;
+	threshold: number;
+	message: string;
+	started_at: string;
+}
+
+export interface Incident {
+	id: string;
+	title: string;
+	severity: 'low' | 'medium' | 'high' | 'critical';
+	status: 'open' | 'investigating' | 'identified' | 'monitoring' | 'resolved';
+	summary?: string;
+	resolution_notes?: string;
+	lead_user_id?: string;
+	declared_at: string;
+	identified_at?: string;
+	resolved_at?: string;
+	created_at: string;
+	updated_at: string;
+	timeline?: IncidentTimeline[];
+}
+
+export interface IncidentTimeline {
+	id: string;
+	incident_id: string;
+	event_type: string;
+	notes: string;
+	actor_user_id?: string;
+	created_at: string;
+}
+
+export interface SettingItem {
+	key: string;
+	category: string;
+	value_type: 'string' | 'integer' | 'boolean' | 'float' | 'json' | 'secret';
+	value: any;
+	default_value: any;
+	description?: string;
+	is_secret: boolean;
+	is_read_only: boolean;
+	updated_at: string;
+}
+
+export interface SearchResultItem {
+	id: string;
+	type: 'message' | 'customer' | 'organization' | 'provider' | 'incident' | 'alert';
+	title: string;
+	subtitle?: string;
+	status?: string;
+	route?: string;
+}
+
+export interface SavedFilter {
+	id: string;
+	organization_id: string;
+	user_id: string;
+	view: string;
+	name: string;
+	filter_params: any;
+	is_default: boolean;
+	created_at: string;
+}
+
+export interface UserPreferences {
+	user_id: string;
+	theme: 'system' | 'light' | 'dark';
+	locale: 'en' | 'bn';
+	dashboard_layout?: any;
+	updated_at: string;
+}
+
+export interface ExportJob {
+	id: string;
+	organization_id: string;
+	user_id: string;
+	export_type: 'messages' | 'delivery_report' | 'financial_report';
+	format: 'csv' | 'json' | 'xlsx';
+	status: 'pending' | 'processing' | 'completed' | 'failed';
+	filter_params: any;
+	row_count: number;
+	file_path?: string;
+	error_message?: string;
+	started_at?: string;
+	completed_at?: string;
+	expires_at?: string;
+	created_at: string;
+}

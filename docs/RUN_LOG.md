@@ -316,3 +316,25 @@
   - `TestStage9_HTTPRoutesAndRBAC`: PASS (0.28s) - verified HTTP status codes (202 Accepted on submit, 200 on list/get, 400 on downloading pending, 404 on missing, 200 on completed download).
   - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (5.98s) - audited all **435** unique routes across 5 principals cleanly.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
+## 2026-11-12 22:05 +06:00 — Phase 9 Stage 10: Frontend UI (SvelteKit Dashboards & NOC) Complete
+- **Frontend Architecture & Navigation (`frontend/src/`)**:
+  - `lib/types/api.ts`: Typed interfaces for Phase 9 Visibility endpoints (`ExecutiveDashboard`, `NOCDashboard`, `ResellerDashboard`, `CustomerDashboard`, `LiveTelemetry`, `NotificationItem`, `AlertRule`, `FiringAlert`, `Incident`, `IncidentTimeline`, `SettingItem`, `SearchResultItem`, `SavedFilter`, `UserPreferences`, `ExportJob`).
+  - `lib/i18n.svelte.ts`: Lightweight reactive bilingual manager (`en` / `bn`) persisting user locale in localStorage.
+  - `lib/api/client.ts`: Added typed API methods for analytics, telemetry, alerts, incidents, settings, exports, search, saved filters, and preferences.
+  - `lib/components/Topbar.svelte`: Integrated bilingual locale switcher (`EN` / `বাংলা`), real-time debounced global search input with entity results dropdown, dark/light theme toggle, and logout flow.
+  - `lib/components/Sidebar.svelte`: Dedicated "Analytics & Visibility" section with role-based navigation guards for Executive Overview, NOC & Live TPS, Reseller Dashboard, Customer Analytics, Alert Rules, Incident Center, Settings Center, and Export Center.
+- **Built Views**:
+  - `routes/(app)/analytics/+page.svelte`: Executive Dashboard featuring KPI cards (volume, delivery %, multi-currency revenue, platform net margin), time-series trend histogram, top active customer accounts, and internal upstream carrier performance matrix (platform admin only).
+  - `routes/(app)/analytics/noc/+page.svelte`: Live NOC Dashboard with real-time WebSocket connection to `/api/v1/ws/live`, live TPS gauge with progress meter, 5s polling fallback, carrier connections matrix, pipeline backlog queue depths, and live firing alerts banner.
+  - `routes/(app)/analytics/reseller/+page.svelte`: Reseller Analytics view strictly scoped to child customer usage, revenue by currency, and delivery rates with complete carrier identity isolation.
+  - `routes/(app)/analytics/customer/+page.svelte`: Customer Analytics view showing personal traffic volume, delivery success rate, multi-currency spend, and error diagnostics breakdown table.
+  - `routes/(app)/alerts/+page.svelte`: Alert Rules management catalog, metric condition thresholds, firing alerts banner, and quick silence window modal.
+  - `routes/(app)/incidents/+page.svelte`: Outage Incident Manager with declaration modal, status workflow transitions (`open -> investigating -> identified -> monitoring -> resolved`), and chronological activity timeline updates.
+  - `routes/(app)/settings/+page.svelte`: System Settings Registry with category tabs (`platform`, `billing`, `routing`, `alerts`), typed input fields (string, integer, boolean toggle, JSON editor, secret show/hide masking), and factory reset.
+  - `routes/(app)/exports/+page.svelte`: Export Center UI to submit asynchronous export jobs (messages, delivery report, financial report in CSV/XLSX/JSON) with automatic 4s polling for pending jobs and direct file download links.
+- **Verification & Linters**:
+  - `npm run check`: PASS (svelte-check found 0 errors and 0 warnings in 47 files).
+  - `npx tsc --noEmit`: PASS (0 TypeScript errors).
+  - `npm run build`: PASS (Vite production bundle built cleanly in 17.50s).
+  - Go backend: `go build ./...` (0 errors), `go vet ./...` (0 errors).

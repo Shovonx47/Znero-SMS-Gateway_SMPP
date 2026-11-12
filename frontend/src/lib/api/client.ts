@@ -83,6 +83,21 @@ import type {
 	CustomerUsage,
 	Invoice,
 	Payment,
+	ExecutiveDashboard,
+	NOCDashboard,
+	ResellerDashboard,
+	CustomerDashboard,
+	LiveTelemetry,
+	NotificationItem,
+	AlertRule,
+	FiringAlert,
+	Incident,
+	IncidentTimeline,
+	SettingItem,
+	SearchResultItem,
+	SavedFilter,
+	UserPreferences,
+	ExportJob,
 	CreateSMPPAccountResponse,
 	SenderID,
 	SenderIDHistory,
@@ -2418,6 +2433,176 @@ export class ApiClient {
 
 	async getCustomerBalance(): Promise<{ data: any; requestId: string }> {
 		return this.request<any>('/api/v1/customer/balance');
+	}
+
+	// --- Phase 9 Visibility: Analytics ---
+	async getExecutiveDashboard(params?: { start_time?: string; end_time?: string; granularity?: string }): Promise<{ data: ExecutiveDashboard; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.start_time) q.set('start_time', params.start_time);
+		if (params?.end_time) q.set('end_time', params.end_time);
+		if (params?.granularity) q.set('granularity', params.granularity);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<ExecutiveDashboard>(`/api/v1/analytics/dashboard/executive${qs}`);
+	}
+
+	async getNOCDashboard(params?: { start_time?: string; end_time?: string }): Promise<{ data: NOCDashboard; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.start_time) q.set('start_time', params.start_time);
+		if (params?.end_time) q.set('end_time', params.end_time);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<NOCDashboard>(`/api/v1/analytics/dashboard/noc${qs}`);
+	}
+
+	async getResellerDashboard(params?: { start_time?: string; end_time?: string }): Promise<{ data: ResellerDashboard; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.start_time) q.set('start_time', params.start_time);
+		if (params?.end_time) q.set('end_time', params.end_time);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<ResellerDashboard>(`/api/v1/analytics/dashboard/reseller${qs}`);
+	}
+
+	async getCustomerDashboard(params?: { start_time?: string; end_time?: string }): Promise<{ data: CustomerDashboard; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.start_time) q.set('start_time', params.start_time);
+		if (params?.end_time) q.set('end_time', params.end_time);
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<CustomerDashboard>(`/api/v1/analytics/dashboard/customer${qs}`);
+	}
+
+	async getLiveTelemetry(): Promise<{ data: LiveTelemetry; requestId: string }> {
+		return this.request<LiveTelemetry>('/api/v1/analytics/live');
+	}
+
+	// --- Phase 9 Visibility: Notifications ---
+	async getNotifications(params?: { limit?: number; offset?: number }): Promise<{ data: { notifications: NotificationItem[]; total: number; unread_count: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.limit) q.set('limit', params.limit.toString());
+		if (params?.offset) q.set('offset', params.offset.toString());
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ notifications: NotificationItem[]; total: number; unread_count: number }>(`/api/v1/notifications${qs}`);
+	}
+
+	async markNotificationRead(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/notifications/${id}/read`, { method: 'POST' });
+	}
+
+	async markAllNotificationsRead(): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>('/api/v1/notifications/read-all', { method: 'POST' });
+	}
+
+	// --- Phase 9 Visibility: Alerts & Incidents ---
+	async getAlertRules(): Promise<{ data: { rules: AlertRule[] }; requestId: string }> {
+		return this.request<{ rules: AlertRule[] }>('/api/v1/alerts/rules');
+	}
+
+	async getFiringAlerts(): Promise<{ data: { alerts: FiringAlert[] }; requestId: string }> {
+		return this.request<{ alerts: FiringAlert[] }>('/api/v1/alerts/firing');
+	}
+
+	async silenceAlertRule(id: string, minutes: number): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/alerts/rules/${id}/silence`, {
+			method: 'POST',
+			body: JSON.stringify({ minutes })
+		});
+	}
+
+	async getIncidents(status?: string): Promise<{ data: { incidents: Incident[] }; requestId: string }> {
+		const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+		return this.request<{ incidents: Incident[] }>(`/api/v1/incidents${qs}`);
+	}
+
+	async createIncident(payload: { title: string; severity: string; summary?: string }): Promise<{ data: { incident: Incident }; requestId: string }> {
+		return this.request<{ incident: Incident }>('/api/v1/incidents', {
+			method: 'POST',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	async updateIncident(id: string, payload: { status?: string; summary?: string; resolution_notes?: string }): Promise<{ data: { incident: Incident }; requestId: string }> {
+		return this.request<{ incident: Incident }>(`/api/v1/incidents/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	async addIncidentTimeline(id: string, payload: { event_type: string; notes: string }): Promise<{ data: { timeline: IncidentTimeline }; requestId: string }> {
+		return this.request<{ timeline: IncidentTimeline }>(`/api/v1/incidents/${id}/timeline`, {
+			method: 'POST',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	// --- Phase 9 Visibility: Settings ---
+	async getSettings(category?: string): Promise<{ data: { settings: SettingItem[] }; requestId: string }> {
+		const qs = category ? `?category=${encodeURIComponent(category)}` : '';
+		return this.request<{ settings: SettingItem[] }>(`/api/v1/settings${qs}`);
+	}
+
+	async updateSetting(key: string, value: any): Promise<{ data: { setting: SettingItem }; requestId: string }> {
+		return this.request<{ setting: SettingItem }>(`/api/v1/settings/${encodeURIComponent(key)}`, {
+			method: 'PUT',
+			body: JSON.stringify({ value })
+		});
+	}
+
+	async resetSetting(key: string): Promise<{ data: { setting: SettingItem }; requestId: string }> {
+		return this.request<{ setting: SettingItem }>(`/api/v1/settings/${encodeURIComponent(key)}/reset`, {
+			method: 'POST'
+		});
+	}
+
+	// --- Phase 9 Visibility: Search & Preferences ---
+	async search(q: string): Promise<{ data: { results: SearchResultItem[] }; requestId: string }> {
+		return this.request<{ results: SearchResultItem[] }>(`/api/v1/search?q=${encodeURIComponent(q)}`);
+	}
+
+	async getSavedFilters(view?: string): Promise<{ data: { filters: SavedFilter[] }; requestId: string }> {
+		const qs = view ? `?view=${encodeURIComponent(view)}` : '';
+		return this.request<{ filters: SavedFilter[] }>(`/api/v1/saved-filters${qs}`);
+	}
+
+	async createSavedFilter(payload: { name: string; view: string; filter_params: any; is_default?: boolean }): Promise<{ data: { filter: SavedFilter }; requestId: string }> {
+		return this.request<{ filter: SavedFilter }>('/api/v1/saved-filters', {
+			method: 'POST',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	async deleteSavedFilter(id: string): Promise<{ data: { success: boolean }; requestId: string }> {
+		return this.request<{ success: boolean }>(`/api/v1/saved-filters/${id}`, {
+			method: 'DELETE'
+		});
+	}
+
+	async getUserPreferences(): Promise<{ data: { preferences: UserPreferences }; requestId: string }> {
+		return this.request<{ preferences: UserPreferences }>('/api/v1/preferences');
+	}
+
+	async updateUserPreferences(payload: { theme?: string; locale?: string; dashboard_layout?: any }): Promise<{ data: { preferences: UserPreferences }; requestId: string }> {
+		return this.request<{ preferences: UserPreferences }>('/api/v1/preferences', {
+			method: 'PUT',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	// --- Phase 9 Visibility: Exports ---
+	async createExportJob(payload: { export_type: string; format: string; filter_params?: any }): Promise<{ data: { job: ExportJob }; requestId: string }> {
+		return this.request<{ job: ExportJob }>('/api/v1/exports', {
+			method: 'POST',
+			body: JSON.stringify(payload)
+		});
+	}
+
+	async getExportJobs(params?: { limit?: number; offset?: number }): Promise<{ data: { jobs: ExportJob[]; total: number }; requestId: string }> {
+		const q = new URLSearchParams();
+		if (params?.limit) q.set('limit', params.limit.toString());
+		if (params?.offset) q.set('offset', params.offset.toString());
+		const qs = q.toString() ? `?${q.toString()}` : '';
+		return this.request<{ jobs: ExportJob[]; total: number }>(`/api/v1/exports${qs}`);
+	}
+
+	async getExportJob(id: string): Promise<{ data: { job: ExportJob }; requestId: string }> {
+		return this.request<{ job: ExportJob }>(`/api/v1/exports/${id}`);
 	}
 }
 
