@@ -193,5 +193,19 @@
   - Performance budgets: Executive dashboard p95 = **1.13ms** (budget: <300ms); Live NOC p95 = **689.6µs** (budget: <100ms).
   - Linter & Compiler: `go build ./...` (0), `go vet ./...` (0), `gofmt -l .` (0), `golangci-lint run ./...` (0), `npm run check` (0), `npx tsc --noEmit` (0).
 
+## 2026-11-12 19:46 +06:00 — Phase 9 Stage 4: Live Hub (WebSocket, Real-time TPS) Complete
+- **WebSocket Hub Implementation (`backend/internal/analytics/livehub.go`)**:
+  - Full RFC 6455 compliance without external dependencies (pure Go standard library + FastHTTP hijack).
+  - ComputeAcceptKey SHA1-base64 handshake calculation.
+  - Text framing (0x81) and control framing (Ping 0x9, Pong 0xA, Close 0x8).
+  - 5-second authentication timeout: clients connecting without token must send `{"type":"auth","token":"..."}` within 5s or be dropped with close code 4401.
+  - Broadcast engine: 1-second background tick pulling cached Live NOC data (O(1) query) and fanning out role-filtered payloads.
+  - Slow consumer defense: non-blocking channel send drops frames if client socket buffers back up, protecting server memory.
+  - Tenancy isolation: Platform receives outbox depth, firing alerts, active connections; Reseller receives customer volume; Customer receives only self delivery rate. Zero buy cost, provider, or platform internal metrics leaked.
+- **Verification Suite**:
+  - `TestStage4_RFC6455_FramingAndHandshakeKey`: PASS (0.00s).
+  - `TestStage4_LiveHub_AuthTimeoutAndTenantIsolation`: PASS (6.56s) - verified 5s auth timeout kick, greeting frames, role-specific telemetry fanout, zero tenancy leaks.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
 
 

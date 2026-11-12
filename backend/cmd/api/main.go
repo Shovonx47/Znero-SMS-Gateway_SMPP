@@ -461,7 +461,12 @@ func run() error {
 
 	analyticsRepo := analytics.NewRepository(pool, logger)
 	analyticsSvc := analytics.NewService(analyticsRepo, logger)
+	liveHub := analytics.NewLiveHub(tokenMgr, analyticsSvc, logger)
 	analyticsHandler := analytics.NewHandler(analyticsSvc)
+	analyticsHandler.SetLiveHub(liveHub)
+	if runHTTP {
+		liveHub.Start(ctx)
+	}
 
 	var analyticsWorker *analytics.Worker
 	if runAnalytics {
@@ -600,6 +605,9 @@ func run() error {
 	}
 	if analyticsWorker != nil {
 		analyticsWorker.Stop()
+	}
+	if liveHub != nil && runHTTP {
+		liveHub.Stop()
 	}
 	if smppServer != nil {
 		smppServer.Stop()

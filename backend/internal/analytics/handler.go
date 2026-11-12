@@ -13,10 +13,15 @@ import (
 
 type Handler struct {
 	svc *Service
+	hub *LiveHub
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+func (h *Handler) SetLiveHub(hub *LiveHub) {
+	h.hub = hub
 }
 
 func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
@@ -27,6 +32,7 @@ func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	group.Get("/dashboard/reseller", rbac.RequirePermission("analytics.dashboard.view"), h.getResellerDashboard)
 	group.Get("/dashboard/customer", rbac.RequirePermission("analytics.dashboard.view"), h.getCustomerDashboard)
 	group.Get("/noc/live", rbac.RequirePermission("analytics.noc.view"), h.getLiveNOC)
+	group.Get("/live/ws", h.handleWebSocket)
 	group.Get("/reports/delivery", rbac.RequirePermission("analytics.report.view"), h.getDeliveryReport)
 	group.Get("/reports/financial", rbac.RequirePermission("analytics.report.view"), h.getFinancialReport)
 	group.Get("/widgets", rbac.RequirePermission("analytics.dashboard.view"), h.getWidgets)
@@ -34,6 +40,9 @@ func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	group.Put("/preferences/layout", rbac.RequirePermission("analytics.dashboard.view"), h.saveDashboardLayout)
 	group.Get("/heartbeats", rbac.RequirePermission("system.info.view"), h.listHeartbeats)
 	group.Post("/rebuild", rbac.RequirePermission("setting.manage"), h.rebuildRollups)
+
+	// Global /ws/live unversioned alias
+	router.Get("/ws/live", h.handleWebSocket)
 }
 
 func parseFilter(c *fiber.Ctx) DashboardFilter {
@@ -71,6 +80,13 @@ func mapAnalyticsError(err error) error {
 	default:
 		return httpx.Internal(err)
 	}
+}
+
+func (h *Handler) handleWebSocket(c *fiber.Ctx) error {
+	if h.hub == nil {
+		return c.Status(fiber.StatusServiceUnavailable).SendString("Live hub not active")
+	}
+	return h.hub.HandleWebSocket(c)
 }
 
 func (h *Handler) getExecutiveDashboard(c *fiber.Ctx) error {
