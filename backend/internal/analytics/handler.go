@@ -27,6 +27,11 @@ func (h *Handler) Register(router fiber.Router, authMiddleware fiber.Handler) {
 	group.Get("/dashboard/reseller", rbac.RequirePermission("analytics.dashboard.view"), h.getResellerDashboard)
 	group.Get("/dashboard/customer", rbac.RequirePermission("analytics.dashboard.view"), h.getCustomerDashboard)
 	group.Get("/noc/live", rbac.RequirePermission("analytics.noc.view"), h.getLiveNOC)
+	group.Get("/reports/delivery", rbac.RequirePermission("analytics.report.view"), h.getDeliveryReport)
+	group.Get("/reports/financial", rbac.RequirePermission("analytics.report.view"), h.getFinancialReport)
+	group.Get("/widgets", rbac.RequirePermission("analytics.dashboard.view"), h.getWidgets)
+	group.Get("/preferences/layout", rbac.RequirePermission("analytics.dashboard.view"), h.getDashboardLayout)
+	group.Put("/preferences/layout", rbac.RequirePermission("analytics.dashboard.view"), h.saveDashboardLayout)
 	group.Get("/heartbeats", rbac.RequirePermission("system.info.view"), h.listHeartbeats)
 	group.Post("/rebuild", rbac.RequirePermission("setting.manage"), h.rebuildRollups)
 }
@@ -169,4 +174,76 @@ func (h *Handler) rebuildRollups(c *fiber.Ctx) error {
 		return mapAnalyticsError(err)
 	}
 	return httpx.OK(c, fiber.Map{"status": "rebuild_scheduled", "from_time": req.FromTime})
+}
+
+func (h *Handler) getDeliveryReport(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+
+	filter := parseFilter(c)
+	data, err := h.svc.GetDeliveryReport(c.UserContext(), filter, tc)
+	if err != nil {
+		return mapAnalyticsError(err)
+	}
+	return httpx.OK(c, data)
+}
+
+func (h *Handler) getFinancialReport(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+
+	filter := parseFilter(c)
+	data, err := h.svc.GetFinancialReport(c.UserContext(), filter, tc)
+	if err != nil {
+		return mapAnalyticsError(err)
+	}
+	return httpx.OK(c, data)
+}
+
+func (h *Handler) getWidgets(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+
+	widgets := h.svc.GetAvailableWidgets(c.UserContext(), tc)
+	return httpx.OK(c, fiber.Map{"items": widgets})
+}
+
+func (h *Handler) getDashboardLayout(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+
+	pref, err := h.svc.GetUserPreferences(c.UserContext(), tc)
+	if err != nil {
+		return mapAnalyticsError(err)
+	}
+	return httpx.OK(c, fiber.Map{"layout": pref.DashboardLayout})
+}
+
+type SaveLayoutRequest struct {
+	Layout map[string]interface{} `json:"layout"`
+}
+
+func (h *Handler) saveDashboardLayout(c *fiber.Ctx) error {
+	tc, err := tenant.FromContext(c.UserContext())
+	if err != nil {
+		return httpx.Unauthorized("Authentication required")
+	}
+
+	body := c.Body()
+	if len(body) == 0 {
+		return httpx.BadRequest("Layout body is required")
+	}
+
+	if err := h.svc.SaveDashboardLayout(c.UserContext(), tc, body); err != nil {
+		return mapAnalyticsError(err)
+	}
+	return httpx.OK(c, fiber.Map{"status": "layout_saved"})
 }

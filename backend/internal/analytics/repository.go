@@ -909,3 +909,166 @@ func (r *Repository) RebuildRollups(ctx context.Context, fromTime time.Time) err
 
 	return tx.Commit(ctx)
 }
+
+// QueryDeliveryReport aggregates delivery stats broken down by destination country.
+func (r *Repository) QueryDeliveryReport(ctx context.Context, filter DashboardFilter) (*DeliveryReport, error) {
+	whereClauses := []string{"bucket_start >= $1", "bucket_start < $2"}
+	args := []interface{}{filter.StartTime, filter.EndTime}
+	argIdx := 3
+
+	if filter.CountryISO != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("country_iso = $%d", argIdx))
+		args = append(args, filter.CountryISO)
+		argIdx++
+	}
+	if filter.Currency != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("currency = $%d", argIdx))
+		args = append(args, filter.Currency)
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+	query := fmt.Sprintf(`
+		SELECT
+			country_iso,
+			COALESCE(SUM(submitted_count), 0),
+			COALESCE(SUM(delivered_count), 0),
+			COALESCE(SUM(failed_count), 0),
+			COALESCE(SUM(undelivered_count), 0)
+		FROM analytics_rollup_destination_15m
+		WHERE %s
+		GROUP BY country_iso
+		ORDER BY SUM(submitted_count) DESC
+	`, whereSQL)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query delivery report: %w", err)
+	}
+	defer rows.Close()
+
+	rep := &DeliveryReport{
+		PeriodStart: filter.StartTime,
+		PeriodEnd:   filter.EndTime,
+	}
+
+	for rows.Next() {
+		var row DeliveryReportRow
+		if err := rows.Scan(&row.CountryISO, &row.Submitted, &row.Delivered, &row.Failed, &row.Undelivered); err != nil {
+			return nil, fmt.Errorf("scan delivery report row: %w", err)
+		}
+		if row.Submitted > 0 {
+			row.DeliveryRate = float64(row.Delivered) / float64(row.Submitted) * 100.0
+		}
+		rep.TotalSubmitted += row.Submitted
+		rep.TotalDelivered += row.Delivered
+		rep.TotalFailed += row.Failed
+		rep.Items = append(rep.Items, row)
+	}
+	if rep.TotalSubmitted > 0 {
+		rep.DeliveryRate = float64(rep.TotalDelivered) / float64(rep.TotalSubmitted) * 100.0
+	}
+
+	return rep, rows.Err()
+}
+
+// QueryFinancialReport aggregates financial performance broken down by customer.
+func (r *Repository) QueryFinancialReport(ctx context.Context, filter DashboardFilter) (*FinancialReport, error) {
+	whereClauses := []string{"rc.bucket_start >= $1", "rc.bucket_start < $2"}
+	args := []interface{}{filter.StartTime, filter.EndTime}
+	argIdx := 3
+
+	if filter.CustomerID != nil && *filter.CustomerID != uuid.Nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("rc.customer_id = $%d", argIdx))
+		args = append(args, *filter.CustomerID)
+		argIdx++
+	}
+	if filter.OrgID != nil && *filter.OrgID != uuid.Nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("rc.organization_id = $%d", argIdx))
+		args = append(args, *filter.OrgID)
+		argIdx++
+	}
+	if filter.Currency != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("rc.currency = $%d", argIdx))
+		args = append(args, filter.Currency)
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+	query := fmt.Sprintf(`
+		SELECT
+			rc.customer_id,
+			o.name,
+			rc.currency,
+			COALESCE(SUM(rc.submitted_count), 0),
+			COALESCE(SUM(rc.revenue_captured), 0),
+			COALESCE(SUM(rc.revenue_held), 0),
+			COALESCE(SUM(rc.revenue_refunded), 0)
+		FROM analytics_rollup_customer_15m rc
+		JOIN organizations o ON o.id = rc.customer_id
+		WHERE %s
+		GROUP BY rc.customer_id, o.name, rc.currency
+		ORDER BY SUM(rc.revenue_captured) DESC
+	`, whereSQL)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query financial report: %w", err)
+	}
+	defer rows.Close()
+
+	rep := &FinancialReport{
+		PeriodStart:       filter.StartTime,
+		PeriodEnd:         filter.EndTime,
+		RevenueByCurrency: make(map[string]decimal.Decimal),
+		CostByCurrency:    make(map[string]decimal.Decimal),
+	}
+
+	for rows.Next() {
+		var row FinancialReportRow
+		var custID uuid.UUID
+		if err := rows.Scan(&custID, &row.CustomerName, &row.Currency, &row.Volume, &row.RevenueCaptured, &row.RevenueHeld, &row.RevenueRefunded); err != nil {
+			return nil, fmt.Errorf("scan financial report row: %w", err)
+		}
+		row.CustomerID = &custID
+		row.Period = filter.StartTime
+		rep.RevenueByCurrency[row.Currency] = rep.RevenueByCurrency[row.Currency].Add(row.RevenueCaptured)
+		rep.Items = append(rep.Items, row)
+	}
+
+	return rep, rows.Err()
+}
+
+// GetUserPreferences loads preferences for a user.
+func (r *Repository) GetUserPreferences(ctx context.Context, userID uuid.UUID) (*UserPreferences, error) {
+	var pref UserPreferences
+	pref.UserID = userID
+	err := r.pool.QueryRow(ctx, `
+		SELECT theme, locale, timezone, dashboard_layout, updated_at
+		FROM user_preferences
+		WHERE user_id = $1
+	`, userID).Scan(&pref.Theme, &pref.Locale, &pref.Timezone, &pref.DashboardLayout, &pref.UpdatedAt)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		pref.Theme = "system"
+		pref.Locale = "en"
+		pref.Timezone = "UTC"
+		pref.DashboardLayout = json.RawMessage("{}")
+		pref.UpdatedAt = time.Now().UTC()
+		return &pref, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user preferences: %w", err)
+	}
+	return &pref, nil
+}
+
+// SaveDashboardLayout stores a user's customized dashboard layout.
+func (r *Repository) SaveDashboardLayout(ctx context.Context, userID uuid.UUID, layoutJSON []byte) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO user_preferences (user_id, dashboard_layout, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			dashboard_layout = EXCLUDED.dashboard_layout,
+			updated_at = now()
+	`, userID, layoutJSON)
+	return err
+}

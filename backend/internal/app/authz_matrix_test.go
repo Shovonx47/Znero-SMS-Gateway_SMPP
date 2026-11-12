@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/znero-international/znero/backend/internal/analytics"
 	"github.com/znero-international/znero/backend/internal/app"
 	"github.com/znero-international/znero/backend/internal/auth"
 	"github.com/znero-international/znero/backend/internal/billing"
@@ -123,6 +124,7 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		Messaging:            messaging.NewHandler(msgSvc, reconcileSvc, nil, msgRepo),
 		CustomerEdge:         edgeHandler,
 		HTTPProviderCallback: httpCallback,
+		Analytics:            analytics.NewHandler(analytics.NewService(analytics.NewRepository(e.Pool, logger), logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 

@@ -209,3 +209,144 @@ func (s *Service) RebuildRollups(ctx context.Context, fromTime time.Time, tc *te
 func (s *Service) RecordHeartbeat(ctx context.Context, hb ServiceHeartbeat) error {
 	return s.repo.RecordHeartbeat(ctx, hb)
 }
+
+// GetDeliveryReport returns delivery performance breakdown with tenant boundary scoping.
+func (s *Service) GetDeliveryReport(ctx context.Context, filter DashboardFilter, tc *tenant.Context) (*DeliveryReport, error) {
+	if err := s.sanitizeFilter(&filter, tc); err != nil {
+		return nil, err
+	}
+	return s.repo.QueryDeliveryReport(ctx, filter)
+}
+
+// GetFinancialReport returns financial and revenue breakdown.
+// Strictly enforces zero exposure of buy cost or margin for non-platform users.
+func (s *Service) GetFinancialReport(ctx context.Context, filter DashboardFilter, tc *tenant.Context) (*FinancialReport, error) {
+	if err := s.sanitizeFilter(&filter, tc); err != nil {
+		return nil, err
+	}
+
+	rep, err := s.repo.QueryFinancialReport(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if tc.ActorOrgType != "platform" {
+		rep.CostByCurrency = nil
+		for i := range rep.Items {
+			rep.Items[i].CostEstimated = nil
+			rep.Items[i].MarginEstimated = nil
+		}
+	}
+
+	return rep, nil
+}
+
+// GetAvailableWidgets returns widget types filtered by caller's role.
+func (s *Service) GetAvailableWidgets(ctx context.Context, tc *tenant.Context) []WidgetDefinition {
+	role := "customer"
+	if tc != nil {
+		role = tc.ActorOrgType
+	}
+
+	allWidgets := []WidgetDefinition{
+		{
+			ID:             "kpi_summary",
+			Name:           "KPI Summary",
+			Description:    "High-level overview of message volumes, delivery rate, and revenue",
+			Category:       "kpi",
+			SupportedRoles: []string{"platform", "reseller", "customer"},
+			DefaultWidth:   12,
+			DefaultHeight:  2,
+		},
+		{
+			ID:             "volume_trend",
+			Name:           "Traffic Volume Trend",
+			Description:    "Time-series chart showing submitted, delivered, and failed messages",
+			Category:       "chart",
+			SupportedRoles: []string{"platform", "reseller", "customer"},
+			DefaultWidth:   8,
+			DefaultHeight:  4,
+		},
+		{
+			ID:             "delivery_rate",
+			Name:           "Delivery Rate Gauge",
+			Description:    "Real-time delivery success percentage gauge",
+			Category:       "gauge",
+			SupportedRoles: []string{"platform", "reseller", "customer"},
+			DefaultWidth:   4,
+			DefaultHeight:  4,
+		},
+		{
+			ID:             "top_destinations",
+			Name:           "Top Destinations",
+			Description:    "Top destination countries by message volume and success rate",
+			Category:       "table",
+			SupportedRoles: []string{"platform", "reseller"},
+			DefaultWidth:   6,
+			DefaultHeight:  4,
+		},
+		{
+			ID:             "outbox_gauge",
+			Name:           "Outbox Backlog",
+			Description:    "Pending dispatch queue depth and oldest message age",
+			Category:       "gauge",
+			SupportedRoles: []string{"platform"},
+			DefaultWidth:   4,
+			DefaultHeight:  4,
+		},
+		{
+			ID:             "carrier_health",
+			Name:           "Carrier Connections",
+			Description:    "Active upstream provider connections, TPS, and latency",
+			Category:       "table",
+			SupportedRoles: []string{"platform"},
+			DefaultWidth:   8,
+			DefaultHeight:  4,
+		},
+		{
+			ID:             "financial_summary",
+			Name:           "Financial Summary",
+			Description:    "Total revenue captured, active holds, and balance remaining",
+			Category:       "kpi",
+			SupportedRoles: []string{"platform", "reseller", "customer"},
+			DefaultWidth:   6,
+			DefaultHeight:  2,
+		},
+		{
+			ID:             "alerts_banner",
+			Name:           "Active Alerts & Incidents",
+			Description:    "Real-time operational alerts and incident timeline",
+			Category:       "status",
+			SupportedRoles: []string{"platform"},
+			DefaultWidth:   12,
+			DefaultHeight:  2,
+		},
+	}
+
+	var visible []WidgetDefinition
+	for _, w := range allWidgets {
+		for _, r := range w.SupportedRoles {
+			if r == role {
+				visible = append(visible, w)
+				break
+			}
+		}
+	}
+	return visible
+}
+
+// GetUserPreferences retrieves the caller's preferences.
+func (s *Service) GetUserPreferences(ctx context.Context, tc *tenant.Context) (*UserPreferences, error) {
+	if tc == nil {
+		return nil, ErrUnauthorizedScope
+	}
+	return s.repo.GetUserPreferences(ctx, tc.ActorUserID)
+}
+
+// SaveDashboardLayout updates the caller's dashboard layout JSON.
+func (s *Service) SaveDashboardLayout(ctx context.Context, tc *tenant.Context, layoutJSON []byte) error {
+	if tc == nil {
+		return ErrUnauthorizedScope
+	}
+	return s.repo.SaveDashboardLayout(ctx, tc.ActorUserID, layoutJSON)
+}

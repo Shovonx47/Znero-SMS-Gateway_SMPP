@@ -335,3 +335,62 @@ type ExportJob struct {
 	ExpiresAt      *time.Time      `json:"expires_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 }
+
+// DeliveryReportRow provides country/operator delivery performance breakdown.
+type DeliveryReportRow struct {
+	CountryISO   string  `json:"country_iso"`
+	OperatorName string  `json:"operator_name,omitempty"`
+	Submitted    int64   `json:"submitted"`
+	Delivered    int64   `json:"delivered"`
+	Failed       int64   `json:"failed"`
+	Undelivered  int64   `json:"undelivered"`
+	Expired      int64   `json:"expired"`
+	DeliveryRate float64 `json:"delivery_rate"`
+	AvgLatencyMs *int    `json:"avg_latency_ms,omitempty"`
+}
+
+// DeliveryReport represents the full delivery performance report response.
+type DeliveryReport struct {
+	PeriodStart    time.Time           `json:"period_start"`
+	PeriodEnd      time.Time           `json:"period_end"`
+	TotalSubmitted int64               `json:"total_submitted"`
+	TotalDelivered int64               `json:"total_delivered"`
+	TotalFailed    int64               `json:"total_failed"`
+	DeliveryRate   float64             `json:"delivery_rate"`
+	Items          []DeliveryReportRow `json:"items"`
+}
+
+// FinancialReportRow provides revenue and billing breakdown per customer or interval.
+type FinancialReportRow struct {
+	Period          time.Time        `json:"period"`
+	CustomerID      *uuid.UUID       `json:"customer_id,omitempty"`
+	CustomerName    string           `json:"customer_name,omitempty"`
+	Currency        string           `json:"currency"`
+	Volume          int64            `json:"volume"`
+	RevenueCaptured decimal.Decimal  `json:"revenue_captured"`
+	RevenueHeld     decimal.Decimal  `json:"revenue_held"`
+	RevenueRefunded decimal.Decimal  `json:"revenue_refunded"`
+	CostEstimated   *decimal.Decimal `json:"cost_estimated,omitempty"`   // Platform only
+	MarginEstimated *decimal.Decimal `json:"margin_estimated,omitempty"` // Platform only
+}
+
+// FinancialReport represents the full revenue and billing report response.
+type FinancialReport struct {
+	PeriodStart       time.Time                  `json:"period_start"`
+	PeriodEnd         time.Time                  `json:"period_end"`
+	RevenueByCurrency map[string]decimal.Decimal `json:"revenue_by_currency"`
+	CostByCurrency    map[string]decimal.Decimal `json:"cost_by_currency,omitempty"` // Platform only
+	Items             []FinancialReportRow       `json:"items"`
+}
+
+// WidgetDefinition describes an analytics dashboard widget for the registry.
+type WidgetDefinition struct {
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	Description    string                 `json:"description"`
+	Category       string                 `json:"category"`        // "kpi", "chart", "table", "gauge"
+	SupportedRoles []string               `json:"supported_roles"` // "platform", "reseller", "customer"
+	DefaultWidth   int                    `json:"default_width"`   // grid columns 1-12
+	DefaultHeight  int                    `json:"default_height"`
+	DefaultConfig  map[string]interface{} `json:"default_config"`
+}

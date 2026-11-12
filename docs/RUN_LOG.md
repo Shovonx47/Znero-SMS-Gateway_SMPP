@@ -174,4 +174,24 @@
   - `internal/analytics`: 6/6 tests PASS (`TestLatencyHistogram`, `TestResolveCountryISO`, `TestAnalyticsEngine_DifferentialAndTieOut`, `TestAnalyticsTimezoneRealignment`, `TestAnalyticsWorkerAdvisoryLock`, `TestAnalyticsCrashAndResumeCursor`).
   - Linter & Compiler: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors, 0 warnings), `npx tsc --noEmit` (0 errors).
 
+## 2026-11-12 19:30 +06:00 — Phase 9 Stage 3: Analytics APIs, Reports & Widget Registry Complete
+- **API Endpoints Built & Mounted (`/api/v1/analytics/`)**:
+  - `GET /dashboard/executive`: Platform view includes cost/margin; reseller/customer view strips buy cost and margin server-side.
+  - `GET /dashboard/noc`: Platform-only NOC operational overview (ingress/egress TPS, outbox depth, active carrier connections, 24h success, alerts, incidents, heartbeats). Returns 403 Forbidden to non-platform tenants.
+  - `GET /dashboard/reseller`: Reseller-scoped customer volume breakdown and active customer counts.
+  - `GET /dashboard/customer`: Customer self-service spent vs balance remaining and delivery success rate.
+  - `GET /noc/live`: 2-second broadcast-cached rolling telemetry (flat O(1) database cost).
+  - `GET /reports/delivery`: Destination country and operator delivery rate and volume breakdown.
+  - `GET /reports/financial`: Customer-level revenue captured, held, and refunded breakdown.
+  - `GET /widgets`: Dynamic widget catalog scoped by user role.
+  - `GET /preferences/layout` & `PUT /preferences/layout`: User customizable dashboard grid layout persistence.
+  - `GET /heartbeats`: Runtime service heartbeats.
+  - `POST /rebuild`: Event stream replay mechanism.
+- **Verification & Budgets**:
+  - `authz_matrix_test.go`: All 398 routes crawled across 5 principals cleanly (0 unauthorized leaks).
+  - Tenancy leak scan: Zero exposure of `cost_by_currency`, `margin_by_currency`, `cost`, or `margin` in customer/reseller payloads.
+  - Performance budgets: Executive dashboard p95 = **1.13ms** (budget: <300ms); Live NOC p95 = **689.6µs** (budget: <100ms).
+  - Linter & Compiler: `go build ./...` (0), `go vet ./...` (0), `gofmt -l .` (0), `golangci-lint run ./...` (0), `npm run check` (0), `npx tsc --noEmit` (0).
+
+
 

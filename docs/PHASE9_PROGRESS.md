@@ -5,8 +5,8 @@
 | Stage 0 | Preflight, Baseline, Triage | ~45 min | Completed | 2026-11-12 17:08 | 2026-11-12 18:20 | IDE clean, metrics, alerts.yml, security-scan, dev-upgrade, baseline PASS |
 | Stage 1 | Design Document First (`docs/DASHBOARD_DESIGN.md`) | ~45 min | Completed | 2026-11-12 18:20 | 2026-11-12 18:25 | Source of truth, event-time, 15m rollups, partitions, performance budgets |
 | Stage 2 | Data Foundation (Migrations, Rollup Engine) | ~90 min | Completed | 2026-11-12 18:28 | 2026-11-12 19:17 | Migration 15, rollup worker with advisory lock, differential & tie-out test PASS |
-| Stage 3 | Analytics APIs (Dashboards, Reports, Registry) | ~120 min | In Progress | 2026-11-12 19:18 | | Tenant isolation, leak scan, p95 budgets |
-| Stage 4 | Live Hub (WebSocket, Real-time TPS) | ~60 min | Pending | | | Auth, fan-out, client isolation |
+| Stage 3 | Analytics APIs (Dashboards, Reports, Registry) | ~120 min | Completed | 2026-11-12 19:18 | 2026-11-12 19:30 | Exec/NOC/Reseller/Customer dashboards, reports, leak scan, p95 budgets PASS (1.1ms/690µs) |
+| Stage 4 | Live Hub (WebSocket, Real-time TPS) | ~60 min | In Progress | 2026-11-12 19:31 | | Auth, fan-out, client isolation |
 | Stage 5 | Notification Center (In-app, SMTP sink, Webhook) | ~90 min | Pending | | | Preferences, categories, storm protection |
 | Stage 6 | Alert Engine, Incidents, Insights (`docs/ALERTING.md`) | ~150 min | Pending | | | Rules, flapping, escalations, timeline |
 | Stage 7 | Settings Center (Typed Registry, Admin UI) | ~75 min | Pending | | | Company, product, provider, billing, authz |
