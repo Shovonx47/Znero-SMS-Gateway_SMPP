@@ -207,64 +207,6 @@
   - `TestStage4_LiveHub_AuthTimeoutAndTenantIsolation`: PASS (6.56s) - verified 5s auth timeout kick, greeting frames, role-specific telemetry fanout, zero tenancy leaks.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
-## 2026-11-12 20:38 +06:00 — Phase 9 Stage 7: Settings Center (Typed Registry) Complete
-- **Typed Settings Registry (`backend/internal/settings/`)**:
-  - `models.go`: Strongly typed schemas for `string`, `integer`, `boolean`, `float`, `json`, and `secret`. `ValidateAndCoerce` enforces type boundaries and rejects illegal type coercions. `MaskSecret` replaces secret values with `"********"` across all read paths.
-  - `repository.go`: PostgreSQL operations against `settings_registry` with category filtering, JSONB value updates, and factory default resets.
-  - `service.go`: Typed accessors (`GetTypedString`, `GetTypedInt`, `GetTypedBool`), secret masking on read, schema validation, and audit trail logging.
-  - `handler.go`: Mounted under `/api/v1/settings`:
-    - `GET /`: List all platform/system settings (secrets masked, optional category filter). Requires `setting.view`.
-    - `GET /:key`: Fetch single setting by key (secret masked). Requires `setting.view`.
-    - `PUT /:key`: Update setting value with schema validation and platform authorization. Requires `setting.manage`.
-    - `POST /:key/reset`: Reset setting to platform default. Requires `setting.manage`.
-- **Wiring & Integration**:
-  - Wired into `app.Modules`, `cmd/api/main.go`, and `authz_matrix_test.go`.
-- **Verification Suite**:
-  - `TestSettings_SchemaValidation`: PASS (0.00s) - verified integer, boolean, float, and JSON schema validation and rejection of invalid types.
-  - `TestSettings_CRUDAndMasking`: PASS (0.13s) - verified secret masking in both single and list endpoints (never leaks plaintext), typed getters, and factory reset.
-  - `TestSettings_HTTPRoutesAndRBAC`: PASS (0.05s) - verified customer can view settings but is denied update (403 Forbidden), platform admin updates with 400 Bad Request on type mismatch and 200 OK on valid payload.
-  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.69s) - audited all **424** unique routes across 5 principals cleanly.
-  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
-
-## 2026-11-12 20:23 +06:00 — Phase 9 Stage 6: Alert Engine, Incidents, Insights Complete
-- **Documentation First (`docs/ALERTING.md`)**:
-  - Full specification of alert rules catalog, hysteresis, silence windows, incident state machine, and timeline audit rules.
-- **Alert & Incident Engine (`backend/internal/alerting/`)**:
-  - `models.go`: Alert rules, firing alerts, incidents, timeline entries, and strict state transition validator (`open -> investigating -> identified -> monitoring -> resolved`).
-  - `repository.go`: PostgreSQL operations for `alert_rules`, `alerts`, `incidents`, `incident_timeline` with pagination and filtering.
-  - `evaluator.go`: Metric evaluation engine supporting DB-backed telemetry and injectable `MockMetricSource` for testing.
-  - `service.go`: Rule evaluation loop, anti-flapping idempotency, auto-resolution on metric normalization, silence management, and incident declaration/transition with timeline logging.
-  - `handler.go`: Mounted under `/api/v1/alerts` and `/api/v1/incidents`:
-    - Alert rules CRUD, list alerts, silence alert, trigger manual evaluation.
-    - Declare incident, list incidents, get incident detail with timeline, transition incident status, add timeline entry.
-- **Wiring & Integration**:
-  - Wired into `app.Modules`, `cmd/api/main.go`, and connected to `notification.Service`.
-- **Verification Suite**:
-  - `TestAlertRuleLifecycleAndEvaluation`: PASS (0.08s) - verified rule creation, breach detection, anti-flapping idempotency, silencing, and auto-resolution.
-  - `TestIncidentStateMachineAndTimeline`: PASS (0.06s) - verified invalid transition rejection (`open -> resolved` fails), full lifecycle transition, root cause recording, and ordered timeline entries.
-  - `TestAlertingAndIncidents_RBACAndTenantIsolation`: PASS (0.06s) - verified customer receives 403 Forbidden on platform alerts and incidents.
-  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (5.32s) - audited all **420** unique routes across 5 principals cleanly.
-  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
-
-## 2026-11-12 20:38 +06:00 — Phase 9 Stage 7: Settings Center (Typed Registry) Complete
-- **Typed Settings Registry (`backend/internal/settings/`)**:
-  - `models.go`: Strongly typed schemas for `string`, `integer`, `boolean`, `float`, `json`, and `secret`. `ValidateAndCoerce` enforces type boundaries and rejects illegal type coercions. `MaskSecret` replaces secret values with `"********"` across all read paths.
-  - `repository.go`: PostgreSQL operations against `settings_registry` with category filtering, JSONB value updates, and factory default resets.
-  - `service.go`: Typed accessors (`GetTypedString`, `GetTypedInt`, `GetTypedBool`), secret masking on read, schema validation, and audit trail logging.
-  - `handler.go`: Mounted under `/api/v1/settings`:
-    - `GET /`: List all platform/system settings (secrets masked, optional category filter). Requires `setting.view`.
-    - `GET /:key`: Fetch single setting by key (secret masked). Requires `setting.view`.
-    - `PUT /:key`: Update setting value with schema validation and platform authorization. Requires `setting.manage`.
-    - `POST /:key/reset`: Reset setting to platform default. Requires `setting.manage`.
-- **Wiring & Integration**:
-  - Wired into `app.Modules`, `cmd/api/main.go`, and `authz_matrix_test.go`.
-- **Verification Suite**:
-  - `TestSettings_SchemaValidation`: PASS (0.00s) - verified integer, boolean, float, and JSON schema validation and rejection of invalid types.
-  - `TestSettings_CRUDAndMasking`: PASS (0.13s) - verified secret masking in both single and list endpoints (never leaks plaintext), typed getters, and factory reset.
-  - `TestSettings_HTTPRoutesAndRBAC`: PASS (0.05s) - verified customer can view settings but is denied update (403 Forbidden), platform admin updates with 400 Bad Request on type mismatch and 200 OK on valid payload.
-  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.69s) - audited all **424** unique routes across 5 principals cleanly.
-  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
-
 ## 2026-11-12 20:07 +06:00 — Phase 9 Stage 5: Notification Center Complete
 - **Multi-Channel Delivery & Storm Protection (`backend/internal/notification/`)**:
   - `models.go`: Notification schemas, category preferences, and dispatch events.
@@ -291,25 +233,6 @@
   - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.01s) - audited all **408** unique routes across 5 principals cleanly.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
-## 2026-11-12 20:38 +06:00 — Phase 9 Stage 7: Settings Center (Typed Registry) Complete
-- **Typed Settings Registry (`backend/internal/settings/`)**:
-  - `models.go`: Strongly typed schemas for `string`, `integer`, `boolean`, `float`, `json`, and `secret`. `ValidateAndCoerce` enforces type boundaries and rejects illegal type coercions. `MaskSecret` replaces secret values with `"********"` across all read paths.
-  - `repository.go`: PostgreSQL operations against `settings_registry` with category filtering, JSONB value updates, and factory default resets.
-  - `service.go`: Typed accessors (`GetTypedString`, `GetTypedInt`, `GetTypedBool`), secret masking on read, schema validation, and audit trail logging.
-  - `handler.go`: Mounted under `/api/v1/settings`:
-    - `GET /`: List all platform/system settings (secrets masked, optional category filter). Requires `setting.view`.
-    - `GET /:key`: Fetch single setting by key (secret masked). Requires `setting.view`.
-    - `PUT /:key`: Update setting value with schema validation and platform authorization. Requires `setting.manage`.
-    - `POST /:key/reset`: Reset setting to platform default. Requires `setting.manage`.
-- **Wiring & Integration**:
-  - Wired into `app.Modules`, `cmd/api/main.go`, and `authz_matrix_test.go`.
-- **Verification Suite**:
-  - `TestSettings_SchemaValidation`: PASS (0.00s) - verified integer, boolean, float, and JSON schema validation and rejection of invalid types.
-  - `TestSettings_CRUDAndMasking`: PASS (0.13s) - verified secret masking in both single and list endpoints (never leaks plaintext), typed getters, and factory reset.
-  - `TestSettings_HTTPRoutesAndRBAC`: PASS (0.05s) - verified customer can view settings but is denied update (403 Forbidden), platform admin updates with 400 Bad Request on type mismatch and 200 OK on valid payload.
-  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.69s) - audited all **424** unique routes across 5 principals cleanly.
-  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
-
 ## 2026-11-12 20:23 +06:00 — Phase 9 Stage 6: Alert Engine, Incidents, Insights Complete
 - **Documentation First (`docs/ALERTING.md`)**:
   - Full specification of alert rules catalog, hysteresis, silence windows, incident state machine, and timeline audit rules.
@@ -347,6 +270,25 @@
   - `TestSettings_CRUDAndMasking`: PASS (0.13s) - verified secret masking in both single and list endpoints (never leaks plaintext), typed getters, and factory reset.
   - `TestSettings_HTTPRoutesAndRBAC`: PASS (0.05s) - verified customer can view settings but is denied update (403 Forbidden), platform admin updates with 400 Bad Request on type mismatch and 200 OK on valid payload.
   - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.69s) - audited all **424** unique routes across 5 principals cleanly.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
+## 2026-11-12 20:53 +06:00 — Phase 9 Stage 8: Search, Saved Filters, Preferences, i18n Complete
+- **Universal Search Engine (`backend/internal/search/`)**:
+  - `models.go`: Universal `SearchResultItem` and `SearchResponse` schemas, `SavedFilter` schemas, `UserPreference` with `theme` (`system|light|dark`) and `locale` (`en|bn`) validation.
+  - `repository.go`: Universal multi-entity search across messages, organizations/customers, providers (platform-only), incidents (platform-only), and alerts (platform-only). Strict tenant boundary filtering: customers cannot discover upstream providers or other tenants' messages.
+  - `service.go`: Search coordination, saved filters CRUD with single-default enforcement, user preferences updates with locale (`en`, `bn`) and theme validation.
+  - `handler.go`: Mounted under `/api/v1/`:
+    - `GET /search`: Universal multi-entity search.
+    - `GET /saved-filters`, `POST /saved-filters`, `DELETE /saved-filters/:id`, `POST /saved-filters/:id/default`.
+    - `GET /preferences`, `PUT /preferences`.
+- **Wiring & Integration**:
+  - Wired into `app.Modules`, `cmd/api/main.go`, and `authz_matrix_test.go`.
+- **Verification Suite**:
+  - `TestGlobalSearch_TenantIsolation`: PASS (0.47s) - verified platform admin finds providers, incidents, and messages; customer cannot discover providers or other tenants' messages (zero tenant leak).
+  - `TestSavedFilters_CRUDAndDefaults`: PASS (0.05s) - verified view-scoped saved filters, single default enforcement, list ordering, and deletion.
+  - `TestUserPreferences_LocalesAndThemes`: PASS (0.06s) - verified Bangla (`bn`) locale, English (`en`), dark theme, and rejection of invalid locales/themes.
+  - `TestSearchAndFilters_HTTPRoutes`: PASS (0.07s) - verified HTTP endpoints under JWT authentication.
+  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (8.22s) - audited all **431** unique routes across 5 principals cleanly.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
 

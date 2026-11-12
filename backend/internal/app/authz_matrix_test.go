@@ -37,6 +37,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/rating"
 	"github.com/znero-international/znero/backend/internal/rbac"
 	"github.com/znero-international/znero/backend/internal/routing"
+	"github.com/znero-international/znero/backend/internal/search"
 	"github.com/znero-international/znero/backend/internal/secrets"
 	"github.com/znero-international/znero/backend/internal/senderid"
 	"github.com/znero-international/znero/backend/internal/settings"
@@ -136,6 +137,7 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		Notification:         notification.NewHandler(notification.NewService(notification.NewRepository(e.Pool, logger), nil, nil, nil, logger)),
 		Alerting:             alerting.NewHandler(alerting.NewService(alerting.NewRepository(e.Pool, logger), alerting.NewEvaluator(alerting.NewMockMetricSource()), nil, logger)),
 		Settings:             settings.NewHandler(settings.NewService(settings.NewRepository(e.Pool, logger), e.Audit, logger)),
+		Search:               search.NewHandler(search.NewService(search.NewRepository(e.Pool, logger), logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 
