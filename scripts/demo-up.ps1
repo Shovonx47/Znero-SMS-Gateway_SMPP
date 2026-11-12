@@ -120,10 +120,16 @@ Write-Host "[OK] Znero Analytics Rollup Worker running" -ForegroundColor Green
 # 8. Start Frontend UI
 if (-not $NoFrontend) {
     $frontendDir = Join-Path $script:RepoRoot 'frontend'
-    $npmCmd = (Get-Command 'npm.cmd' -ErrorAction SilentlyContinue).Source
-    if (-not $npmCmd) { $npmCmd = 'npm' }
-    Start-DemoProcess -Name 'frontend' -FilePath $npmCmd -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173') `
-        -WorkingDirectory $frontendDir -Endpoint 'http://127.0.0.1:5173' | Out-Null
+    $viteCli = Join-Path $frontendDir 'node_modules\vite\bin\vite.js'
+    if (Test-Path -LiteralPath $viteCli) {
+        Start-DemoProcess -Name 'frontend' -FilePath 'node' -ArgumentList @($viteCli, 'dev', '--host', '127.0.0.1', '--port', '5173') `
+            -WorkingDirectory $frontendDir -Endpoint 'http://127.0.0.1:5173' | Out-Null
+    } else {
+        $npmCmd = (Get-Command 'npm.cmd' -ErrorAction SilentlyContinue).Source
+        if (-not $npmCmd) { $npmCmd = 'npm' }
+        Start-DemoProcess -Name 'frontend' -FilePath $npmCmd -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173') `
+            -WorkingDirectory $frontendDir -Endpoint 'http://127.0.0.1:5173' | Out-Null
+    }
     Write-Host "[OK] SvelteKit Frontend running on http://127.0.0.1:5173" -ForegroundColor Green
 }
 

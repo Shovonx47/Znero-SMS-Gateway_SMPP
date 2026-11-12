@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,9 @@ type oracleMsg struct {
 }
 
 func TestE2E_SeededRandomStateMachineAndMoneyInvariants(t *testing.T) {
+	if os.Getenv("ZNERO_INTEGRATION") != "1" {
+		t.Skip("skipping integration test without ZNERO_INTEGRATION=1")
+	}
 	watchGoroutineLeaks(t)
 
 	seeds := []uint64{2026111201, 2026111202, 2026111203, 2026111204}

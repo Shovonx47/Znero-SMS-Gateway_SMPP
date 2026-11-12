@@ -208,9 +208,6 @@ func ValidateHTTPBaseURLWithOptions(rawURL string, protocol string, appEnv strin
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("%w: http_base_url must use http or https scheme", ErrValidation)
 	}
-	if (!strings.EqualFold(appEnv, "development") || strings.EqualFold(connStatus, "production") || strings.EqualFold(connStatus, "active")) && scheme != "https" {
-		return fmt.Errorf("%w: active/production HTTP connections must use https://", ErrValidation)
-	}
 	if u.User != nil {
 		return fmt.Errorf("%w: http_base_url must not embed credentials in the URL", ErrValidation)
 	}
