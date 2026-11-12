@@ -207,5 +207,31 @@
   - `TestStage4_LiveHub_AuthTimeoutAndTenantIsolation`: PASS (6.56s) - verified 5s auth timeout kick, greeting frames, role-specific telemetry fanout, zero tenancy leaks.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
+## 2026-11-12 20:07 +06:00 — Phase 9 Stage 5: Notification Center Complete
+- **Multi-Channel Delivery & Storm Protection (`backend/internal/notification/`)**:
+  - `models.go`: Notification schemas, category preferences, and dispatch events.
+  - `sender.go`: `EmailSender` (standard library SMTP with MIME multipart HTML/text), `WebhookSender` (HTTP client with HMAC-SHA256 signature `X-Znero-Signature: sha256=<hex>`), and thread-safe mocks for testing.
+  - `suppressor.go`: `StormSuppressor` with 5-minute deduplication window and per-user sliding-window rate limiting (max 50 notifications/min).
+  - `repository.go`: PostgreSQL operations for `notifications` and `notification_preferences` with strict tenant isolation.
+  - `service.go`: Notification dispatch engine, multi-channel preferences routing, mark read, mark all read, archive, and test notification dispatch.
+  - `handler.go`: Mounted under `/api/v1/notifications`:
+    - `GET /`: Paginated inbox with category, severity, and read status filters.
+    - `GET /unread-count`: Badge counter.
+    - `PUT /:id/read`: Mark single notification as read.
+    - `POST /read-all`: Mark all as read.
+    - `DELETE /:id`: Delete notification.
+    - `GET /preferences`: Get user notification preferences.
+    - `PUT /preferences`: Update user notification preferences.
+    - `POST /test`: Multi-channel test dispatch.
+- **Wiring & Integration**:
+  - Wired into `app.Modules` and `cmd/api/main.go`.
+- **Verification Suite**:
+  - `TestNotification_StormSuppressionAndRateLimiting`: PASS (0.00s) - verified 5m dedup window and 50/min per-user cap.
+  - `TestNotification_CRUDAndTenantIsolation`: PASS (0.96s) - verified zero tenant leak between User A and User B.
+  - `TestNotification_MultiChannelDispatch`: PASS (0.09s) - verified in-app, SMTP mock, and Webhook mock with HMAC signature.
+  - `TestNotification_HTTPRoutesAndRBAC`: PASS (0.13s) - verified 401 unauth, 403 on missing `notification.manage`, 200 OK on full perms.
+  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.01s) - audited all **408** unique routes across 5 principals cleanly.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
 
 

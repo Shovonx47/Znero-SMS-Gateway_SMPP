@@ -28,6 +28,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
 	"github.com/znero-international/znero/backend/internal/messaging"
 	"github.com/znero-international/znero/backend/internal/metrics"
+	"github.com/znero-international/znero/backend/internal/notification"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
@@ -78,6 +79,7 @@ type Modules struct {
 	CustomerEdge         *customeredge.EdgeHandler
 	HTTPProviderCallback *httpprovider.CallbackHandler
 	Analytics            *analytics.Handler
+	Notification         *notification.Handler
 	AuthMiddleware       fiber.Handler
 }
 
@@ -197,6 +199,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.Analytics != nil {
 		m.Analytics.Register(v1, m.AuthMiddleware)
+	}
+	if m.Notification != nil {
+		m.Notification.Register(v1, m.AuthMiddleware)
 	}
 	return app
 }

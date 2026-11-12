@@ -29,6 +29,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/operator"
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
 	"github.com/znero-international/znero/backend/internal/messaging"
+	"github.com/znero-international/znero/backend/internal/notification"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
@@ -102,6 +103,11 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 	edgeHandler := customeredge.NewEdgeHandler(edgeAuth, customeredge.NewCustomerLimiter(), msgSvc, msgRepo, ledgerSvc, rateSvc, kr, e.Pool)
 	edgeHandler.SetAllowLoopback("test", true)
 
+	analyticsSvc := analytics.NewService(analytics.NewRepository(e.Pool, logger), logger)
+	analyticsHandler := analytics.NewHandler(analyticsSvc)
+	liveHub := analytics.NewLiveHub(tokenMgr, analyticsSvc, logger)
+	analyticsHandler.SetLiveHub(liveHub)
+
 	mods := app.Modules{
 		Health:               health.NewHandler(health.NewService("test", time.Second, logger)),
 		System:               system.NewHandler(system.NewService(system.NewRepository(e.Pool), "test", "test")),
@@ -124,7 +130,8 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		Messaging:            messaging.NewHandler(msgSvc, reconcileSvc, nil, msgRepo),
 		CustomerEdge:         edgeHandler,
 		HTTPProviderCallback: httpCallback,
-		Analytics:            analytics.NewHandler(analytics.NewService(analytics.NewRepository(e.Pool, logger), logger)),
+		Analytics:            analyticsHandler,
+		Notification:         notification.NewHandler(notification.NewService(notification.NewRepository(e.Pool, logger), nil, nil, nil, logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 
@@ -306,6 +313,8 @@ func TestAuthzMatrix_AllRoutesAcrossFivePrincipals(t *testing.T) {
 		"POST /api/v1/auth/invitation/accept":               true,
 		"GET /api/v1/provider-callbacks/dlr/:connectionId":  true,
 		"POST /api/v1/provider-callbacks/dlr/:connectionId": true,
+		"GET /api/v1/ws/live":                               true,
+		"GET /api/v1/analytics/live/ws":                     true,
 	}
 
 	platformOnlyPathPrefixes := []string{

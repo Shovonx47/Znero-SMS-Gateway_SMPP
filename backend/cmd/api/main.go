@@ -37,6 +37,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/masterdata/prefix"
 	"github.com/znero-international/znero/backend/internal/messaging"
 	"github.com/znero-international/znero/backend/internal/metrics"
+	"github.com/znero-international/znero/backend/internal/notification"
 	"github.com/znero-international/znero/backend/internal/number"
 	"github.com/znero-international/znero/backend/internal/org"
 	"github.com/znero-international/znero/backend/internal/provider"
@@ -468,6 +469,12 @@ func run() error {
 		liveHub.Start(ctx)
 	}
 
+	notificationRepo := notification.NewRepository(pool, logger)
+	webhookSender := notification.NewHTTPWebhookSender(5 * time.Second)
+	suppressor := notification.NewStormSuppressor(5*time.Minute, 1*time.Minute, 50)
+	notificationSvc := notification.NewService(notificationRepo, nil, webhookSender, suppressor, logger)
+	notificationHandler := notification.NewHandler(notificationSvc)
+
 	var analyticsWorker *analytics.Worker
 	if runAnalytics {
 		workerCfg := analytics.DefaultWorkerConfig()
@@ -526,6 +533,7 @@ func run() error {
 			CustomerEdge:         edgeHandler,
 			HTTPProviderCallback: httpCallbackHandler,
 			Analytics:            analyticsHandler,
+			Notification:         notificationHandler,
 			AuthMiddleware:       authMiddleware,
 		}
 		diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
