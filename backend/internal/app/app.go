@@ -37,6 +37,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/rbac"
 	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/senderid"
+	"github.com/znero-international/znero/backend/internal/settings"
 	"github.com/znero-international/znero/backend/internal/system"
 	"github.com/znero-international/znero/backend/pkg/httpx"
 )
@@ -82,6 +83,7 @@ type Modules struct {
 	Analytics            *analytics.Handler
 	Notification         *notification.Handler
 	Alerting             *alerting.Handler
+	Settings             *settings.Handler
 	AuthMiddleware       fiber.Handler
 }
 
@@ -207,6 +209,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.Alerting != nil {
 		m.Alerting.Register(v1, m.AuthMiddleware)
+	}
+	if m.Settings != nil {
+		m.Settings.Register(v1, m.AuthMiddleware)
 	}
 	return app
 }

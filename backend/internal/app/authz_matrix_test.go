@@ -39,6 +39,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/routing"
 	"github.com/znero-international/znero/backend/internal/secrets"
 	"github.com/znero-international/znero/backend/internal/senderid"
+	"github.com/znero-international/znero/backend/internal/settings"
 	"github.com/znero-international/znero/backend/internal/system"
 	"github.com/znero-international/znero/backend/internal/testkit"
 	"github.com/znero-international/znero/backend/pkg/tokens"
@@ -134,6 +135,7 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		Analytics:            analyticsHandler,
 		Notification:         notification.NewHandler(notification.NewService(notification.NewRepository(e.Pool, logger), nil, nil, nil, logger)),
 		Alerting:             alerting.NewHandler(alerting.NewService(alerting.NewRepository(e.Pool, logger), alerting.NewEvaluator(alerting.NewMockMetricSource()), nil, logger)),
+		Settings:             settings.NewHandler(settings.NewService(settings.NewRepository(e.Pool, logger), e.Audit, logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 
@@ -354,6 +356,7 @@ func TestAuthzMatrix_AllRoutesAcrossFivePrincipals(t *testing.T) {
 			strings.HasPrefix(routePath, "/api/v1/operators") ||
 			strings.HasPrefix(routePath, "/api/v1/prefixes") ||
 			strings.HasPrefix(routePath, "/api/v1/number-rules") ||
+			strings.HasPrefix(routePath, "/api/v1/settings") ||
 			strings.HasPrefix(routePath, "/api/v1/rates/assignments")) {
 			return true
 		}
