@@ -148,3 +148,4 @@ Non-platform queries are not filtered in Go memory after fetching. Instead, the 
 - **NOC Live Telemetry Stream**: $p95 < 100\text{ms}$ refresh cycle.
 - **Rollup Processing Lag**: Under 60 seconds from event arrival to rollup table visibility.
 - **Zero Impact on Message Intake**: Rollup transactions run at `READ COMMITTED` or `REPEATABLE READ READ ONLY` against historical logs. They never acquire row-level locks on `messages`, `holds`, or `wallets`.
+

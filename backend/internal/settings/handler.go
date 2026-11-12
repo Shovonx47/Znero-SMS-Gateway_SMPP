@@ -109,4 +109,3 @@ func (h *Handler) resetSetting(c *fiber.Ctx) error {
 
 	return httpx.OK(c, fiber.Map{"status": "reset_to_default"})
 }
-

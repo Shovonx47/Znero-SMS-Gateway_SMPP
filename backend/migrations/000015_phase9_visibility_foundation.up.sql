@@ -358,3 +358,4 @@ BEGIN
         ALTER TABLE export_jobs OWNER TO znero_app;
     END IF;
 END $$;
+

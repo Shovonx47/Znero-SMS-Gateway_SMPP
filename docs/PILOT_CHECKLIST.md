@@ -66,3 +66,4 @@ This operational checklist must be followed by platform operators before routing
    - If error rate exceeds 2%, immediately trigger connection kill switch via admin dashboard.
    - Verify outbox safely diverts remaining traffic to secondary carrier route.
    - Run reconciliation job: `POST /api/v1/messaging/reconciliation/run` and verify `0` discrepancies.
+

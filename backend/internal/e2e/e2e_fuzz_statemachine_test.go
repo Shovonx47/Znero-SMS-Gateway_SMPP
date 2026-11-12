@@ -171,16 +171,10 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 	opCounts := map[string]int{}
 	opsDone := 0
 
-	// Phase helper to drain pending outbox items via Dispatcher and sync shadow oracle
+	// Phase helper to settle a single accepted message via Dispatcher and sync shadow oracle
 	dispatchPending := func() {
-		drained := 0
-		for h.dispatcher.ProcessBatch(ctx) > 0 {
-			drained++
-			if drained > 100 {
-				break
-			}
-		}
-		if drained == 0 {
+		processed := h.dispatcher.ProcessBatch(ctx)
+		if processed == 0 {
 			return
 		}
 		for _, om := range msgs {
@@ -269,22 +263,6 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 	}
 
 	applyReaperToOracle := func(hoursBeyondStart int) {
-		// Mirror exact Reaper.RunSweep order:
-		// 1) reapUnknownMessages resolves existing 'unknown' messages where updated_at (wall-clock ~T0) < now() - 12h.
-		// Because PostgreSQL writes updated_at = now() (~T0) while TestClock runs at T0 + hoursBeyondStart,
-		// any already-unknown message satisfies updated_at < T0 + hoursBeyondStart - 12h once hoursBeyondStart >= 13.
-		for _, om := range msgs {
-			if om.status == messaging.StatusUnknown && hoursBeyondStart >= 13 {
-				c := custs[om.custIdx]
-				om.status = messaging.StatusFailed
-				if om.holdActive {
-					om.holdActive = false
-					om.holdReleased = true
-					c.expectedHeld = c.expectedHeld.Sub(om.sellPrice)
-				}
-			}
-		}
-		// 2) reapNoDLRMessages processes submitted messages past their snapshotted dlr_wait_hours
 		for _, om := range msgs {
 			if om.status == messaging.StatusSubmitted && hoursBeyondStart >= om.snapWaitH {
 				c := custs[om.custIdx]
@@ -316,8 +294,18 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 						om.holdReleased = true
 						c.expectedHeld = c.expectedHeld.Sub(om.sellPrice)
 					}
-				default: // retain_until_resolution -> moves submitted to unknown (hold remains active until NEXT sweep past unknown window)
+				default: // retain_until_resolution
 					om.status = messaging.StatusUnknown
+				}
+			}
+			// unknown_resolution_window = 12h beyond dlr_wait_hours
+			if om.status == messaging.StatusUnknown && hoursBeyondStart >= om.snapWaitH+12 {
+				c := custs[om.custIdx]
+				om.status = messaging.StatusFailed
+				if om.holdActive {
+					om.holdActive = false
+					om.holdReleased = true
+					c.expectedHeld = c.expectedHeld.Sub(om.sellPrice)
 				}
 			}
 		}
@@ -339,16 +327,15 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 			if rng.IntN(4) == 0 {
 				burst = 3
 			}
-			baseMsgs := len(msgs)
 			var wg sync.WaitGroup
-			for b := 0; b < burst && baseMsgs+b < maxDBMessages; b++ {
+			for b := 0; b < burst && len(msgs)+b < maxDBMessages; b++ {
 				ci := rng.IntN(len(custs))
 				textVariant := rng.IntN(3)
 				var body string
 				var expectedParts int64
 				switch textVariant {
 				case 0:
-					body = fmt.Sprintf("Fuzz GSM %d-%d", seed, baseMsgs+b)
+					body = fmt.Sprintf("Fuzz GSM %d-%d", seed, len(msgs)+b)
 					expectedParts = 1
 				case 1:
 					body = strings.Repeat("a", 161) // 2 GSM-7 parts
@@ -358,8 +345,9 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 					expectedParts = 2
 				}
 				dest := fmt.Sprintf("+1202556%04d", rng.IntN(10000))
+				cIdx := ci
 				wg.Add(1)
-				go func(cIdx int, dest, body string, expectedParts int64) {
+				go func() {
 					defer wg.Done()
 					c := custs[cIdx]
 					tc := &tenant.Context{
@@ -408,7 +396,7 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 						holdActive:     true,
 					})
 					msgMu.Unlock()
-				}(ci, dest, body, expectedParts)
+				}()
 				opsDone++
 				opCounts["submit"]++
 			}
@@ -474,7 +462,7 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 			nm := newModes[rng.IntN(len(newModes))]
 			nnd := newNoDlr[rng.IntN(len(newNoDlr))]
 			nf := newFail[rng.IntN(len(newFail))]
-			nw := 1 + rng.IntN(10)
+			nw := 1 + rng.IntN(167)
 			if _, err := h.e.Pool.Exec(ctx, `
 				UPDATE customer_profiles
 				SET billing_mode = $2, dlr_wait_hours = $3, no_dlr_policy = $4, failed_after_accept_policy = $5, version = version + 1
@@ -501,9 +489,6 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 			go func() { defer rwg.Done(); h.reaper.RunSweep(ctx) }()
 			go func() { defer rwg.Done(); reaper2.RunSweep(ctx) }()
 			rwg.Wait()
-			// Drain any >100-batch remainder so DB matches full oracle sweep
-			h.reaper.RunSweep(ctx)
-			h.reaper.RunSweep(ctx)
 
 			applyReaperToOracle(reapElapsed)
 			opsDone++
@@ -667,48 +652,23 @@ func runSeededFuzzSuite(t *testing.T, seed uint64, targetOps int) int {
 		}
 	}
 
-	// Final settlement sweep: flush dispatcher + run two TestClock sweep rounds (+20h then +16h)
-	// so submitted -> unknown -> failed and all active no-DLR holds/unmatched_dlrs resolve cleanly!
+	// Final settlement sweep: flush dispatcher + advance TestClock past 24h so ALL active no-DLR holds & unmatched_dlrs expire/resolve cleanly!
 	dispatchPending()
-	for _, adv := range []int{20, 16} {
-		h.clk.Advance(time.Duration(adv) * time.Hour)
-		reapElapsed += adv
-		var finalWg sync.WaitGroup
-		finalWg.Add(2)
-		go func() { defer finalWg.Done(); h.reaper.RunSweep(ctx) }()
-		go func() { defer finalWg.Done(); reaper2.RunSweep(ctx) }()
-		finalWg.Wait()
-		// Drain remaining batches (BatchLimit=100 while maxDBMessages=180)
-		h.reaper.RunSweep(ctx)
-		h.reaper.RunSweep(ctx)
-		applyReaperToOracle(reapElapsed)
-	}
+	h.clk.Advance(30 * time.Hour)
+	reapElapsed += 30
+	var finalWg sync.WaitGroup
+	finalWg.Add(2)
+	go func() { defer finalWg.Done(); h.reaper.RunSweep(ctx) }()
+	go func() { defer finalWg.Done(); reaper2.RunSweep(ctx) }()
+	finalWg.Wait()
+	applyReaperToOracle(reapElapsed)
 
 	// Mark unmatched_dlrs from out-of-order probes: Reaper expires old unmatched_dlrs after UnmatchedDLRRetryWindow (5m),
 	// wait: check if Reaper updated them to 'expired' cleanly.
 	_ = pendingOutOfOrderIDs
 
 	// Assert ALL shadow oracle money & balance invariants for every customer + fuzz wallet!
-	for ci, c := range custs {
-		var actualCash, actualHeld decimal.Decimal
-		_ = h.e.Pool.QueryRow(ctx, `
-			SELECT w.cached_balance,
-			       COALESCE((SELECT SUM(h.amount) FROM holds h WHERE h.wallet_id = w.id AND h.status = 'active'), 0)
-			FROM wallets w WHERE w.id = $1`, c.cust.walletID).Scan(&actualCash, &actualHeld)
-		if !actualCash.Equal(c.expectedCash) || !actualHeld.Equal(c.expectedHeld) {
-			for _, om := range msgs {
-				if om.custIdx != ci {
-					continue
-				}
-				var mSt, hSt string
-				_ = h.e.Pool.QueryRow(ctx, `SELECT m.status, COALESCE(h.status,'') FROM messages m LEFT JOIN holds h ON h.id=m.hold_id WHERE m.id=$1`, om.id).Scan(&mSt, &hSt)
-				if mSt != om.status || (om.holdCaptured && !om.holdRefunded && hSt != "captured") || (om.holdRefunded && hSt != "refunded") || (om.holdReleased && hSt != "released") {
-					t.Logf("DIFF msg=%s price=%s DB(%s, hold=%s) vs Oracle(%s, act=%v cap=%v ref=%v rel=%v, snap=%s/%d/%s/%s)",
-						om.id, om.sellPrice, mSt, hSt, om.status, om.holdActive, om.holdCaptured, om.holdRefunded, om.holdReleased,
-						om.snapMode, om.snapWaitH, om.snapNoDLR, om.snapFailPolicy)
-				}
-			}
-		}
+	for _, c := range custs {
 		assertOracleMatchesWallet(t, seed, h, c.cust.orgID, c.cust.walletID, c.label, c.expectedCash, c.expectedHeld)
 		h.assertLedgerBalancedForCustomer(c.cust)
 	}

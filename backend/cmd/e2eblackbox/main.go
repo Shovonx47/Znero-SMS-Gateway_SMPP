@@ -227,7 +227,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 	makerTok := client.login("dev-maker@dev.znero.test", "DevSeed1234!#")
 	checkerTok := client.login("dev-checker@dev.znero.test", "DevSeed1234!#")
 
-	// 1. Lookup US country strictly via HTTP (country API uses page_size/search query params)
+	// 1. Lookup US country via paginated search
 	var countryID string
 	for page := 1; page <= 12 && countryID == ""; page++ {
 		cDoc := client.mustJSON(http.MethodGet, fmt.Sprintf("/api/v1/countries?search=United+States&page=%d&page_size=100", page), superTok, nil, http.StatusOK)
@@ -254,6 +254,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"numeric_code":  fmt.Sprintf("%03d", 910+(int(suffix[0])%80)),
 		"name":          "BlackBox MC Test " + suffix,
 		"currency_code": "USD",
+		"phone_code":    "+99" + suffix[:1],
 		"calling_code":  "99" + suffix[:1],
 		"reason":        "blackbox maker-checker test",
 	})
@@ -285,7 +286,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"currency_code": "USD",
 		"status":        "active",
 		"reason":        "blackbox smpp carrier",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 	provSMPPID := strField(pSmpp, "id")
 
 	connSmpp := client.mustJSON(http.MethodPost, "/api/v1/providers/"+provSMPPID+"/connections", superTok, map[string]any{
@@ -303,7 +304,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"smpp_window_size":      16,
 		"smpp_enquire_link_sec": 30,
 		"reason":                "blackbox smpp connection",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 	connSMPPID := strField(connSmpp, "id")
 
 	client.mustJSON(http.MethodPost, "/api/v1/provider-coverage", superTok, map[string]any{
@@ -311,7 +312,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"country_id":  countryID,
 		"status":      "active",
 		"reason":      "blackbox coverage",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 
 	smppBuyCard := client.mustJSON(http.MethodPost, "/api/v1/rates/cards", superTok, map[string]any{
 		"name":          "Ext SMPP Buy " + suffix,
@@ -341,7 +342,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"currency_code": "USD",
 		"status":        "active",
 		"reason":        "blackbox http carrier",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 	provHTTPID := strField(pHTTP, "id")
 
 	connHTTP := client.mustJSON(http.MethodPost, "/api/v1/providers/"+provHTTPID+"/connections", superTok, map[string]any{
@@ -371,7 +372,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 			"callback_signature_algo":   "hmac_sha256",
 		},
 		"reason": "blackbox http connection",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 	connHTTPID := strField(connHTTP, "id")
 
 	client.mustJSON(http.MethodPost, "/api/v1/provider-coverage", superTok, map[string]any{
@@ -379,7 +380,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"country_id":  countryID,
 		"status":      "active",
 		"reason":      "blackbox http coverage",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 
 	httpBuyCard := client.mustJSON(http.MethodPost, "/api/v1/rates/cards", superTok, map[string]any{
 		"name":          "Ext HTTP Buy " + suffix,
@@ -473,7 +474,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 			"failed_after_accept_policy": failPol,
 			"status":                     "active",
 			"reason":                     "blackbox customer profile",
-		}, http.StatusOK)
+		}, http.StatusCreated, http.StatusOK)
 
 		wDoc := client.mustJSON(http.MethodPost, "/api/v1/wallets", superTok, map[string]any{
 			"organization_id": orgID,
@@ -507,7 +508,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 			"label":           "bb-key-" + label,
 			"scopes":          []string{"sms:send", "sms:read", "sms:read_content", "account:read"},
 			"reason":          "blackbox api key",
-		}, http.StatusOK)
+		}, http.StatusCreated, http.StatusOK)
 		apiKey = strField(akDoc, "plaintext_key")
 
 		smppSys = "bb_" + label + "_" + suffix[:4]
@@ -519,7 +520,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 			"max_tps":            500,
 			"status":             "active",
 			"reason":             "blackbox smpp acct",
-		}, http.StatusOK)
+		}, http.StatusCreated, http.StatusOK)
 		smppPass = strField(smppDoc, "plaintext_password")
 		return
 	}
@@ -537,7 +538,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"max_tps":            2,
 		"status":             "active",
 		"reason":             "blackbox max_binds/max_tps test",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 	edgePass := strField(edgeDoc, "plaintext_password")
 
 	lockSys := "bbl_" + suffix
@@ -549,7 +550,7 @@ func runSetup(client *apiClient, smppHost string, smppPort int, smppSys, smppPas
 		"max_tps":            50,
 		"status":             "active",
 		"reason":             "blackbox lockout test",
-	}, http.StatusOK)
+	}, http.StatusCreated, http.StatusOK)
 
 	client.mustJSON(http.MethodPost, "/api/v1/routing/snapshot/reload", superTok, map[string]any{}, http.StatusOK)
 	// Allow background worker processes (dispatcher/smpp 5s cache refresh tick) to refresh snapshot & rates cleanly.

@@ -164,4 +164,3 @@ func (h *Handler) updateUserPreferences(c *fiber.Ctx) error {
 
 	return httpx.OK(c, pref)
 }
-

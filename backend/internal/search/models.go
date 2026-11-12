@@ -60,4 +60,3 @@ type UpdatePreferenceRequest struct {
 	Timezone        *string                 `json:"timezone,omitempty"`
 	DashboardLayout *map[string]interface{} `json:"dashboard_layout,omitempty"`
 }
-

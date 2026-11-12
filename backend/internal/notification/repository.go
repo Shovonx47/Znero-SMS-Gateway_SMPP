@@ -340,4 +340,3 @@ func (r *Repository) GetUserEmail(ctx context.Context, userID uuid.UUID) (string
 	}
 	return email, nil
 }
-

@@ -121,4 +121,3 @@ func (s *StormSuppressor) cleanupLocked(now time.Time) {
 		}
 	}
 }
-

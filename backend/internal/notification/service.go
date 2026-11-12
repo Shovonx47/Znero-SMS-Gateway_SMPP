@@ -200,4 +200,3 @@ func (s *Service) TestNotification(ctx context.Context, tc *tenant.Context) erro
 	}
 	return s.Dispatch(ctx, ev)
 }
-

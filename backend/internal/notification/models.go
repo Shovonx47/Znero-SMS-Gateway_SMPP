@@ -117,4 +117,3 @@ type UpdatePreferencesRequest struct {
 	WebhookURL     *string                       `json:"webhook_url,omitempty"`
 	Categories     map[string]CategoryPreference `json:"categories,omitempty"`
 }
-

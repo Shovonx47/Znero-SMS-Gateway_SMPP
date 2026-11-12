@@ -245,4 +245,3 @@ func VerifyWebhookSignature(secret, headerSig string, payload []byte) bool {
 	expected := ComputeWebhookSignature(secret, payload)
 	return hmac.Equal([]byte(strings.TrimSpace(headerSig)), []byte(expected))
 }
-

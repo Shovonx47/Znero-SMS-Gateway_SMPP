@@ -120,4 +120,3 @@ func (s *Service) UpdateUserPreferences(ctx context.Context, tc *tenant.Context,
 	}
 	return pref, nil
 }
-

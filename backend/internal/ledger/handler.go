@@ -580,9 +580,6 @@ func (h *Handler) GetReconciliation(c *fiber.Ctx) error {
 	if err != nil {
 		return h.mapError(c, err)
 	}
-	if reports == nil {
-		reports = []ReconciliationReport{}
-	}
 
 	return c.JSON(fiber.Map{"data": reports})
 }
@@ -601,9 +598,6 @@ func (h *Handler) RunReconciliation(c *fiber.Ctx) error {
 	reports, err := h.svc.ReconcileBalances(c.UserContext(), tc, req.Repair)
 	if err != nil {
 		return h.mapError(c, err)
-	}
-	if reports == nil {
-		reports = []ReconciliationReport{}
 	}
 
 	return c.JSON(fiber.Map{

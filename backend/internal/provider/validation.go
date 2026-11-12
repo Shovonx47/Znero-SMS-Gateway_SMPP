@@ -112,9 +112,6 @@ func ValidateHostSSRF(rawHost string, appEnv string, connStatus string) error {
 // allowLoopback is true and appEnv is NOT "production". Cloud metadata, RFC1918 private, and link-local
 // addresses are always rejected.
 func ValidateHostSSRFWithOptions(rawHost string, appEnv string, connStatus string, allowLoopback bool) error {
-	if err := validateRawHostSafety(rawHost); err != nil {
-		return err
-	}
 	loopbackAllowed := allowLoopback && !strings.EqualFold(strings.TrimSpace(appEnv), "production")
 
 	host := strings.TrimSpace(rawHost)
@@ -210,6 +207,9 @@ func ValidateHTTPBaseURLWithOptions(rawURL string, protocol string, appEnv strin
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("%w: http_base_url must use http or https scheme", ErrValidation)
+	}
+	if (!strings.EqualFold(appEnv, "development") || strings.EqualFold(connStatus, "production") || strings.EqualFold(connStatus, "active")) && scheme != "https" {
+		return fmt.Errorf("%w: active/production HTTP connections must use https://", ErrValidation)
 	}
 	if u.User != nil {
 		return fmt.Errorf("%w: http_base_url must not embed credentials in the URL", ErrValidation)

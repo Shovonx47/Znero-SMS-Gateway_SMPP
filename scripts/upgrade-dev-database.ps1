@@ -138,3 +138,4 @@ Write-Host "`n=== DATABASE UPGRADE COMPLETED SUCCESSFULLY ===" -ForegroundColor 
 if (Test-Path $backupFile) {
     Write-Host "Pre-upgrade backup preserved at: $backupFile" -ForegroundColor Gray
 }
+

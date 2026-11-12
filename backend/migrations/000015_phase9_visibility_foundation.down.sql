@@ -33,3 +33,4 @@ DELETE FROM permissions WHERE code IN (
     'incident.view', 'incident.manage',
     'setting.view', 'setting.manage'
 );
+

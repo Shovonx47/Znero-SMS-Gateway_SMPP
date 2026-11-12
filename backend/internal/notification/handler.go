@@ -196,4 +196,3 @@ func (h *Handler) testNotification(c *fiber.Ctx) error {
 		"message": "Test notification was sent across enabled channels",
 	})
 }
-
