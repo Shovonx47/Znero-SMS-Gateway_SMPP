@@ -207,6 +207,26 @@
   - `TestStage4_LiveHub_AuthTimeoutAndTenantIsolation`: PASS (6.56s) - verified 5s auth timeout kick, greeting frames, role-specific telemetry fanout, zero tenancy leaks.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
+## 2026-11-12 20:23 +06:00 — Phase 9 Stage 6: Alert Engine, Incidents, Insights Complete
+- **Documentation First (`docs/ALERTING.md`)**:
+  - Full specification of alert rules catalog, hysteresis, silence windows, incident state machine, and timeline audit rules.
+- **Alert & Incident Engine (`backend/internal/alerting/`)**:
+  - `models.go`: Alert rules, firing alerts, incidents, timeline entries, and strict state transition validator (`open -> investigating -> identified -> monitoring -> resolved`).
+  - `repository.go`: PostgreSQL operations for `alert_rules`, `alerts`, `incidents`, `incident_timeline` with pagination and filtering.
+  - `evaluator.go`: Metric evaluation engine supporting DB-backed telemetry and injectable `MockMetricSource` for testing.
+  - `service.go`: Rule evaluation loop, anti-flapping idempotency, auto-resolution on metric normalization, silence management, and incident declaration/transition with timeline logging.
+  - `handler.go`: Mounted under `/api/v1/alerts` and `/api/v1/incidents`:
+    - Alert rules CRUD, list alerts, silence alert, trigger manual evaluation.
+    - Declare incident, list incidents, get incident detail with timeline, transition incident status, add timeline entry.
+- **Wiring & Integration**:
+  - Wired into `app.Modules`, `cmd/api/main.go`, and connected to `notification.Service`.
+- **Verification Suite**:
+  - `TestAlertRuleLifecycleAndEvaluation`: PASS (0.08s) - verified rule creation, breach detection, anti-flapping idempotency, silencing, and auto-resolution.
+  - `TestIncidentStateMachineAndTimeline`: PASS (0.06s) - verified invalid transition rejection (`open -> resolved` fails), full lifecycle transition, root cause recording, and ordered timeline entries.
+  - `TestAlertingAndIncidents_RBACAndTenantIsolation`: PASS (0.06s) - verified customer receives 403 Forbidden on platform alerts and incidents.
+  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (5.32s) - audited all **420** unique routes across 5 principals cleanly.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
 ## 2026-11-12 20:07 +06:00 — Phase 9 Stage 5: Notification Center Complete
 - **Multi-Channel Delivery & Storm Protection (`backend/internal/notification/`)**:
   - `models.go`: Notification schemas, category preferences, and dispatch events.
@@ -231,6 +251,26 @@
   - `TestNotification_MultiChannelDispatch`: PASS (0.09s) - verified in-app, SMTP mock, and Webhook mock with HMAC signature.
   - `TestNotification_HTTPRoutesAndRBAC`: PASS (0.13s) - verified 401 unauth, 403 on missing `notification.manage`, 200 OK on full perms.
   - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (4.01s) - audited all **408** unique routes across 5 principals cleanly.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
+
+## 2026-11-12 20:23 +06:00 — Phase 9 Stage 6: Alert Engine, Incidents, Insights Complete
+- **Documentation First (`docs/ALERTING.md`)**:
+  - Full specification of alert rules catalog, hysteresis, silence windows, incident state machine, and timeline audit rules.
+- **Alert & Incident Engine (`backend/internal/alerting/`)**:
+  - `models.go`: Alert rules, firing alerts, incidents, timeline entries, and strict state transition validator (`open -> investigating -> identified -> monitoring -> resolved`).
+  - `repository.go`: PostgreSQL operations for `alert_rules`, `alerts`, `incidents`, `incident_timeline` with pagination and filtering.
+  - `evaluator.go`: Metric evaluation engine supporting DB-backed telemetry and injectable `MockMetricSource` for testing.
+  - `service.go`: Rule evaluation loop, anti-flapping idempotency, auto-resolution on metric normalization, silence management, and incident declaration/transition with timeline logging.
+  - `handler.go`: Mounted under `/api/v1/alerts` and `/api/v1/incidents`:
+    - Alert rules CRUD, list alerts, silence alert, trigger manual evaluation.
+    - Declare incident, list incidents, get incident detail with timeline, transition incident status, add timeline entry.
+- **Wiring & Integration**:
+  - Wired into `app.Modules`, `cmd/api/main.go`, and connected to `notification.Service`.
+- **Verification Suite**:
+  - `TestAlertRuleLifecycleAndEvaluation`: PASS (0.08s) - verified rule creation, breach detection, anti-flapping idempotency, silencing, and auto-resolution.
+  - `TestIncidentStateMachineAndTimeline`: PASS (0.06s) - verified invalid transition rejection (`open -> resolved` fails), full lifecycle transition, root cause recording, and ordered timeline entries.
+  - `TestAlertingAndIncidents_RBACAndTenantIsolation`: PASS (0.06s) - verified customer receives 403 Forbidden on platform alerts and incidents.
+  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (5.32s) - audited all **420** unique routes across 5 principals cleanly.
   - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).
 
 

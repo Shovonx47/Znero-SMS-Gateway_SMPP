@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/znero-international/znero/backend/internal/alerting"
 	"github.com/znero-international/znero/backend/internal/analytics"
 	"github.com/znero-international/znero/backend/internal/app"
 	"github.com/znero-international/znero/backend/internal/audit"
@@ -475,6 +476,11 @@ func run() error {
 	notificationSvc := notification.NewService(notificationRepo, nil, webhookSender, suppressor, logger)
 	notificationHandler := notification.NewHandler(notificationSvc)
 
+	alertingRepo := alerting.NewRepository(pool, logger)
+	alertEvaluator := alerting.NewEvaluator(alerting.NewDBMetricSource(pool))
+	alertingSvc := alerting.NewService(alertingRepo, alertEvaluator, notificationSvc, logger)
+	alertingHandler := alerting.NewHandler(alertingSvc)
+
 	var analyticsWorker *analytics.Worker
 	if runAnalytics {
 		workerCfg := analytics.DefaultWorkerConfig()
@@ -534,6 +540,7 @@ func run() error {
 			HTTPProviderCallback: httpCallbackHandler,
 			Analytics:            analyticsHandler,
 			Notification:         notificationHandler,
+			Alerting:             alertingHandler,
 			AuthMiddleware:       authMiddleware,
 		}
 		diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)

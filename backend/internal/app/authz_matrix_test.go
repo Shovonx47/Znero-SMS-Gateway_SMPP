@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/znero-international/znero/backend/internal/alerting"
 	"github.com/znero-international/znero/backend/internal/analytics"
 	"github.com/znero-international/znero/backend/internal/app"
 	"github.com/znero-international/znero/backend/internal/auth"
@@ -132,6 +133,7 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		HTTPProviderCallback: httpCallback,
 		Analytics:            analyticsHandler,
 		Notification:         notification.NewHandler(notification.NewService(notification.NewRepository(e.Pool, logger), nil, nil, nil, logger)),
+		Alerting:             alerting.NewHandler(alerting.NewService(alerting.NewRepository(e.Pool, logger), alerting.NewEvaluator(alerting.NewMockMetricSource()), nil, logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 
@@ -335,6 +337,8 @@ func TestAuthzMatrix_AllRoutesAcrossFivePrincipals(t *testing.T) {
 		"/api/v1/messaging/customer/sessions",
 		"/api/v1/messaging/inbound/numbers",
 		"/api/v1/messaging/webhooks",
+		"/api/v1/alerts",
+		"/api/v1/incidents",
 	}
 
 	isPlatformOnlyRoute := func(method, routePath string) bool {
