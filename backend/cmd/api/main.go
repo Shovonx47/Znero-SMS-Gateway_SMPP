@@ -28,6 +28,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/customer"
 	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/diagnostics"
+	"github.com/znero-international/znero/backend/internal/export"
 	"github.com/znero-international/znero/backend/internal/health"
 	"github.com/znero-international/znero/backend/internal/httpprovider"
 	"github.com/znero-international/znero/backend/internal/ledger"
@@ -491,6 +492,10 @@ func run() error {
 	searchSvc := search.NewService(searchRepo, logger)
 	searchHandler := search.NewHandler(searchSvc)
 
+	exportRepo := export.NewRepository(pool, logger)
+	exportSvc := export.NewService(exportRepo, "", logger)
+	exportHandler := export.NewHandler(exportSvc)
+
 	var analyticsWorker *analytics.Worker
 	if runAnalytics {
 		workerCfg := analytics.DefaultWorkerConfig()
@@ -553,6 +558,7 @@ func run() error {
 			Alerting:             alertingHandler,
 			Settings:             settingsHandler,
 			Search:               searchHandler,
+			Export:               exportHandler,
 			AuthMiddleware:       authMiddleware,
 		}
 		diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)

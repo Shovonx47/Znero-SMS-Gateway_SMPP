@@ -21,6 +21,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/config"
 	"github.com/znero-international/znero/backend/internal/customer"
 	"github.com/znero-international/znero/backend/internal/customeredge"
+	"github.com/znero-international/znero/backend/internal/export"
 	"github.com/znero-international/znero/backend/internal/health"
 	"github.com/znero-international/znero/backend/internal/httpprovider"
 	"github.com/znero-international/znero/backend/internal/ledger"
@@ -138,6 +139,7 @@ func buildFullHTTPApp(t *testing.T, e *testkit.Env, tokenMgr *tokens.TokenManage
 		Alerting:             alerting.NewHandler(alerting.NewService(alerting.NewRepository(e.Pool, logger), alerting.NewEvaluator(alerting.NewMockMetricSource()), nil, logger)),
 		Settings:             settings.NewHandler(settings.NewService(settings.NewRepository(e.Pool, logger), e.Audit, logger)),
 		Search:               search.NewHandler(search.NewService(search.NewRepository(e.Pool, logger), logger)),
+		Export:               export.NewHandler(export.NewService(export.NewRepository(e.Pool, logger), "", logger)),
 		AuthMiddleware:       auth.Authenticate(tokenMgr, authRepo, orgRepo),
 	}
 

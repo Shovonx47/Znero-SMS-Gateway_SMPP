@@ -293,3 +293,26 @@
 
 
 
+
+## 2026-11-12 21:30 +06:00 — Phase 9 Stage 9: Export Center & Scheduled Reports Complete
+- **Export Engine (`backend/internal/export/`)**:
+  - `models.go`: Export types (`messages`, `delivery_report`, `financial_report`), formats (`csv`, `json`, `xlsx`), statuses (`pending`, `processing`, `completed`, `failed`), and formula injection sanitizer `SanitizeCSVCell` (neutralizes `=`, `+`, `-`, `@`, `\t`, `\r` and leading whitespace).
+  - `generator.go`: Format generators for CSV (`encoding/csv`), JSON (`encoding/json`), and XLSX (`github.com/xuri/excelize/v2`) with formula injection protection across all cells.
+  - `repository.go`: Async `export_jobs` table CRUD, query runners with strict tenant isolation:
+    - Non-platform customer/reseller exports strictly strip provider IDs, connection IDs, buy costs, and gross margins.
+    - Platform admin exports include full provider metrics and buy costs.
+  - `service.go`: Asynchronous job submission (HTTP 202 Accepted), background processing with panic recovery, progress updates, safe disk storage under `tmp/exports/`, file lifetime expiration (24h), and download streaming.
+  - `handler.go`: Mounted under `/api/v1/exports`:
+    - `POST /`: Submit export job (`analytics.export.create`).
+    - `GET /`: List tenant export jobs (`analytics.export.view`).
+    - `GET /:id`: Inspect export job status (`analytics.export.view`).
+    - `GET /:id/download`: Download generated report file (`analytics.export.view`).
+- **Wiring & Integration**:
+  - Wired into `app.Modules`, `cmd/api/main.go`, and `authz_matrix_test.go`.
+- **Verification Suite**:
+  - `TestStage9_FormulaInjectionSanitization`: PASS (0.02s) - verified command execution payloads (`=cmd|' /C calc'!A0`, `@SUM`, `+1234`, `-9876`, whitespace prefixed) are neutralized in both CSV and XLSX output.
+  - `TestStage9_ExportAsyncWorkflowAndFormats`: PASS (0.14s) - verified full async lifecycle (pending -> processing -> completed) and file generation for CSV, JSON, and XLSX.
+  - `TestStage9_TenantIsolation`: PASS (0.17s) - verified customer cannot read or download other tenants' jobs (403 Forbidden / ErrUnauthorizedTenant); verified customer message export completely lacks provider IDs and buy costs (zero financial/provider leak).
+  - `TestStage9_HTTPRoutesAndRBAC`: PASS (0.28s) - verified HTTP status codes (202 Accepted on submit, 200 on list/get, 400 on downloading pending, 404 on missing, 200 on completed download).
+  - `TestAuthzMatrix_AllRoutesAcrossFivePrincipals`: PASS (5.98s) - audited all **435** unique routes across 5 principals cleanly.
+  - Linters & Compilers: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors), `npx tsc --noEmit` (0 errors).

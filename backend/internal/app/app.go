@@ -19,6 +19,7 @@ import (
 	"github.com/znero-international/znero/backend/internal/customer"
 	"github.com/znero-international/znero/backend/internal/customeredge"
 	"github.com/znero-international/znero/backend/internal/diagnostics"
+	"github.com/znero-international/znero/backend/internal/export"
 	"github.com/znero-international/znero/backend/internal/health"
 	"github.com/znero-international/znero/backend/internal/httpprovider"
 	"github.com/znero-international/znero/backend/internal/ledger"
@@ -86,6 +87,7 @@ type Modules struct {
 	Alerting             *alerting.Handler
 	Settings             *settings.Handler
 	Search               *search.Handler
+	Export               *export.Handler
 	AuthMiddleware       fiber.Handler
 }
 
@@ -217,6 +219,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.Search != nil {
 		m.Search.Register(v1, m.AuthMiddleware)
+	}
+	if m.Export != nil {
+		m.Export.Register(v1, m.AuthMiddleware)
 	}
 	return app
 }
