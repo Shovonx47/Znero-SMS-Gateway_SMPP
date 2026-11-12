@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/znero-international/znero/backend/internal/analytics"
 	"github.com/znero-international/znero/backend/internal/app"
 	"github.com/znero-international/znero/backend/internal/audit"
 	"github.com/znero-international/znero/backend/internal/auth"
@@ -75,7 +76,7 @@ func isLoopbackBindAddr(addr string) bool {
 }
 
 func run() error {
-	roleFlag := flag.String("role", "", "Process role: all|api|smpp|dispatcher|reaper|webhook|poller (or ZNERO_ROLE)")
+	roleFlag := flag.String("role", "", "Process role: all|api|smpp|dispatcher|reaper|webhook|poller|analytics (or ZNERO_ROLE)")
 	pprofFlag := flag.String("pprof-addr", "", "Optional loopback-only pprof bind address (e.g. 127.0.0.1:6060)")
 	flag.Parse()
 
@@ -87,9 +88,9 @@ func run() error {
 		role = "all"
 	}
 	switch role {
-	case "all", "api", "smpp", "dispatcher", "reaper", "webhook", "poller":
+	case "all", "api", "smpp", "dispatcher", "reaper", "webhook", "poller", "analytics":
 	default:
-		return fmt.Errorf("invalid -role %q (allowed: all, api, smpp, dispatcher, reaper, webhook, poller)", role)
+		return fmt.Errorf("invalid -role %q (allowed: all, api, smpp, dispatcher, reaper, webhook, poller, analytics)", role)
 	}
 
 	pprofAddr := strings.TrimSpace(*pprofFlag)
@@ -335,6 +336,7 @@ func run() error {
 	runReaper := role == "all" || role == "reaper"
 	runWebhook := role == "all" || role == "webhook"
 	runPoller := role == "all" || role == "poller"
+	runAnalytics := role == "all" || role == "analytics"
 
 	if runDispatcher {
 		smppMgr.StartMetricsPersister(ctx, 5*time.Second)
@@ -457,6 +459,20 @@ func run() error {
 		whDispatcher.Start(ctx)
 	}
 
+	analyticsRepo := analytics.NewRepository(pool, logger)
+	analyticsSvc := analytics.NewService(analyticsRepo, logger)
+	analyticsHandler := analytics.NewHandler(analyticsSvc)
+
+	var analyticsWorker *analytics.Worker
+	if runAnalytics {
+		workerCfg := analytics.DefaultWorkerConfig()
+		if cfg.IsDevelopment() || cfg.Env == config.EnvTest {
+			workerCfg.PollInterval = 500 * time.Millisecond
+		}
+		analyticsWorker = analytics.NewWorker(pool, analyticsRepo, workerCfg, logger)
+		analyticsWorker.Start(ctx)
+	}
+
 	// Keep routing/rating caches synchronized across multi-process deployments.
 	if runHTTP || runSMPP || runDispatcher {
 		reloadInterval := 60 * time.Second
@@ -504,6 +520,7 @@ func run() error {
 			Messaging:            messagingHandler,
 			CustomerEdge:         edgeHandler,
 			HTTPProviderCallback: httpCallbackHandler,
+			Analytics:            analyticsHandler,
 			AuthMiddleware:       authMiddleware,
 		}
 		diagSvc := diagnostics.NewService(kc, cfg.Kafka.TestTopic, cfg.Kafka.RequestTimeout, logger)
@@ -580,6 +597,9 @@ func run() error {
 	}
 	if whDispatcher != nil {
 		whDispatcher.Stop()
+	}
+	if analyticsWorker != nil {
+		analyticsWorker.Stop()
 	}
 	if smppServer != nil {
 		smppServer.Stop()

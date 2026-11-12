@@ -19,6 +19,8 @@ var platformOnlyPrefixes = []string{
 	"message.platform.",     // provider identity, buy cost, outbox/reaper mgmt (Phase 8A)
 	"customer.smppsession.", // platform live SMPP session view & force disconnect (Phase 8B)
 	"inbound.number.",       // virtual longcode/shortcode inventory management (Phase 8B)
+	"alert.",                // system alert rules and firing alerts (Phase 9)
+	"incident.",             // platform incidents and incident timeline (Phase 9)
 }
 
 // readOnlyForNonPlatform lists the namespaces where non-platform organizations may hold the
@@ -53,6 +55,8 @@ var platformOnlyExact = map[string]bool{
 	"message.queue.view":         true,
 	"message.reconcile":          true,
 	"system.info.view":           true,
+	"analytics.noc.view":         true,
+	"setting.manage":             true,
 }
 
 // customerForbiddenCodes lists permissions that a customer organization (orgType == "customer")

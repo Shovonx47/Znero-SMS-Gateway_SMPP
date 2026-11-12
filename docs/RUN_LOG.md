@@ -153,3 +153,25 @@
   5. Dedicated runtime role `-role=analytics` with PostgreSQL advisory lock `pg_try_advisory_lock(8899001)`.
   6. Multi-tenant SQL projection boundaries: Strict server-side projection separation.
 
+## 2026-11-12 19:17 +06:00 — Phase 9 Stage 2: Data Foundation & Rollup Engine Complete
+- **Migration 000015 (`000015_phase9_visibility_foundation.up.sql` & `.down.sql`)**:
+  - Implemented `analytics_cursors` (high-water mark durability).
+  - Implemented partitioned 15-minute rollup fact tables: `analytics_rollup_customer_15m`, `analytics_rollup_provider_15m` (platform-only), and `analytics_rollup_destination_15m` with monthly partitions (`2026_11`, `2026_12`, `2027_01`, `default`).
+  - Added operational & visibility tables: `service_heartbeats`, `notifications`, `notification_preferences`, `alert_rules`, `alerts`, `incidents`, `incident_timeline`, `settings_registry`, `saved_filters`, `user_preferences`, and `export_jobs`.
+  - Registered Phase 9 permissions with strict RBAC (`platformOnlyPrefixes` updated with `alert.`, `incident.`, and `platformOnlyExact` updated with `analytics.noc.view`, `setting.manage`).
+  - Verified `000015` up/down/reapply in `migrations_test.go` (`4.43s` PASS) and 100% `znero_app` ownership on `znero_test` (`15|f`).
+- **Rollup Engine Implementation (`backend/internal/analytics/`)**:
+  - `models.go`: Typed domain models for rollups, heartbeats, filters, and dashboard projections.
+  - `histogram.go`: Fixed-boundary latency histogram with percentile linear interpolation (p50, p95, p99).
+  - `repository.go`: Atomic cursor lock + event stream ingestion from `message_events` + joined `messages`, upserting into 15m rollups with exactly-once cursor advance in a single transaction. E.164 country resolution via libphonenumber. Time series queries realigned across arbitrary timezones.
+  - `worker.go`: Background rollup loop protected by PostgreSQL session advisory lock `pg_try_advisory_lock(8899001)`, with automatic leader election and standby backoff.
+  - `service.go`: Tenant boundary sanitization, 2-second broadcast cache for O(1) live view queries, and server-side stripping of platform-only cost/margin for non-platform users.
+  - `handler.go`: Fiber routes mounted under `/api/v1/analytics/`.
+- **Process Orchestration & Wiring**:
+  - Added `-role=analytics` to `backend/cmd/api/main.go` and wired `Analytics` module into `app.Modules`.
+  - Added `znero-analytics` component to `scripts/dev-up.ps1` and `scripts/dev-down.ps1`.
+- **Verification Suite**:
+  - `internal/analytics`: 6/6 tests PASS (`TestLatencyHistogram`, `TestResolveCountryISO`, `TestAnalyticsEngine_DifferentialAndTieOut`, `TestAnalyticsTimezoneRealignment`, `TestAnalyticsWorkerAdvisoryLock`, `TestAnalyticsCrashAndResumeCursor`).
+  - Linter & Compiler: `go build ./...` (0 errors), `go vet ./...` (0 errors), `gofmt -l .` (clean), `golangci-lint run ./...` (0 issues), `npm run check` (0 errors, 0 warnings), `npx tsc --noEmit` (0 errors).
+
+

@@ -134,6 +134,7 @@ Start-TrackedComponent -Name 'znero-dispatcher' -FilePath $zneroExe -ArgumentLis
 Start-TrackedComponent -Name 'znero-reaper'     -FilePath $zneroExe -ArgumentList @('-role=reaper')                    -Endpoint 'sweep-worker' | Out-Null
 Start-TrackedComponent -Name 'znero-webhook'    -FilePath $zneroExe -ArgumentList @('-role=webhook')                   -Endpoint 'webhook-worker' | Out-Null
 Start-TrackedComponent -Name 'znero-poller'     -FilePath $zneroExe -ArgumentList @('-role=poller')                    -Endpoint 'http-dlr-poller' | Out-Null
+Start-TrackedComponent -Name 'znero-analytics'  -FilePath $zneroExe -ArgumentList @('-role=analytics')                 -Endpoint 'rollup-worker' | Out-Null
 
 if (-not $NoFrontend) {
     Assert-Command 'node' 'Install Node.js LTS.'

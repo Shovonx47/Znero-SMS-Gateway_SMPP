@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"github.com/znero-international/znero/backend/internal/analytics"
 	"github.com/znero-international/znero/backend/internal/audit"
 	"github.com/znero-international/znero/backend/internal/auth"
 	"github.com/znero-international/znero/backend/internal/billing"
@@ -76,6 +77,7 @@ type Modules struct {
 	Messaging            *messaging.Handler
 	CustomerEdge         *customeredge.EdgeHandler
 	HTTPProviderCallback *httpprovider.CallbackHandler
+	Analytics            *analytics.Handler
 	AuthMiddleware       fiber.Handler
 }
 
@@ -192,6 +194,9 @@ func NewHTTP(cfg *config.Config, logger *slog.Logger, m Modules) *fiber.App {
 	}
 	if m.HTTPProviderCallback != nil {
 		m.HTTPProviderCallback.Register(v1)
+	}
+	if m.Analytics != nil {
+		m.Analytics.Register(v1, m.AuthMiddleware)
 	}
 	return app
 }
